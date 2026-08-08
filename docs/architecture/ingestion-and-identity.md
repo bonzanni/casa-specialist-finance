@@ -32,35 +32,53 @@ Nothing else writes transactions.
 5. **Matching is deterministic, and every heuristic decision is recorded** on the row it
    produced.
 
-## Rule 1 is currently inert — a known limitation
+## Rule 1 trust is earned, per account, from local evidence
 
-Reference-based identity depends on a per-bank capability record saying that this bank's
-references have been observed stable. **No such record ships, and no shipped tool earns
-one.** `capability()` reads the `aspsp_capability` table, which starts empty and which
-nothing in the product writes; an absent row reads as untrusted, so identity falls
-through to rule 2 — heuristic windowed matching.
+Reference-based identity depends on a record saying that this account's provider has
+been observed to supply stable references. **No such record ships.** A fresh install
+trusts nothing and every reconcile is heuristic windowed matching, until the
+installation earns trust on its own accounts:
 
-The table is a real table, not a stub: `set_capability()` exists, and a row put there by
-hand, or one surviving in an old database that the version 5 migration did not match,
-*would* be honoured. So the accurate statement is that reference identity is inert in
-any installation that has not been given a capability row from outside the product.
+- **Evidence is measured before every reconcile.** `measure_references()` reduces a
+  completed run's fetched rows to aggregate metrics — distinct referenced
+  *transactions* (restatements collapse, so fifty copies of one row are one
+  transaction), reference reuse (one reference on more than one transaction — the
+  standing-order shape), and the span the referenced transactions cover.
+- **Only a labelled deep run can grant.** The two fresh-SCA backfills (first link,
+  renewal) file a `deep` observation; a qualifying one needs at least 100 distinct
+  referenced transactions spanning at least 180 days with zero measured reuse. The
+  span floor is what makes silence meaningful: 180 days contains every monthly
+  recurrence at least six times, so recurrence reuse cannot hide outside the sample.
+  A narrow routine refresh can never grant — but *any* completed run that measures
+  reuse files a `reuse_event`, because sample size bounds what silence proves, never
+  what a sighting proves.
+- **Trust is derived at read time**, per `(bank, account)`, from the append-only
+  `ref_observations` table: one qualifying observation and no reuse sighting. There is
+  no cached verdict to drift, and no manual switch — the old `capability()` writer is
+  gone, because a trust claim an operator cannot trace to an observation is exactly
+  what the removed seeder was.
+- **A run that measures reuse reconciles untrusted itself**, files the sighting in the
+  same transaction that applies its plan, and the withdrawal is disclosed on the sync
+  note line. Rows already matched by reference keep their recorded match method: those
+  labels are true statements about how the row was matched at the time, and rewriting
+  committed identity on a later opinion is the history rewrite this module refuses
+  everywhere. A plan built under trust is revalidated inside the apply transaction and
+  rebuilt heuristically if a concurrent run demoted the account in between.
+- **Erasure follows the account.** `forget_local_account` and `delete_all_data` take
+  the evidence with them; `purge` retains it and says so — the evidence describes the
+  bank's behaviour, not the purged rows. Because an account's id is a deterministic
+  HMAC of IBAN and currency, each account life carries a random *incarnation* token,
+  and an evidence write requires the token its run captured — a run paused across a
+  forget-and-relink cannot attach stale evidence to the account's new life.
 
-This is deliberate, not an oversight. An earlier version seeded the capability table at
-database open with one installation's measurements, which made one household's account
-statistics every installation's trust defaults. That seeder is gone, and schema version
-5 **retires** rows it previously wrote: removing the seed from the source would
-otherwise have left the figures sitting in every already-deployed database.
-
-Retirement moves rows into a separate table rather than deleting them, because the rows
-can only be recognised from their provenance text and no text predicate is exact — a
-local note deliberately shaped like the seed's would match. Moving makes over-matching
-recoverable, which is what makes it the safe direction to err in. Nothing reads the
-retired table; `capability()` looks only at the live one.
-
-Earning trust locally — what counts as an observation, how observations aggregate across
-accounts at one bank, what threshold is enough, how trust is demoted, and what happens
-to rows already ingested under it — is designed but not built. It is tracked as **issue
-#1** on this repository.
+This replaced a seeder that wrote one installation's measurements into every
+installation's database at open. Schema version 5 **retires** rows that seeder wrote,
+and version 6 retires everything else still resident in the old per-bank table — under
+the earned model any per-bank row is an observation-free trust claim. Retirement moves
+rows into a separate table rather than deleting them, because the seeded rows can only
+be recognised from their provenance text and no text predicate is exact. Moving makes
+over-matching recoverable, which is what makes it the safe direction to err in.
+Nothing reads the retired table.
 
 ## Coverage: the difference between "nothing happened" and "we do not know"
 
@@ -115,7 +133,7 @@ never a binary float. Sums are per currency and are never converted.
 
 ## The schema
 
-SQLite, forward-only migrations, currently version 5. `open_db()` applies migrations,
+SQLite, forward-only migrations, currently version 6. `open_db()` applies migrations,
 checks the file modes, and refuses a pre-existing symlink at the database or sidecar
 paths — those checks are part of opening the database rather than something applied
 afterwards. They detect an existing symlink; they are not symlink-race safe, and the
@@ -132,8 +150,9 @@ code says so where it matters.
 | `occurrence_alloc` | the durable high-water mark rule 4 depends on |
 | `coverage` | disjoint observed intervals per account |
 | `sync_state` | per account and resource, the last successful refresh |
-| `aspsp_capability` | per-bank reference behaviour; no row ships |
-| `aspsp_capability_retired` | rows the version 5 migration took out, kept verbatim |
+| `ref_observations` | append-only reference evidence per account; trust derives from it |
+| `aspsp_capability` | the retired per-bank model; empty, nothing reads or writes it |
+| `aspsp_capability_retired` | rows the version 5 and 6 migrations took out, kept verbatim |
 | `attempts` | our half of the callback contract |
 | `transaction_tags`, `transaction_notes`, `notes_fts` | annotations and their index |
 | `tag_rules` | the deterministic auto-tagging rulebook |

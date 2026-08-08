@@ -19,16 +19,25 @@ TODAY = dt.date(2026, 8, 3)
 IBAN_R = "NL00REVO0000000001"
 IBAN_R2 = "NL00REVO0000000005"
 IBAN_A = "NL00ABNA0000000002"
-def observe(conn, aspsp="Revolut", n=100):
-    """Record a local observation of `aspsp`'s reference behaviour.
+def observe(conn, aspsp="Revolut", n=150, account_id="acc1"):
+    """Record a QUALIFYING deep observation for `account_id` under `aspsp`.
 
     Nothing is trusted until this installation observes it, so a test that
-    needs the reference-as-identity path has to write the row itself. The
-    figure is the test's own; no capability value ships.
+    needs the reference-as-identity path has to write the evidence itself.
+    The figures are the test's own -- comfortably above the qualifying
+    floors, zero measured reuse -- and no capability value ships. A direct
+    INSERT rather than provenance.record_observation, deliberately: the
+    writer's incarnation guard is under test elsewhere, and a setup helper
+    that needs the account row to exist first would force every test class
+    into one creation order.
     """
-    provenance.set_capability(conn, aspsp, ref_stable=True,
-                              ref_scope="account", observed_n=n,
-                              provenance="observed locally by this test")
+    conn.execute(
+        "INSERT INTO ref_observations(account_id, aspsp, session_id, kind,"
+        " source, observed_at, window_days, rows_total, ref_transactions,"
+        " distinct_refs, reused_refs, span_days)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (account_id, provenance._norm(aspsp), "s-observe", "deep", "",
+         "2026-08-01T00:00:00Z", flows.BACKFILL_FLOOR_DAYS, n, n, n, 0, 400))
 
 
 #: Deliberately WITHOUT an "aspsp" key: the bank name is read from the account
@@ -444,6 +453,197 @@ class TestBackfill(unittest.TestCase):
         self.assertEqual(seen["capability"]["ref_scope"], "account")
         self.assertIsNone(self._sync()["last_error"])
 
+    def _observations(self):
+        return [dict(zip(("kind", "source", "window_days", "rows_total",
+                          "ref_transactions", "reused_refs", "span_days"), r))
+                for r in self.conn.execute(
+                    "SELECT kind, source, window_days, rows_total,"
+                    " ref_transactions, reused_refs, span_days"
+                    " FROM ref_observations WHERE account_id='acc1'"
+                    " AND session_id != 's-observe' ORDER BY obs_id")]
+
+    def test_a_labelled_deep_run_files_exactly_one_deep_observation(self):
+        flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1"),
+                                  raw_tx("2026-08-01", ref="R2",
+                                         remittance="huur")], None)]),
+                       self.conn, ACCOUNT, "s1", observe=True)
+        got = self._observations()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["kind"], "deep")
+        self.assertEqual(got[0]["rows_total"], 2)
+        self.assertEqual(got[0]["ref_transactions"], 2)
+        self.assertEqual(got[0]["reused_refs"], 0)
+
+    def test_a_zero_row_deep_run_still_files_its_observation(self):
+        # "Measured, and nothing" is a different fact from "never measured".
+        flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
+                       observe=True)
+        got = self._observations()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["rows_total"], 0)
+
+    def test_a_narrow_run_files_nothing_without_reuse(self):
+        flows.backfill(FakeAIS([([raw_tx("2026-08-01", ref="R1")], None)]),
+                       self.conn, ACCOUNT, "s1", floor_days=9)
+        self.assertEqual(self._observations(), [])
+
+    def test_a_capped_run_files_nothing(self):
+        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", observe=True)
+        self.assertEqual(self._observations(), [])
+
+    def test_a_failed_run_files_nothing(self):
+        with self.assertRaises(OSError):
+            flows.backfill(BrokenAIS(), self.conn, ACCOUNT, "s1",
+                           observe=True)
+        self.assertEqual(self._observations(), [])
+
+    def test_the_deep_observation_label_refuses_a_narrow_window(self):
+        with self.assertRaises(ValueError):
+            flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
+                           floor_days=9, observe=True)
+
+    def test_trust_is_earned_end_to_end_and_disclosed(self):
+        # A fresh account (no observe() fixture): one completed deep run over
+        # enough referenced history earns trust, and the grant is disclosed
+        # on the sync note line.
+        self.conn.execute("DELETE FROM ref_observations")
+        base = dt.date(2025, 6, 1)
+        rows = [raw_tx((base + dt.timedelta(days=3 * i)).isoformat(),
+                       amount=str(10 + i), ref="R%d" % i)
+                for i in range(110)]                     # 110 tx over 327 days
+        flows.backfill(FakeAIS([(rows, None)]), self.conn, ACCOUNT, "s1",
+                       observe=True)
+        got = provenance.capability(self.conn, "Revolut", "acc1")
+        self.assertTrue(got["ref_stable"])
+        self.assertEqual(got["observed_n"], 110)
+        self.assertIn("reference identity earned", self._sync()["last_error"])
+
+    def test_a_run_that_measures_reuse_reconciles_untrusted_and_demotes(self):
+        # The account is trusted (setUp's observe()), and this run's own
+        # pages contain a recurrence sharing one reference. The run must not
+        # rewrite history under the premise it just refuted:
+        # reconcile receives the untrusted dict, the sighting is filed, and
+        # the withdrawal is disclosed.
+        seen = {}
+        real = ingest.reconcile
+
+        def spy(stored, fetched, interval, capability, **kw):
+            seen.setdefault("caps", []).append(capability)
+            return real(stored, fetched, interval, capability, **kw)
+
+        ingest.reconcile = spy
+        self.addCleanup(setattr, ingest, "reconcile", real)
+        flows.backfill(FakeAIS([([raw_tx("2026-06-01", ref="R1"),
+                                  raw_tx("2026-07-01", ref="R1")], None)]),
+                       self.conn, ACCOUNT, "s1", floor_days=90)
+        self.assertFalse(seen["caps"][0]["ref_stable"])
+        got = self._observations()
+        self.assertEqual(len(got), 1)
+        self.assertEqual((got[0]["kind"], got[0]["source"]),
+                         ("reuse_event", "measure"))
+        self.assertEqual(got[0]["reused_refs"], 1)
+        self.assertFalse(provenance.capability(
+            self.conn, "Revolut", "acc1")["ref_stable"])
+        self.assertIn("reference trust withdrawn", self._sync()["last_error"])
+
+    def test_a_deep_run_with_reuse_files_one_row_not_two(self):
+        # The deep observation already carries reused_refs>0; a second
+        # reuse_event would say nothing new.
+        flows.backfill(FakeAIS([([raw_tx("2026-06-01", ref="R1"),
+                                  raw_tx("2026-07-01", ref="R1")], None)]),
+                       self.conn, ACCOUNT, "s1", observe=True)
+        got = self._observations()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["kind"], "deep")
+        self.assertEqual(got[0]["reused_refs"], 1)
+
+    def test_a_forget_and_relink_during_the_fetch_defeats_no_guard(self):
+        # The incarnation is captured BEFORE the first provider fetch. While
+        # the run is paging, the account is forgotten and the same IBAN
+        # re-linked -- the SAME deterministic account_id comes back under a
+        # NEW incarnation token. The paused run's evidence describes the old
+        # life's pages and must not attach to the new life: no observation
+        # row, no trust.
+        conn = self.conn
+        base = dt.date(2025, 6, 1)
+        rows = [raw_tx((base + dt.timedelta(days=3 * i)).isoformat(),
+                       amount=str(10 + i), ref="R%d" % i)
+                for i in range(110)]
+
+        class RelinkingAIS:
+            """Answers one page; the account is erased and re-linked (new
+            incarnation) while that call is in flight."""
+
+            def __init__(self):
+                self.calls = 0
+
+            def transactions(self, uid, date_from, continuation_key=None):
+                self.calls += 1
+                conn.execute("DELETE FROM ref_observations"
+                             " WHERE account_id='acc1'")
+                conn.execute("DELETE FROM accounts WHERE account_id='acc1'")
+                conn.execute(
+                    "INSERT INTO accounts(account_id, uid, session_id,"
+                    " currency, aspsp, incarnation) VALUES"
+                    " ('acc1','uid-2','s2','EUR','Revolut','new-life')")
+                return (rows, None)
+
+        flows.backfill(RelinkingAIS(), self.conn, ACCOUNT, "s1",
+                       observe=True)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM ref_observations WHERE account_id='acc1'"
+            ).fetchone()[0], 0)
+        self.assertFalse(provenance.capability(
+            self.conn, "Revolut", "acc1")["ref_stable"])
+
+    def test_a_concurrent_demotion_replans_inside_the_apply_transaction(self):
+        # The concurrent-demotion ordering, driven end to end: the plan is
+        # built under trust, a concurrent actor's demoting evidence lands
+        # before this run's apply takes the write lock, and the revalidation
+        # inside the transaction must rebuild the plan untrusted -- the
+        # stored row keeps its money, and the fetched row lands as its own
+        # (flagged or not) row instead of a reference-keyed rewrite.
+        self.conn.execute(
+            "INSERT INTO transactions(account_id, provider_ref,"
+            " provider_ref_kind, identity_key, occurrence, booking_date,"
+            " amount_minor, currency, direction, counterparty, state)"
+            " VALUES ('acc1','R1','entry_reference','ik-old',0,'2026-07-30',"
+            " 1234,'EUR','DBIT','Voorbeeld Supermarkt','active')")
+        calls = []
+        real = ingest.reconcile
+
+        def spy(stored, fetched, interval, capability, **kw):
+            calls.append(capability["ref_stable"])
+            if len(calls) == 1:
+                # The concurrent demotion: another run's reuse event commits
+                # after this plan is built and before it is applied.
+                self.conn.execute(
+                    "INSERT INTO ref_observations(account_id, aspsp,"
+                    " session_id, kind, source, observed_at, window_days,"
+                    " rows_total, ref_transactions, distinct_refs,"
+                    " reused_refs, span_days)"
+                    " VALUES ('acc1','REVOLUT','s-other','reuse_event',"
+                    "'measure','2026-08-01T00:00:00Z',90,2,2,1,1,30)")
+            return real(stored, fetched, interval, capability, **kw)
+
+        ingest.reconcile = spy
+        self.addCleanup(setattr, ingest, "reconcile", real)
+        # Same reference, same counterparty, two days later, amount moved:
+        # under trust this corroborates (counterparty arm) and REWRITES the
+        # stored amount in place.
+        flows.backfill(FakeAIS([([raw_tx("2026-08-01", amount="56.78",
+                                         ref="R1")], None)]),
+                       self.conn, ACCOUNT, "s1", floor_days=90)
+        self.assertEqual(calls, [True, False],
+                         "the plan must be rebuilt untrusted inside the "
+                         "apply transaction")
+        row = self.conn.execute(
+            "SELECT amount_minor, match_method FROM transactions"
+            " WHERE identity_key='ik-old'").fetchone()
+        self.assertEqual(row["amount_minor"], 1234,
+                         "the trusted plan's in-place rewrite must not land")
+        self.assertNotIn("reference", str(row["match_method"] or ""))
+
     def test_an_unmeasured_aspsp_is_reported_not_silently_downgraded(self):
         """A spelling drift and a genuinely unmeasured bank look identical from
         here, so the name is named rather than quietly disabling references."""
@@ -453,7 +653,10 @@ class TestBackfill(unittest.TestCase):
                        self.conn, ACCOUNT, "s1")
         note = self._sync()["last_error"]
         self.assertIn("Revolut NL", note)
-        self.assertIn("no capability row", note)
+        # This account HAS evidence -- recorded under the old spelling -- so
+        # the warning names the drift, not a new bank.
+        self.assertIn("drift", note)
+        self.assertIn("REVOLUT", note)
 
 
     def test_a_narrow_refresh_does_not_reissue_an_occurrence_it_cannot_see(self):

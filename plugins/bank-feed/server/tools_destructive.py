@@ -66,11 +66,14 @@ STRUCTURAL_META_KEYS = ("schema_version", "account_secret")
 #: capability row is this installation's own observation of its own bank, and a
 #: retired row is a verbatim copy of one, so "erase the entire local ledger"
 #: has to mean them too -- and the retired table is precisely where another
-#: installation's measurements would be sitting.
+#: installation's measurements would be sitting. `ref_observations` is the
+#: earned-trust evidence (issue #1) and goes for the same reason: every row is
+#: a measurement OF this installation's own accounts.
 _DATA_TABLES = ("transaction_refs", "transaction_tags", "transaction_notes",
                 "tag_rules", "transactions", "occurrence_alloc",
                 "balances", "coverage", "sync_state", "accounts", "attempts",
-                "aspsp_capability", "aspsp_capability_retired")
+                "aspsp_capability", "aspsp_capability_retired",
+                "ref_observations")
 
 #: `account_id`-scoped tables for `forget_local_account`.
 #: `transaction_refs` is keyed by a GLOBAL `row_id` and is therefore the one
@@ -83,8 +86,14 @@ _DATA_TABLES = ("transaction_refs", "transaction_tags", "transaction_notes",
 #: erased has to erase what it names. A first-link attempt carries no
 #: `account_id` and is untouched, which is correct: it is not about this
 #: account.
+#:
+#: `ref_observations` is account data -- counts and dates measured FROM this
+#: account's history -- so forgetting the account erases its evidence, and
+#: earned reference trust dies with it. Correct, not incidental: re-linking
+#: re-observes on its own deep run, and the new incarnation token means a run
+#: still in flight across the erasure cannot re-file the old life's evidence.
 _ACCOUNT_TABLES = ("transactions", "occurrence_alloc", "balances", "coverage",
-                   "sync_state", "attempts", "accounts")
+                   "sync_state", "attempts", "accounts", "ref_observations")
 
 #: `purge` deletes by lexical comparison against `transactions.booking_date`,
 #: which SQLite stores as the ISO string `ingest` wrote. So the cutoff must BE
@@ -378,6 +387,14 @@ def purge(args: dict) -> str:
         # Rules are counterparty knowledge, not row data: purge erases
         # history, not the learned rulebook.
         "Auto-tagging rules are unaffected.",
+        # Same decision, disclosed the same way: an evidence row is a
+        # measurement of the bank's reference behaviour -- aggregate counts
+        # and dates, no transaction content -- and purging history does not
+        # un-measure it. Revoking trust on a purge would demote for a reason
+        # that says nothing about the bank. forget_local_account and
+        # delete_all_data are the erasers that take evidence with them.
+        "Reference-trust evidence is unaffected: it describes the bank's "
+        "reference behaviour, not the purged rows.",
     ]
     # `occurrence_alloc` is deliberately NOT purged. It is the only record of
     # the occurrence slots a re-keyed row vacated (store.py), the accounts are

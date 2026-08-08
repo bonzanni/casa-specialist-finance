@@ -88,6 +88,18 @@ SHALLOW_NOTE = ("deep-history window missed: fewer than 180 days proved. "
 CAPPED_NOTE = ("pagination cap reached: no interval proved for this run, and "
                "nothing in the ledger was changed. Re-run the backfill inside "
                "the authorization window")
+
+#: The two reference-trust transitions, disclosed on the sync_state note line
+#: beside SHALLOW_NOTE and the drift warning. One constant each, so the tool
+#: output and the durable row cannot drift apart.
+TRUST_GRANTED_NOTE = (
+    "reference identity earned: a completed deep run observed enough stable "
+    "entry references on this account, so future runs may key on the "
+    "provider's reference (still corroborated, never blind)")
+TRUST_DEMOTED_NOTE = (
+    "reference trust withdrawn: reference reuse was measured on this "
+    "account. Rows already matched by reference keep their recorded match "
+    "method; future runs fall back to heuristic date matching")
 FAILED_NOTE = ("the bank stopped answering partway through pagination: no "
                "interval proved for this run, and nothing in the ledger was "
                "changed. Re-run the backfill inside the authorization window")
@@ -358,8 +370,10 @@ def complete_renewal(conn, ais, *, old_session_id: str, new_session_id: str,
 
     inserted, shallow, short = 0, False, []
     for account_id, uid in bindings:
+        # observe=True: a renewal's fetch is one of the two labelled
+        # deep-observation runs reference trust can be earned from.
         out = backfill(ais, conn, {"account_id": account_id, "uid": uid},
-                       new_session_id)
+                       new_session_id, observe=True)
         inserted += out.get("inserted") or 0
         shallow = shallow or bool(out.get("shallow"))
         if not apply.deep_fetch_complete(conn, account_id, new_session_id):
@@ -523,11 +537,25 @@ def _proven_lower_bound(fetched: list, requested_from: str) -> str | None:
 
 
 def backfill(ais, conn, account: dict, session_id: str,
-             floor_days: int = BACKFILL_FLOOR_DAYS) -> dict:
+             floor_days: int = BACKFILL_FLOOR_DAYS,
+             observe: bool = False) -> dict:
     """Exhaustive deep backfill, INSIDE the fresh-SCA window.
 
     `account` is the ledger-side dict {"account_id", "uid"}; the ASPSP is read
     from the account row (`_aspsp_of`).
+
+    `observe=True` is the DEEP-OBSERVATION LABEL (issue #1): exactly the two
+    fresh-SCA call sites pass it — the first-link backfill and the renewal
+    backfill — and it is what licenses writing a `kind='deep'` evidence row,
+    the only kind that can GRANT reference trust. A narrow routine refresh
+    must never carry it: measuring a nine-day window and letting any
+    "insufficient sample" reading near the grant path is how legitimately
+    earned trust gets revoked by a thin sample. The guard below refuses the
+    mislabel outright rather than quietly not-observing, because a caller
+    that believes it scheduled a deep observation and didn't is a programmer
+    error worth hearing about. Reuse EVENTS are different: every completed
+    run measures, and a measured sighting demotes whatever the window size —
+    sample size bounds what silence proves, never what a sighting proves.
 
     Returns {"inserted", "proved_from", "proved_to", "shallow", "pages",
     "capped", "completeness"} — **both completeness signals on EVERY return
@@ -582,10 +610,28 @@ def backfill(ais, conn, account: dict, session_id: str,
     `proved_to`/coverage — what this response proves about history that
     EXISTS — which is a different question from what it proves is ABSENT.
     """
+    if observe and floor_days != BACKFILL_FLOOR_DAYS:
+        raise ValueError(
+            "observe=True is the deep-observation label and only the deep "
+            "window may carry it; a narrow run must not write the evidence "
+            "that grants reference trust")
     today = _today()
     requested_from = (today - dt.timedelta(days=floor_days)).isoformat()
     end = (today + dt.timedelta(days=1)).isoformat()
     aid = account["account_id"]
+
+    # The incarnation the evidence guard requires: captured BEFORE the first
+    # provider fetch, so evidence filed at the end of this run can only ever
+    # describe the life of the account whose pages it is about to measure.
+    # Captured after pagination it guards nothing: forget_local_account plus
+    # a re-link of the same IBAN DURING the fetch mints a new token under the
+    # SAME deterministic account_id, and a late read would hand this run the
+    # new life's token for pages fetched from the old one. A missing account
+    # row reads as None, which the guard can never match -- the fail-closed
+    # direction, since absent evidence never grants.
+    inc_row = conn.execute("SELECT incarnation FROM accounts"
+                           " WHERE account_id=?", (aid,)).fetchone()
+    incarnation = inc_row["incarnation"] if inc_row is not None else None
 
     # ---- stage every page; NOTHING destructive runs until this finishes ----
     staged, key, pages, capped = [], None, 0, False
@@ -629,12 +675,23 @@ def backfill(ais, conn, account: dict, session_id: str,
         "SELECT * FROM transactions WHERE account_id=? AND booking_date >= ?"
         " AND booking_date < ?", (aid, requested_from, end))]
     aspsp = _aspsp_of(conn, account)
-    capability = provenance.capability(conn, aspsp)
-    # Reported, never silently downgraded: a name that resolves to no row
-    # is far more often a spelling drift than a bank that reuses references,
-    # and the two are indistinguishable from in here. The downgrade itself is
-    # correct and stays — an unobserved ASPSP is untrusted.
-    drift = provenance.capability_warning(conn, aspsp)
+    # MEASURE BEFORE RECONCILE. The run that carries the counter-evidence
+    # must not itself rewrite history under the premise it just refuted: a
+    # page set showing reference reuse reconciles UNTRUSTED, whatever the
+    # ledger's standing evidence says, and the sighting is filed durably
+    # inside the same transaction that applies this run's plan (below).
+    metrics = provenance.measure_references(fetched)
+    ledger_capability = provenance.capability(conn, aspsp, aid)
+    trusted_before = ingest.ref_trusted(ledger_capability)
+    capability = (dict(provenance.DEFAULT_CAPABILITY)
+                  if metrics["reused_refs"] else ledger_capability)
+    built_trusted = ingest.ref_trusted(capability)
+    # Reported, never silently downgraded: a name that resolves to no
+    # evidence is far more often a spelling drift than a bank that reuses
+    # references, and the two are indistinguishable from in here. The
+    # downgrade itself is correct and stays — an unmeasured account is
+    # untrusted.
+    drift = provenance.capability_warning(conn, aspsp, aid)
     # The DURABLE occurrence high-water for every cluster this pass can touch.
     # `stored` above is only the rows inside the requested interval, and a
     # routine refresh narrows that to about a week — so without this a monthly
@@ -679,7 +736,43 @@ def backfill(ais, conn, account: dict, session_id: str,
 
     plan = ingest.reconcile(stored, fetched, reconcile_interval, capability,
                             allocated=allocated)
-    stats = apply.apply_plan(conn, aid, plan)      # one transaction, or raises
+
+    def _evidence_and_revalidate(c):
+        """Inside apply_plan's BEGIN IMMEDIATE, before any plan row lands.
+
+        Order is load-bearing: (1) file THIS run's evidence, so
+        no state exists in which the run's rows are committed and its
+        demotion is not; (2) re-derive trust under the write lock; (3) hand
+        back a heuristic replan when a plan built under trust arrives at a
+        ledger that has since demoted — a concurrent deep run can file a
+        reuse event between this run's derivation above and this lock.
+        Grants never replan: a plan built untrusted is always licensed.
+        """
+        if observe:
+            # The labelled deep run files its observation whatever it saw --
+            # a zero-row dormant account included: "measured, and nothing"
+            # is a different fact from "never measured".
+            provenance.record_observation(
+                c, account_id=aid, incarnation=incarnation, aspsp=aspsp,
+                session_id=session_id, kind="deep", window_days=floor_days,
+                metrics=metrics)
+        elif metrics["reused_refs"]:
+            # A narrow run that measured reuse files the sighting. On an
+            # observe run the deep row above already carries reused_refs>0,
+            # so a second row would say nothing new.
+            provenance.record_observation(
+                c, account_id=aid, incarnation=incarnation, aspsp=aspsp,
+                session_id=session_id, kind="reuse_event", source="measure",
+                window_days=floor_days, metrics=metrics)
+        if built_trusted:
+            current = provenance.capability(c, aspsp, aid)
+            if not ingest.ref_trusted(current):
+                return ingest.reconcile(stored, fetched, reconcile_interval,
+                                        current, allocated=allocated)
+        return None
+
+    stats = apply.apply_plan(conn, aid, plan,      # one transaction, or raises
+                             pre_apply=_evidence_and_revalidate)
 
     span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
                                           - dt.date.fromisoformat(proved_from)).days
@@ -709,7 +802,21 @@ def backfill(ais, conn, account: dict, session_id: str,
         apply.record_coverage(conn, aid, proved_from, proved_to, session_id)
 
     now = dt.datetime.now().isoformat()
-    notes = [n for n in (SHALLOW_NOTE if shallow else None, drift) if n]
+    # A trust transition is DISCLOSED, not silent, beside the shallow and
+    # drift notes the operator already reads. Compared ledger-to-ledger --
+    # the derivation before this run against the derivation after it -- so
+    # the note names what actually changed durably, not what this run
+    # intended. Committed rows are deliberately untouched by a demotion:
+    # their match_method is a true statement about how they were matched at
+    # the time, under a grant the evidence record still explains.
+    trusted_after = ingest.ref_trusted(provenance.capability(conn, aspsp, aid))
+    trust_note = None
+    if trusted_before and not trusted_after:
+        trust_note = TRUST_DEMOTED_NOTE
+    elif not trusted_before and trusted_after:
+        trust_note = TRUST_GRANTED_NOTE
+    notes = [n for n in (SHALLOW_NOTE if shallow else None, drift,
+                         trust_note) if n]
     # `last_success_session` is the durable fact a renewal switch stands on:
     # THIS session ran the fetch to exhaustion for this account.
     # It is written here, after apply_plan committed, and only on a run that

@@ -15,4 +15,4 @@ exclude-tree: scripts/scan_lineage.py  # the scan's own patterns and the example
 exclude-tree: scripts/lineage-exceptions.txt  # this file quotes the sites it exempts, so it matches itself by construction
 exclude-tree: tests/test_scan_lineage.py  # the scan's own tests, which must contain a specimen of every category to be worth anything
 
-plugins/bank-feed/server/store.py:330  # DATA, not prose: the v5 migration matches rows a removed seeder wrote, whose provenance strings begin with this literal. Rewording it stops the migration recognising them.
+plugins/bank-feed/server/store.py:366  # DATA, not prose: the v5 migration matches rows a removed seeder wrote, whose provenance strings begin with this literal. Rewording it stops the migration recognising them.

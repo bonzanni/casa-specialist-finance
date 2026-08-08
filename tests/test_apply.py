@@ -157,6 +157,56 @@ class TestApply(Base):
         self.assertEqual(self._all(), [])
 
 
+class TestPreApplyHook(Base):
+    """The seam flows.backfill files evidence and revalidates trust through.
+
+    The hook runs INSIDE apply_plan's transaction, before any plan row: what
+    it writes commits atomically with the plan, what it returns replaces the
+    plan, and what it raises rolls everything back -- its own writes included.
+    """
+
+    def test_the_replacement_plan_is_the_one_applied(self):
+        original = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
+        replacement = ingest.reconcile([], [row("2026-03-05"),
+                                            row("2026-04-05")],
+                                       IV, CAP_UNKNOWN)
+        stats = apply.apply_plan(self.conn, "acc1", original,
+                                 pre_apply=lambda c: replacement)
+        self.assertEqual(stats["inserted"], 2)
+        self.assertEqual([r["booking_date"] for r in self._active()],
+                         ["2026-03-05", "2026-04-05"])
+
+    def test_none_keeps_the_original_plan(self):
+        plan = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
+        stats = apply.apply_plan(self.conn, "acc1", plan,
+                                 pre_apply=lambda c: None)
+        self.assertEqual(stats["inserted"], 1)
+
+    def test_the_hooks_writes_commit_with_the_plan(self):
+        plan = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
+
+        def hook(c):
+            c.execute("INSERT INTO meta(key, value) VALUES ('hooked','1')")
+            return None
+
+        apply.apply_plan(self.conn, "acc1", plan, pre_apply=hook)
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM meta WHERE key='hooked'").fetchone())
+
+    def test_a_raising_hook_rolls_back_everything_including_its_own_writes(self):
+        plan = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
+
+        def hook(c):
+            c.execute("INSERT INTO meta(key, value) VALUES ('hooked','1')")
+            raise RuntimeError("revalidation blew up")
+
+        with self.assertRaises(RuntimeError):
+            apply.apply_plan(self.conn, "acc1", plan, pre_apply=hook)
+        self.assertEqual(self._all(), [])
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM meta WHERE key='hooked'").fetchone())
+
+
 class TestIdentityStaysConsistent(Base):
     """A row's stored identity_key always equals the hash of its own
     current content, so a corroborated correction rewrites identity_key and
@@ -488,6 +538,34 @@ class TestAccountUpsert(Base):
         self.assertEqual(self.conn.execute(
             "SELECT aspsp FROM accounts WHERE account_id=?",
             (aid,)).fetchone()[0], "Rabobank")
+
+    def test_a_new_account_is_minted_a_fresh_incarnation_each_life(self):
+        """account_id is a deterministic HMAC of IBAN+currency, so erase and
+        re-link brings the SAME id back; the incarnation token is what tells
+        the two lives apart, and it is what the evidence writer's guard
+        requires. An update must not re-mint it: one life, one token."""
+        secret = store.local_secret(self.conn)
+        aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
+                                               "currency": "EUR"}, "s1", secret)
+        first = self.conn.execute(
+            "SELECT incarnation FROM accounts WHERE account_id=?",
+            (aid,)).fetchone()[0]
+        self.assertRegex(first, r"^[0-9a-f]{16}$")
+        apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
+                                         "currency": "EUR"}, "s1", secret)
+        self.assertEqual(self.conn.execute(
+            "SELECT incarnation FROM accounts WHERE account_id=?",
+            (aid,)).fetchone()[0], first)
+        # the account's next life: same id, different token
+        self.conn.execute("DELETE FROM accounts WHERE account_id=?", (aid,))
+        again = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
+                                                 "currency": "EUR"}, "s1",
+                                     secret)
+        second = self.conn.execute(
+            "SELECT incarnation FROM accounts WHERE account_id=?",
+            (again,)).fetchone()[0]
+        self.assertEqual(again, aid)
+        self.assertNotEqual(second, first)
 
     def test_an_iban_carrying_whitespace_is_refused_not_masked(self):
         """The WRITER's half of a defect whose reader half is fencing.

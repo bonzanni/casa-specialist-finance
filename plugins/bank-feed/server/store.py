@@ -22,7 +22,7 @@ from pathlib import Path
 
 import ebmode
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _PROD_DB_FILENAME = "bank_feed.sqlite"
 _SANDBOX_DB_FILENAME = "bank_feed.sandbox.sqlite"
@@ -73,18 +73,28 @@ CREATE TABLE IF NOT EXISTS sessions (
   generation INTEGER NOT NULL DEFAULT 1);
 
 -- `aspsp` is the bank's own name as the session reported it, and it is what
--- makes the per-ASPSP capability table live in production.
+-- scopes the account's reference evidence: provenance.capability() counts
+-- only `ref_observations` rows recorded under the account's CURRENT
+-- normalised name, so a drifted or absent name reads as unmeasured.
 -- Without it flows.backfill has no name to look up, provenance.capability()
 -- always returns DEFAULT_CAPABILITY, and every ingest silently falls back to
 -- heuristic windowed matching even for the rows the provider identifies
 -- exactly. Empty string, not NULL: an account
 -- whose ASPSP was never recorded reads as "" and resolves to the untrusted
 -- default, which is the correct fail-closed direction.
+-- `incarnation` tells two lives of one account apart. `account_id` is a
+-- deterministic HMAC of IBAN+currency, so forget_local_account followed by a
+-- re-link recreates the SAME id -- and a backfill paused across that erasure
+-- would otherwise attach its stale reference evidence to the new life of the
+-- account (the ABA shape). apply.upsert_account mints a random token at
+-- INSERT; the v6 migration backfills existing rows. Evidence writes require
+-- the incarnation captured at run start, not mere account existence.
 CREATE TABLE IF NOT EXISTS accounts (
   account_id TEXT PRIMARY KEY NOT NULL, uid TEXT, session_id TEXT, iban_masked TEXT,
   name TEXT, product TEXT, currency TEXT, usage TEXT, label TEXT,
   category TEXT, included INTEGER NOT NULL DEFAULT 1,
   aspsp TEXT NOT NULL DEFAULT '',
+  incarnation TEXT NOT NULL DEFAULT '',
   first_seen TEXT, last_seen TEXT);
 
 CREATE TABLE IF NOT EXISTS balances (
@@ -170,11 +180,10 @@ CREATE TABLE IF NOT EXISTS sync_state (
   last_success_session TEXT,
   PRIMARY KEY (account_id, resource));
 
--- Per-ASPSP reference behaviour. Read through provenance.capability(); an
--- absent row is untrusted, not stable. `provenance` records where the claim
--- came from, so a trust claim can be audited and retired when it turns out to
--- be wrong. No row ships: trust is per-installation and is earned by local
--- observation (issue #1), never inherited.
+-- RETIRED AS A LIVE TABLE at v6: nothing writes it and provenance.capability()
+-- no longer reads it -- trust is derived from `ref_observations` below. The
+-- DDL stays because the v6 migration reads it (moving any residents into the
+-- retired table) and because the retired table's rows name it as their origin.
 CREATE TABLE IF NOT EXISTS aspsp_capability (
   aspsp TEXT PRIMARY KEY NOT NULL,
   ref_stable INTEGER NOT NULL DEFAULT 0,
@@ -206,6 +215,33 @@ CREATE TABLE IF NOT EXISTS aspsp_capability_retired (
   retired_at TEXT,
   retired_by TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (aspsp, retired_by));
+
+-- Append-only reference-behaviour evidence, per ACCOUNT: the record earned
+-- trust derives from (issue #1). Written only through
+-- provenance.record_observation, inside the same transaction that applies
+-- the measuring run's plan; read only through provenance.capability /
+-- capability_warning, which derive the verdict AT READ TIME from these
+-- metrics -- deliberately no verdict column and no cached capability row, so
+-- a conclusion can never outlive its reasoning. `kind` is 'deep' (a labelled,
+-- completed deep-observation run; the only kind that can GRANT) or
+-- 'reuse_event' (any completed run that measured reuse; can only demote).
+-- Nothing updates or deletes a row outside forget_local_account and
+-- delete_all_data, which own the deletion semantics.
+CREATE TABLE IF NOT EXISTS ref_observations (
+  obs_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id TEXT NOT NULL,
+  aspsp TEXT NOT NULL,
+  session_id TEXT,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  observed_at TEXT NOT NULL,
+  window_days INTEGER NOT NULL,
+  rows_total INTEGER NOT NULL,
+  ref_transactions INTEGER NOT NULL,
+  distinct_refs INTEGER NOT NULL,
+  reused_refs INTEGER NOT NULL,
+  span_days INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_refobs_account ON ref_observations(account_id);
 
 -- our half of the callback contract; casa owns the spool ledger.
 -- `expected_generation` is the repair/renewal fence: _start_auth
@@ -386,6 +422,44 @@ _MIGRATIONS = {
         " FROM aspsp_capability WHERE %s;"
         % (_SEED_DIGEST_LIST, _SEED_MATCH),
         "DELETE FROM aspsp_capability WHERE %s;" % _SEED_MATCH),
+    # v6 is the earned-trust model (issue #1): trust derives from the
+    # account-keyed, append-only `ref_observations` evidence, and the
+    # per-ASPSP `aspsp_capability` table stops being read at all.
+    #
+    # The ALTER is the one statement _SCHEMA cannot express idempotently, and
+    # SQLite has no ADD COLUMN IF NOT EXISTS -- so the entry is a CALLABLE
+    # that reads the table's ACTUAL columns and returns None when the column
+    # is already there (a ledger created by a _SCHEMA that carries it, then
+    # stamped at an older version -- the shape every migration-path test
+    # builds). Branching on PRAGMA table_info is branching on the value that
+    # matters, not on a version number standing in for it. The backfill mints
+    # each EXISTING account one random incarnation token -- randomblob is
+    # SQLite's own, no seeding involved -- and scopes itself to '' so a
+    # re-run could not re-mint.
+    #
+    # The retirement sweep takes EVERYTHING still resident, not a matched
+    # subset, and that breadth is the point rather than a risk this time:
+    # after v5 the only possible residents are local `set_capability` writes,
+    # and under the earned model any per-ASPSP row is an observation-free
+    # trust claim -- exactly what is being retired. Same non-destructive move
+    # as v5: the rows land in the retired archive verbatim, `retired_by` says
+    # which migration took them, and nothing reads them back into a trust
+    # decision.
+    6: (lambda conn: (
+            None
+            if any(r[1] == "incarnation"
+                   for r in conn.execute("PRAGMA table_info(accounts)"))
+            else "ALTER TABLE accounts ADD COLUMN incarnation TEXT NOT NULL"
+                 " DEFAULT '';"),
+        "UPDATE accounts SET incarnation = lower(hex(randomblob(8)))"
+        " WHERE incarnation = '';",
+        "INSERT OR REPLACE INTO aspsp_capability_retired"
+        "(aspsp, ref_stable, ref_scope, observed_n, provenance, updated_at,"
+        " retired_at, retired_by)"
+        " SELECT aspsp, ref_stable, ref_scope, observed_n, provenance,"
+        " updated_at, datetime('now'), 'schema v6 (earned trust)'"
+        " FROM aspsp_capability;",
+        "DELETE FROM aspsp_capability;"),
 }
 
 
@@ -622,6 +696,14 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
     statements = [_SCHEMA.strip()]        # idempotent: new tables and indexes
     for target in range(current + 1, SCHEMA_VERSION + 1):
         for sql in _MIGRATIONS.get(target, ()):
+            if callable(sql):
+                # A conditional migration statement: the callable reads the
+                # live schema and returns None when there is nothing to do.
+                # Resolved HERE, before the script runs, so the assembled
+                # script is still one transaction.
+                sql = sql(conn)
+                if sql is None:
+                    continue
             statements.append(sql.strip().rstrip(";") + ";")
     statements.append(
         "INSERT OR REPLACE INTO meta(key, value) VALUES"

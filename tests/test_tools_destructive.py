@@ -1056,6 +1056,48 @@ class TestErasureCoversCapability(DestructiveBase):
         self.assertIn("aspsp_capability", tools_destructive._DATA_TABLES)
         self.assertIn("aspsp_capability_retired", tools_destructive._DATA_TABLES)
 
+    def _evidence(self, account_id):
+        self.raw.execute(
+            "INSERT INTO ref_observations(account_id, aspsp, session_id,"
+            " kind, source, observed_at, window_days, rows_total,"
+            " ref_transactions, distinct_refs, reused_refs, span_days)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (account_id, "REVOLUT", "s1", "deep", "",
+             "2026-08-01T00:00:00Z", 2900, 200, 150, 150, 0, 400))
+
+    def test_delete_all_data_erases_the_reference_evidence(self):
+        # Every evidence row is a measurement OF this installation's own
+        # accounts: "erase the entire local ledger" has to mean it.
+        self._evidence("acc-x")
+        call("delete_all_data")
+        self.assertEqual(self.count("ref_observations"), 0)
+        self.assertIn("ref_observations", tools_destructive._DATA_TABLES)
+
+    def test_forget_erases_only_that_accounts_evidence(self):
+        # The evidence is account data -- counts and dates measured FROM the
+        # account's history -- so it dies with the account, and earned trust
+        # dies with it: re-linking re-observes.
+        self.account("keep")
+        self.account("drop")
+        self._evidence("keep")
+        self._evidence("drop")
+        call("forget_local_account", account_id="drop")
+        left = [r[0] for r in self.raw.execute(
+            "SELECT account_id FROM ref_observations")]
+        self.assertEqual(left, ["keep"])
+        self.assertIn("ref_observations", tools_destructive._ACCOUNT_TABLES)
+
+    def test_purge_retains_the_evidence_and_says_so(self):
+        # An evidence row is a measurement of the bank's reference behaviour
+        # -- aggregate counts and dates, no transaction content -- and
+        # purging history does not un-measure it. Retained, DISCLOSED.
+        self.account("acc1")
+        self.tx("acc1", "ik-old", booking_date="2024-01-01")
+        self._evidence("acc1")
+        out = call("purge", before_date="2025-01-01")
+        self.assertEqual(self.count("ref_observations"), 1)
+        self.assertIn("Reference-trust evidence is unaffected", out)
+
 
 class TestForgetLocalAccount(DestructiveBase):
     def test_erases_only_that_account(self):

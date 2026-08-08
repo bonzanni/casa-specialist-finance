@@ -853,26 +853,41 @@ class LegacySeedIsRetired(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def test_opening_a_v4_database_drops_the_seeded_rows(self):
+    def _retired_by(self, conn):
+        return {r[0]: r[1] for r in conn.execute(
+            "SELECT aspsp, retired_by FROM aspsp_capability_retired")}
+
+    def test_opening_a_v4_database_retires_seed_and_local_rows_apart(self):
+        # v5's predicate takes the seeded row; v6's earned-trust sweep takes
+        # everything left, the local row included. The live table ends empty
+        # either way -- what the two arms disagree about, and what these
+        # tests pin, is WHICH migration took each row.
         with tempfile.TemporaryDirectory() as d:
             path = pathlib.Path(d) / "bank_feed.sqlite"
             self._v4_db_with_seeded_rows(path)
             conn = store.open_db(path)
-            rows = conn.execute(
-                "SELECT aspsp FROM aspsp_capability ORDER BY aspsp").fetchall()
-            self.assertEqual([r[0] for r in rows], ["BUNQ"],
-                             "the seeded row must go and a locally observed "
-                             "row must survive")
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM aspsp_capability").fetchone()[0], 0)
+            self.assertEqual(self._retired_by(conn),
+                             {"REVOLUT": "schema v5 (seed shape)",
+                              "BUNQ": "schema v6 (earned trust)"})
             conn.close()
 
-    def test_a_locally_observed_row_is_preserved_intact(self):
+    def test_a_locally_observed_row_is_archived_intact_not_honoured(self):
+        # Under the earned model a hand-written capability row is an
+        # observation-free trust claim: it is retired verbatim (recoverable,
+        # auditable) and influences nothing.
         with tempfile.TemporaryDirectory() as d:
             path = pathlib.Path(d) / "bank_feed.sqlite"
             self._v4_db_with_seeded_rows(path)
             conn = store.open_db(path)
-            got = provenance.capability(conn, "Bunq")
-            self.assertTrue(got["ref_stable"])
-            self.assertEqual(got["observed_n"], 40)
+            self.assertEqual(provenance.capability(conn, "Bunq", "acc1"),
+                             provenance.DEFAULT_CAPABILITY)
+            row = conn.execute(
+                "SELECT observed_n, provenance FROM aspsp_capability_retired"
+                " WHERE aspsp='BUNQ'").fetchone()
+            self.assertEqual(row["observed_n"], 40)
+            self.assertEqual(row["provenance"], "observed locally 2026-05-01")
             conn.close()
 
     def test_a_local_row_whose_provenance_differs_only_in_case_survives(self):
@@ -897,9 +912,11 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn.commit()
             conn.close()
             conn = store.open_db(path)
-            rows = sorted(r[0] for r in conn.execute(
-                "SELECT aspsp FROM aspsp_capability"))
-            self.assertEqual(rows, ["BUNQ", "ING"])
+            by = self._retired_by(conn)
+            self.assertEqual(by["ING"], "schema v6 (earned trust)",
+                             "the case-different row must not match the v5 "
+                             "seed predicate")
+            self.assertEqual(by["REVOLUT"], "schema v5 (seed shape)")
             conn.close()
 
     def test_local_notes_that_merely_begin_the_same_way_survive(self):
@@ -929,10 +946,13 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn.commit()
             conn.close()
             conn = store.open_db(path)
-            got = sorted(r[0] for r in conn.execute(
-                "SELECT aspsp FROM aspsp_capability"))
-            self.assertEqual(got, ["ASN", "BUNQ", "ING", "KNAB", "TRIODOS"],
-                             "only the dated seed row may go")
+            by = self._retired_by(conn)
+            for name, _origin in survivors:
+                self.assertEqual(by[name], "schema v6 (earned trust)",
+                                 "%s must not match the v5 seed predicate"
+                                 % name)
+            self.assertEqual(by["REVOLUT"], "schema v5 (seed shape)",
+                             "only the dated seed row matches the seed arms")
             conn.close()
 
     def test_a_seed_row_written_on_any_date_is_still_retired(self):
@@ -951,9 +971,8 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn.commit()
             conn.close()
             conn = store.open_db(path)
-            got = sorted(r[0] for r in conn.execute(
-                "SELECT aspsp FROM aspsp_capability"))
-            self.assertEqual(got, ["BUNQ"])
+            self.assertEqual(self._retired_by(conn)["ING"],
+                             "schema v5 (seed shape)")
             conn.close()
 
     def test_a_retired_row_is_kept_verbatim_not_destroyed(self):
@@ -967,7 +986,8 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn = store.open_db(path)
             rows = conn.execute(
                 "SELECT aspsp, ref_stable, ref_scope, observed_n, provenance,"
-                " retired_by FROM aspsp_capability_retired").fetchall()
+                " retired_by FROM aspsp_capability_retired"
+                " WHERE retired_by LIKE 'schema v5%'").fetchall()
             self.assertEqual(len(rows), 1)
             row = rows[0]
             self.assertEqual(row["aspsp"], "REVOLUT")
@@ -985,10 +1005,10 @@ class LegacySeedIsRetired(unittest.TestCase):
             path = pathlib.Path(d) / "bank_feed.sqlite"
             self._v4_db_with_seeded_rows(path)
             conn = store.open_db(path)
-            self.assertEqual(provenance.capability(conn, "Revolut"),
+            self.assertEqual(provenance.capability(conn, "Revolut", "acc1"),
                              provenance.DEFAULT_CAPABILITY)
             self.assertIsNotNone(
-                provenance.capability_warning(conn, "Revolut"))
+                provenance.capability_warning(conn, "Revolut", "acc1"))
             conn.close()
 
     def test_reopening_does_not_retire_the_same_row_twice(self):
@@ -997,9 +1017,11 @@ class LegacySeedIsRetired(unittest.TestCase):
             self._v4_db_with_seeded_rows(path)
             store.open_db(path).close()
             conn = store.open_db(path)
+            # one row per arm: the seeded REVOLUT under v5, the local BUNQ
+            # under v6 -- and reopening adds nothing.
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM aspsp_capability_retired"
-                ).fetchone()[0], 1)
+                ).fetchone()[0], 2)
             conn.close()
 
     def test_a_fresh_database_retires_nothing(self):
@@ -1154,10 +1176,12 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn.commit()
             conn.close()
             conn = store.open_db(path)
-            self.assertEqual(sorted(r[0] for r in conn.execute(
-                "SELECT aspsp FROM aspsp_capability")), ["BUNQ"],
-                "every dated seed row must be retired, not just the ones a "
-                "test happened to name")
+            by = self._retired_by(conn)
+            for i in range(len(dates)):
+                self.assertEqual(by["BANK%d" % i], "schema v5 (seed shape)",
+                                 "every dated seed row must match the seed "
+                                 "predicate, not just the ones a test "
+                                 "happened to name")
             conn.close()
 
     def test_a_missing_sql_function_fails_loudly_not_silently(self):
@@ -1195,7 +1219,8 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn.close()
             conn = store.open_db(path)
             got = sorted(r[0] for r in conn.execute(
-                "SELECT aspsp FROM aspsp_capability_retired"))
+                "SELECT aspsp FROM aspsp_capability_retired"
+                " WHERE retired_by LIKE 'schema v5%'"))
             self.assertEqual(got, ["ABN AMRO", "RABOBANK", "REVOLUT"])
             conn.close()
 
@@ -1206,5 +1231,129 @@ class LegacySeedIsRetired(unittest.TestCase):
             conn = store.open_db(path)
             got = conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            self.assertEqual(int(got[0]), 5)
+            self.assertEqual(int(got[0]), store.SCHEMA_VERSION)
+            conn.close()
+
+
+class TestSchemaV6EarnedTrust(unittest.TestCase):
+    """v6: trust derives from account-keyed evidence; nothing per-ASPSP
+    survives live, and every account carries an incarnation token."""
+
+    def _v5_db(self, path, accounts=("acc1", "acc2"), capability_rows=()):
+        conn = sqlite3.connect(path)
+        conn.executescript(store._SCHEMA)
+        for aid in accounts:
+            conn.execute("INSERT INTO accounts(account_id) VALUES (?)",
+                         (aid,))
+        for name, origin in capability_rows:
+            conn.execute(
+                "INSERT INTO aspsp_capability(aspsp, ref_stable, ref_scope,"
+                " observed_n, provenance, updated_at)"
+                " VALUES (?,1,'account',30,?,'t')", (name, origin))
+        conn.execute("INSERT OR REPLACE INTO meta(key, value)"
+                     " VALUES ('schema_version', '5')")
+        conn.commit()
+        conn.close()
+
+    def test_existing_accounts_are_minted_distinct_incarnations(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v5_db(path)
+            conn = store.open_db(path)
+            got = {r[0]: r[1] for r in conn.execute(
+                "SELECT account_id, incarnation FROM accounts")}
+            self.assertEqual(set(got), {"acc1", "acc2"})
+            for aid, token in got.items():
+                self.assertRegex(token, r"^[0-9a-f]{16}$", aid)
+            self.assertNotEqual(got["acc1"], got["acc2"],
+                                "one token per account, or the ABA guard "
+                                "cannot tell two accounts' lives apart")
+            conn.close()
+
+    def test_reopening_does_not_remint_incarnations(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v5_db(path)
+            conn = store.open_db(path)
+            before = {r[0]: r[1] for r in conn.execute(
+                "SELECT account_id, incarnation FROM accounts")}
+            conn.close()
+            conn = store.open_db(path)
+            after = {r[0]: r[1] for r in conn.execute(
+                "SELECT account_id, incarnation FROM accounts")}
+            self.assertEqual(before, after)
+            conn.close()
+
+    def test_a_post_v5_local_capability_row_is_retired_by_v6(self):
+        # After v5 the only possible residents are local set_capability
+        # writes; under the earned model any such row is an observation-free
+        # trust claim. Non-destructive: archived verbatim, honoured nowhere.
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v5_db(path, capability_rows=(
+                ("ING", "observed locally 2026-07-01"),))
+            conn = store.open_db(path)
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM aspsp_capability").fetchone()[0], 0)
+            row = conn.execute(
+                "SELECT provenance, retired_by FROM aspsp_capability_retired"
+                " WHERE aspsp='ING'").fetchone()
+            self.assertEqual(row["provenance"], "observed locally 2026-07-01")
+            self.assertEqual(row["retired_by"], "schema v6 (earned trust)")
+            self.assertEqual(provenance.capability(conn, "ING", "acc1"),
+                             provenance.DEFAULT_CAPABILITY)
+            conn.close()
+
+    def test_ref_observations_exists_on_fresh_and_migrated_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            fresh = store.open_db(pathlib.Path(d) / "fresh.sqlite")
+            self.assertEqual(fresh.execute(
+                "SELECT count(*) FROM ref_observations").fetchone()[0], 0)
+            fresh.close()
+            path = pathlib.Path(d) / "migrated.sqlite"
+            self._v5_db(path)
+            conn = store.open_db(path)
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM ref_observations").fetchone()[0], 0)
+            conn.close()
+
+    def test_the_legacy_walk_ends_untrusted_and_earnable(self):
+        # The acceptance walk: a seeded pre-v5 ledger arrives at v6 with
+        # every ASPSP untrusted, both retirements archived, and trust
+        # earnable from a fresh deep observation on its own account.
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            conn = sqlite3.connect(path)
+            conn.executescript(store._SCHEMA)
+            conn.execute("INSERT INTO accounts(account_id, aspsp)"
+                         " VALUES ('acc1', 'Revolut')")
+            conn.execute(
+                "INSERT INTO aspsp_capability(aspsp, ref_stable, ref_scope,"
+                " observed_n, provenance, updated_at)"
+                " VALUES ('REVOLUT',1,'account',100,?,'t')",
+                (SEED_PREFIX + "2026-01-01: ExampleBank, 100/100",))
+            conn.execute(
+                "INSERT INTO aspsp_capability(aspsp, ref_stable, ref_scope,"
+                " observed_n, provenance, updated_at)"
+                " VALUES ('BUNQ',1,'account',40,'observed locally','t')")
+            conn.execute("INSERT OR REPLACE INTO meta(key, value)"
+                         " VALUES ('schema_version', '4')")
+            conn.commit()
+            conn.close()
+            conn = store.open_db(path)
+            for name in ("Revolut", "Bunq"):
+                self.assertEqual(provenance.capability(conn, name, "acc1"),
+                                 provenance.DEFAULT_CAPABILITY, name)
+            incarnation = conn.execute(
+                "SELECT incarnation FROM accounts WHERE account_id='acc1'"
+                ).fetchone()[0]
+            self.assertTrue(provenance.record_observation(
+                conn, account_id="acc1", incarnation=incarnation,
+                aspsp="Revolut", session_id="s1", kind="deep",
+                window_days=2900,
+                metrics={"rows_total": 200, "ref_transactions": 150,
+                         "distinct_refs": 150, "reused_refs": 0,
+                         "span_days": 400}))
+            self.assertTrue(provenance.capability(
+                conn, "Revolut", "acc1")["ref_stable"])
             conn.close()

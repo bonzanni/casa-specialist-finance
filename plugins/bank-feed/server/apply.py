@@ -43,6 +43,7 @@ here and do not need to be told apart.
 from __future__ import annotations
 
 import datetime as _dt
+import secrets
 
 import rules
 import store
@@ -111,8 +112,8 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes) -> str:
     An empty IBAN is refused: deriving a key over "|EUR" would silently merge
     every account in the ledger into one.
 
-    `aspsp` is what makes the per-ASPSP capability table live in production
-    live. Without it flows.backfill has no name to pass to
+    `aspsp` is what scopes the account's reference evidence in production.
+    Without it flows.backfill has no name to pass to
     provenance.capability(), every lookup returns DEFAULT_CAPABILITY, and every
     production ingest falls back to heuristic windowed matching. An OMITTED
     aspsp on a later upsert keeps the recorded one: a renewal payload that
@@ -214,13 +215,21 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes) -> str:
              account.get("product"), account.get("currency"),
              account.get("usage"), aspsp, aid))
     else:
+        # `incarnation` is minted HERE, once per creation, because the
+        # account_id above is a deterministic HMAC of IBAN+currency: erase
+        # this account and link the same IBAN again and the id comes back
+        # IDENTICAL. The random token is what tells the two lives apart --
+        # provenance.record_observation refuses to file reference evidence
+        # under an incarnation other than the one the measuring run captured
+        # at its start, so a backfill paused across a forget-and-relink cannot
+        # attach its stale measurements to the account's new life.
         conn.execute(
             "INSERT INTO accounts(account_id, uid, session_id, iban_masked,"
-            " name, product, currency, usage, aspsp, included, first_seen,"
-            " last_seen) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+            " name, product, currency, usage, aspsp, incarnation, included,"
+            " first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)",
             (aid, account.get("uid"), session_id, masked, account.get("name"),
              account.get("product"), account.get("currency"),
-             account.get("usage"), aspsp or "", now, now))
+             account.get("usage"), aspsp or "", secrets.token_hex(8), now, now))
     return aid
 
 
@@ -480,12 +489,25 @@ def _remember_ref(conn, row_id: int, rec: dict, now: str) -> None:
                  " AND provider_ref=?", (now, row_id, rec["provider_ref"]))
 
 
-def apply_plan(conn, account_id: str, plan) -> dict:
+def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
     """One transaction: either the whole plan lands or none of it does.
 
     Inserts run first and their `local_id -> row_id` map is what a supersede
     resolves through — a pending row is superseded by a booked row that this
     same plan is inserting, and only the database knows its id.
+
+    `pre_apply`, when given, is called with the connection immediately after
+    `BEGIN IMMEDIATE` — inside the transaction, before any plan row is
+    written — and may return a REPLACEMENT plan (or None to keep this one).
+    It exists for exactly one caller: `flows.backfill` files the run's
+    reference-trust evidence there and revalidates the trust the plan was
+    built under, now that the write lock is held. A plan is built OUTSIDE any
+    transaction, so a concurrent run can demote an account's reference trust
+    between the build and this apply; the hook re-derives under the lock and
+    hands back a heuristically-matched replan when the premise no longer
+    holds — `ingest.reconcile` is pure, so replanning here is a function
+    call, not I/O. An exception from the hook rolls the whole transaction
+    back, evidence included, exactly like a failure in the plan itself.
     """
     now = _now()
     stats = {"inserted": 0, "updated": 0, "superseded": 0,
@@ -506,6 +528,10 @@ def apply_plan(conn, account_id: str, plan) -> dict:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
+        if pre_apply is not None:
+            replacement = pre_apply(conn)
+            if replacement is not None:
+                plan = replacement
         for rec in plan.inserts:
             cur = conn.execute(
                 "INSERT INTO transactions(account_id, provider_ref,"

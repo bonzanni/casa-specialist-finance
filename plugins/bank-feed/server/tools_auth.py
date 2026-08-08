@@ -2818,8 +2818,12 @@ def _bind_first_link(c, fenced, attempt, *, records, session_id, secret, prior):
         # It preempts any in-flight read refresh and consults no cooldown — an
         # ordinary question must never starve this.
         with authorization_priority(c, account_id):
+            # observe=True: the first-link backfill is one of the two
+            # labelled deep-observation runs reference trust can be earned
+            # from (the renewal fetch is the other).
             result = flows.backfill(
-                fenced, c, dict(record, account_id=account_id), session_id)
+                fenced, c, dict(record, account_id=account_id), session_id,
+                observe=True)
         # The RESULT is read now rather than discarded. A capped run
         # leaves the ledger safe but loses the deep history the fresh-SCA
         # window was for, and that window does not reopen — so it must not be
