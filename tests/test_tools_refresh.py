@@ -574,7 +574,7 @@ class TestAStandingIncompletenessRecordSurvives(Base):
     def _partial(self):
         """The durable record a capped authorization-time backfill leaves, via
         the real producer (`flows._incomplete`) rather than a hand-written row."""
-        flows._incomplete(self.raw, "acc1", flows.CAPPED_NOTE)
+        flows._incomplete(self.raw, "acc1", flows.CAPPED_NOTE, "")
         self.raw.execute(
             "UPDATE sync_state SET last_success_at=?, last_success_session=?"
             " WHERE resource='transactions'",
@@ -667,7 +667,7 @@ class TestAStandingIncompletenessRecordSurvives(Base):
         # would pin such an account partial for ever, with no call that could
         # ever repair it.
         import datetime
-        flows._incomplete(self.raw, "acc1", flows.CAPPED_NOTE)
+        flows._incomplete(self.raw, "acc1", flows.CAPPED_NOTE, "")
         self.raw.execute("UPDATE sync_state SET last_success_session=?"
                          " WHERE resource='transactions'", ("an-earlier-session",))
         ancient = (datetime.date.today()
@@ -799,7 +799,7 @@ class TestARunThatFindsItsOwnIncompletenessKeepsIt(Base):
                          "partial")
 
     def test_it_keeps_the_cause_its_own_run_recorded(self):
-        # `flows._incomplete(conn, aid, CAPPED_NOTE)` is the producer, and the
+        # `flows._incomplete(conn, aid, CAPPED_NOTE, "")` is the producer, and the
         # cause has to travel with the finding: a `partial` whose reason was
         # replaced by the pre-run record's is the orphaned-cause shape one
         # layer up.
@@ -1494,3 +1494,303 @@ class TestSyncClassificationTrailer(Base):
         self.assertIn("Queue: 0 workable transaction(s), 1 awaiting the "
                       "operator (all accounts, included or not).", reply)
         self.assertIn("Unclassified rows await the classifier.", reply)
+
+
+class TestErasureFence(Base):
+    """Issue #8 in this module: a refresh already in flight when
+    forget_local_account commits must write nothing — not through the
+    balances path, not through the failure recorder, not through the
+    narrow-run standing restore — and must say why instead of "refreshed"."""
+
+    def erase(self, aid="acc1"):
+        for table in ("transactions", "occurrence_alloc", "balances",
+                      "coverage", "sync_state", "attempts", "accounts",
+                      "ref_observations"):
+            self.raw.execute("DELETE FROM %s WHERE account_id=?" % table,
+                             (aid,))
+
+    def relink(self, aid="acc1", incarnation="life-B"):
+        self.raw.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency,"
+            " included, incarnation) VALUES (?, 'uid-B', 's-B', 'EUR', 1, ?)",
+            (aid, incarnation))
+
+    def test_a_balances_refresh_erased_mid_fetch_stores_nothing(self):
+        self.account()
+        inner = self.ais.balances
+
+        def erasing(uid):
+            self.erase()
+            return inner(uid)
+
+        self.ais.balances = erasing
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            self.conn, "acc1", "balances", automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM balances").fetchone()[0], 0)
+        self.assertIsNone(self.sync_row("balances"))
+
+    def test_a_transactions_refresh_erased_mid_fetch_stores_nothing(self):
+        self.account()
+        inner = self.ais.transactions
+
+        def erasing(uid, date_from, continuation_key=None):
+            self.erase()
+            return inner(uid, date_from, continuation_key)
+
+        self.ais.transactions = erasing
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            self.conn, "acc1", "transactions", automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
+        self.assertIsNone(self.sync_row("transactions"))
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM coverage").fetchone()[0], 0)
+
+    def test_a_failed_fetch_on_an_erased_account_records_no_failure_row(self):
+        """The resurrection through the error path: the exception must still
+        propagate, but the failure note — `_ensure_sync_row`'s INSERT
+        included — must not recreate sync_state for the erased account."""
+        self.account()
+
+        def erasing_then_failing(uid):
+            self.erase()
+            raise OSError("connection reset")
+
+        self.ais.balances = erasing_then_failing
+        with self.assertRaises(OSError):
+            tools_refresh._refresh_resource(self.conn, "acc1", "balances",
+                                            automatic=False)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM sync_state").fetchone()[0], 0)
+
+    def test_a_relinked_lifes_balances_survive_the_old_runs_reconcile(self):
+        """The old run's response said nothing about ITAV; that is no licence
+        to delete the NEW life's copy of it, and the old run's CLBD figure
+        must not land under the new life either."""
+        self.account()
+        inner = self.ais.balances
+
+        def erase_relink_seed(uid):
+            self.erase()
+            self.relink()
+            self.raw.execute(
+                "INSERT INTO balances(account_id, balance_type, amount_minor,"
+                " currency, fetched_at) VALUES ('acc1','ITAV',5555,'EUR',"
+                " '2026-08-03T00:00:00')")
+            return inner(uid)          # returns CLBD only
+
+        self.ais.balances = erase_relink_seed
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            self.conn, "acc1", "balances", automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
+        rows = {r["balance_type"]: r["amount_minor"] for r in self.raw.execute(
+            "SELECT balance_type, amount_minor FROM balances"
+            " WHERE account_id='acc1'")}
+        self.assertEqual(rows, {"ITAV": 5555})
+
+    def test_the_standing_restore_refuses_to_write_over_a_new_life(self):
+        """The narrow-run restore puts back the OLD standing record — a fact
+        about the OLD life. After a relink whose own deep run already earned
+        `complete`, the restore must not overwrite the new life's row."""
+        self.account()
+        self.tx(booking_date="2026-02-01")     # makes the window narrow
+        self.synced(resource="transactions", completeness="partial",
+                    last_success_session="s-standing")
+        inner = self.ais.transactions
+
+        def erase_relink_complete(uid, date_from, continuation_key=None):
+            self.erase()
+            self.relink()
+            self.raw.execute(
+                "INSERT INTO sync_state(account_id, resource,"
+                " last_attempt_at, last_success_at, completeness,"
+                " last_success_session) VALUES ('acc1','transactions',"
+                " '2026-08-03','2026-08-03','complete','s-NEW-LIFE')")
+            return inner(uid, date_from, continuation_key)
+
+        self.ais.transactions = erase_relink_complete
+        tools_refresh._refresh_resource(self.conn, "acc1", "transactions",
+                                        automatic=False)
+        row = self.sync_row("transactions")
+        self.assertEqual((row["completeness"], row["last_success_session"]),
+                         ("complete", "s-NEW-LIFE"))
+
+    def test_sync_names_the_erasure_instead_of_incomplete_or_refreshed(self):
+        self.account()
+        inner = self.ais.balances
+
+        def erasing(uid):
+            self.erase()
+            return inner(uid)
+
+        self.ais.balances = erasing
+        out = call("sync", resource="balances")
+        self.assertIn("NOTHING STORED", out)
+        self.assertIn("erased locally", out)
+        self.assertNotIn("INCOMPLETE", out)
+        self.assertNotIn("refreshed", out.split("\n", 1)[1])
+
+
+class TestForgetWithABackfillInFlight(Base):
+    """Issue #8, end to end through the real tools: `forget_local_account`
+    commits while `sync`'s backfill is mid-fetch, on one connection
+    sequence. The erasure's report must stay true afterwards — no
+    transactions, no sync_state, no coverage come back — and the sync must
+    say why nothing landed."""
+
+    def test_forget_stays_truthful_and_the_sync_says_why(self):
+        # Registration happens at module import; this file does not
+        # otherwise touch the destructive tools.
+        import tools_destructive  # noqa: F401
+        self.session()
+        self.account()
+        self.tx(booking_date="2026-02-01")
+        reports = {}
+        inner = self.ais.transactions
+
+        def forgetting(uid, date_from, continuation_key=None):
+            reports["forget"] = call("forget_local_account",
+                                     account_id="acc1")
+            return inner(uid, date_from, continuation_key)
+
+        self.ais.transactions = forgetting
+        out = call("sync", resource="transactions")
+        self.assertIn("Erased", reports["forget"])
+        self.assertIn("NOTHING STORED", out)
+        # the erasure's report is still the truth: nothing resurrected
+        for table in ("transactions", "sync_state", "coverage",
+                      "occurrence_alloc", "accounts"):
+            self.assertEqual(self.count(table), 0, table)
+
+
+class TestErasureFencePinsEveryGuard(Base):
+    """Mutation-killers for the two guards the interleaving tests above
+    cannot reach: the attempt stamp (erasure between the account read and
+    the stamp — before any provider call) and `_note_failure`'s UPDATEs
+    (which run against whatever row exists AFTER a relink)."""
+
+    def erase(self, aid="acc1"):
+        for table in ("transactions", "occurrence_alloc", "balances",
+                      "coverage", "sync_state", "attempts", "accounts",
+                      "ref_observations"):
+            self.raw.execute("DELETE FROM %s WHERE account_id=?" % table,
+                             (aid,))
+
+    def relink(self, aid="acc1", incarnation="life-B"):
+        self.raw.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency,"
+            " included, incarnation) VALUES (?, 'uid-B', 's-B', 'EUR', 1, ?)",
+            (aid, incarnation))
+
+    def test_an_erasure_before_the_attempt_stamp_recreates_nothing(self):
+        """The stamp is the FIRST write of a refresh; an erasure that lands
+        between the account read and this statement is the narrowest window
+        in the module, and an unguarded stamp mints the sync_state row right
+        back."""
+        self.account()
+        test = self
+
+        class EraseBeforeStamp:
+            def __init__(self, conn):
+                self.conn, self.armed = conn, True
+
+            def execute(self, sql, params=()):
+                if (self.armed and "INSERT INTO sync_state" in sql
+                        and "last_attempt_at" in sql):
+                    self.armed = False
+                    test.erase()
+                return self.conn.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            EraseBeforeStamp(self.conn), "acc1", "balances",
+            automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM sync_state WHERE account_id='acc1'"
+            ).fetchone()[0], 0)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM balances").fetchone()[0], 0)
+
+    def test_a_failure_note_never_lands_on_a_relinked_life(self):
+        """`_note_failure`'s UPDATEs run against whatever row exists at note
+        time — after a forget-and-relink that is the NEW life's row, and the
+        OLD run's failure text stamped onto it would be a false statement
+        about a life that never made the call."""
+        self.relink()
+        self.raw.execute(
+            "INSERT INTO sync_state(account_id, resource, last_error)"
+            " VALUES ('acc1','balances','its-own-history')")
+        tools_refresh._note_failure(self.raw, "acc1", "balances",
+                                    OSError("reset"), "")   # old life's token
+        row = self.sync_row("balances")
+        self.assertEqual(row["last_error"], "its-own-history")
+        self.assertIsNone(row["next_retry_after"])
+
+    def test_a_rate_limited_failure_note_never_lands_on_a_relinked_life(self):
+        """The rate-limited arm writes `next_retry_after` too — a backoff
+        stamped by the old life would silently defer the NEW life's
+        refreshes."""
+        self.relink()
+        self.raw.execute(
+            "INSERT INTO sync_state(account_id, resource, last_error)"
+            " VALUES ('acc1','balances','its-own-history')")
+        tools_refresh._note_failure(self.raw, "acc1", "balances",
+                                    rate_limited(retry_after_s=120), "")
+        row = self.sync_row("balances")
+        self.assertEqual(row["last_error"], "its-own-history")
+        self.assertIsNone(row["next_retry_after"])
+
+    def test_a_live_life_still_gets_its_failure_note(self):
+        """The counterweight: with the CAPTURED token still live, the note
+        lands — the guard must not fail closed into never recording
+        anything."""
+        self.account()
+        self.raw.execute(
+            "INSERT INTO sync_state(account_id, resource)"
+            " VALUES ('acc1','balances')")
+        tools_refresh._note_failure(self.raw, "acc1", "balances",
+                                    OSError("reset"), "")
+        self.assertEqual(self.sync_row("balances")["last_error"], "OSError")
+
+    def test_a_relink_before_the_attempt_stamp_gets_no_stamp_either(self):
+        """The half the erase-only interleave cannot pin: after a
+        forget-and-relink the account EXISTS again, so only the incarnation
+        predicate stands between the old run and stamping the new life's
+        sync_state. Dropping `AND incarnation=?` alone must turn this red."""
+        self.account()
+        test = self
+
+        class RelinkBeforeStamp:
+            def __init__(self, conn):
+                self.conn, self.armed = conn, True
+
+            def execute(self, sql, params=()):
+                if (self.armed and "INSERT INTO sync_state" in sql
+                        and "last_attempt_at" in sql):
+                    self.armed = False
+                    test.erase()
+                    test.relink()
+                return self.conn.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            RelinkBeforeStamp(self.conn), "acc1", "balances",
+            automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM sync_state WHERE account_id='acc1'"
+            ).fetchone()[0], 0)
+        self.assertEqual(self.raw.execute(
+            "SELECT COUNT(*) FROM balances WHERE account_id='acc1'"
+            ).fetchone()[0], 0)

@@ -133,30 +133,45 @@ def _is_rate_limited(exc) -> bool:
             or getattr(exc, "kind", "") == "rate_limited")
 
 
-def _ensure_sync_row(c, account_id: str, resource: str) -> None:
+def _ensure_sync_row(c, account_id: str, resource: str, incarnation) -> None:
+    # Guarded on the caller's captured life token (issue #8): unguarded,
+    # this INSERT recreated `sync_state` for an account
+    # `forget_local_account` had just erased — through the FAILURE path, the
+    # place nobody looks twice — and could even mint the row for an account
+    # that never existed at all.
     c.execute("INSERT OR IGNORE INTO sync_state(account_id, resource)"
-              " VALUES (?,?)", (account_id, resource))
+              " SELECT ?,? WHERE EXISTS (SELECT 1 FROM accounts"
+              " WHERE account_id=? AND incarnation=?)",
+              (account_id, resource, account_id, incarnation))
 
 
-def _note_failure(c, account_id: str, resource: str, exc) -> None:
+def _note_failure(c, account_id: str, resource: str, exc, incarnation) -> None:
     """Record the failure per resource, and the provider's own backoff.
 
     The class name only — never the message, which can carry a provider
-    body.
+    body. Every write is conditioned on `incarnation` — the token captured
+    by the SAME account read the failed refresh ran under — so a failure
+    noted late cannot resurrect sync_state for an erased account, nor stamp
+    the OLD run's failure onto a re-linked account's NEW life. The UPDATEs
+    need the predicate too, not just the INSERT: after a forget-and-relink
+    the row they would hit belongs to the new life.
     """
-    _ensure_sync_row(c, account_id, resource)
+    _ensure_sync_row(c, account_id, resource, incarnation)
+    guard = (" AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+             " AND incarnation=?)")
     label = type(exc).__name__
     if _is_rate_limited(exc):
         wait = _retry_after_s(exc)
         label += (" (Retry-After honoured)" if _honoured(exc)
                   else " (no usable Retry-After; conservative default)")
         c.execute("UPDATE sync_state SET last_error=?, next_retry_after=?"
-                  " WHERE account_id=? AND resource=?",
+                  " WHERE account_id=? AND resource=?" + guard,
                   (label, _iso_at(tools_auth._now_s() + wait), account_id,
-                   resource))
+                   resource, account_id, incarnation))
     else:
         c.execute("UPDATE sync_state SET last_error=? WHERE account_id=? AND"
-                  " resource=?", (label, account_id, resource))
+                  " resource=?" + guard,
+                  (label, account_id, resource, account_id, incarnation))
 
 
 class NotLinked(RuntimeError):
@@ -223,7 +238,8 @@ class NoBalancesReturned(RuntimeError):
     operator_exit = NO_BALANCES_EXIT
 
 
-def _reconcile_balance_types(c, account_id: str, returned: list) -> None:
+def _reconcile_balance_types(c, account_id: str, returned: list,
+                             incarnation) -> None:
     """Drop this account's balance types the bank has stopped returning.
 
     **Why a delete is needed at all.** The write path was upsert-only, so a
@@ -263,9 +279,16 @@ def _reconcile_balance_types(c, account_id: str, returned: list) -> None:
     `_balance_usable` reports the gap ("a gap, not zero") as it always has.
     """
     if returned:
+        # The delete carries the run's life token (issue #8): after a
+        # forget-and-relink, the NEW life's balance rows are the ones this
+        # statement would reach, and the OLD run's response saying nothing
+        # about a type is no licence to delete the new life's copy of it.
         c.execute(
-            "DELETE FROM balances WHERE account_id=? AND balance_type NOT IN (%s)"
-            % ",".join("?" * len(returned)), [account_id] + list(returned))
+            "DELETE FROM balances WHERE account_id=? AND balance_type NOT IN"
+            " (%s) AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+            " AND incarnation=?)"
+            % ",".join("?" * len(returned)),
+            [account_id] + list(returned) + [account_id, incarnation])
         return
     held = c.execute("SELECT COUNT(*) FROM balances WHERE account_id=?",
                      (account_id,)).fetchone()[0]
@@ -392,10 +415,12 @@ def _refresh_resource(c, account_id: str, resource: str, *,
             "another refresh for this account is already in flight; only one "
             "runs at a time")
     try:
+        # Failure recording lives INSIDE `_do_refresh` now, beside the
+        # account read that captures the life token the note must be
+        # conditioned on (issue #8). Recording it here, without that token,
+        # was the resurrection-through-the-error-path: a failed fetch for an
+        # erased account recreated its sync_state row from this handler.
         return _do_refresh(c, account_id, resource, out=out)
-    except Exception as exc:                     # noqa: BLE001 — recorded, re-raised
-        _note_failure(c, account_id, resource, exc)
-        raise
     finally:
         _release_own(c, account_id, held)
 
@@ -404,8 +429,26 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     row = c.execute("SELECT * FROM accounts WHERE account_id=?",
                     (account_id,)).fetchone()
     if row is None:
+        # No failure note: there is no account row to condition one on, and
+        # the unguarded note used to mint a sync_state row for an account
+        # that did not exist — the same resurrection shape issue #8 fences.
         raise RuntimeError("unknown account")
     account = dict(row)
+    # THE life token for everything this refresh writes (issue #8), captured
+    # by the same read that supplied the uid and session the fetch runs
+    # under. Never re-read later in the run: a forget-and-relink between two
+    # reads is exactly what the fence exists to catch.
+    incarnation = account.get("incarnation")
+    try:
+        return _fetch_resource(c, account_id, resource, account, incarnation,
+                               out=out)
+    except Exception as exc:  # noqa: BLE001 — recorded (guarded), re-raised
+        _note_failure(c, account_id, resource, exc, incarnation)
+        raise
+
+
+def _fetch_resource(c, account_id: str, resource: str, account: dict,
+                    incarnation, out=None) -> bool:
     session_id = account.get("session_id")
     if not session_id or not account.get("uid"):
         raise NotLinked("this account is not bound to a live consent")
@@ -418,10 +461,18 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
         " WHERE account_id=? AND resource='transactions'",
         (account_id,)).fetchone()
     now = tools_auth._utcnow_iso()
+    # Guarded like every other write in the run (issue #8): the erasure this
+    # races is one that landed between the account read above and here, and
+    # an unguarded stamp would recreate sync_state for the erased account —
+    # or stamp the OLD run's attempt onto a re-linked NEW life. The SELECT's
+    # WHERE clause also resolves SQLite's upsert-with-SELECT parsing
+    # ambiguity, which requires one.
     c.execute("INSERT INTO sync_state(account_id, resource, last_attempt_at)"
-              " VALUES (?,?,?) ON CONFLICT(account_id, resource) DO UPDATE SET"
+              " SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM accounts"
+              " WHERE account_id=? AND incarnation=?)"
+              " ON CONFLICT(account_id, resource) DO UPDATE SET"
               " last_attempt_at=excluded.last_attempt_at",
-              (account_id, resource, now))
+              (account_id, resource, now, account_id, incarnation))
     ais = tools_auth._ais()
     if resource == "balances":
         returned = []
@@ -438,8 +489,14 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
             balance_type = (tools_read._neutralized(entry.get("balance_type"))
                             or "UNKNOWN")
             c.execute(
+                # Guarded (issue #8): an unguarded upsert re-created balance
+                # rows for an erased account from a response fetched before
+                # the erasure, or wrote the OLD life's figures over a
+                # re-linked NEW life's.
                 "INSERT INTO balances(account_id, balance_type, amount_minor,"
-                " currency, reference_date, fetched_at) VALUES (?,?,?,?,?,?)"
+                " currency, reference_date, fetched_at)"
+                " SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM accounts"
+                " WHERE account_id=? AND incarnation=?)"
                 " ON CONFLICT(account_id, balance_type) DO UPDATE SET"
                 " amount_minor=excluded.amount_minor,"
                 " currency=excluded.currency,"
@@ -448,18 +505,29 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
                 (account_id, balance_type,
                  money.to_minor(str(amount.get("amount")), currency), currency,
                  tools_read._neutralized(entry.get("reference_date")) or None,
-                 now))
+                 now, account_id, incarnation))
             returned.append(balance_type)
-        _reconcile_balance_types(c, account_id, returned)
+        _reconcile_balance_types(c, account_id, returned, incarnation)
         # LAST, and that ordering is the safety property: every intermediate
         # state is honest. A crash after the upserts but before the delete
         # leaves an extra row AND no success stamp, so the freshness note goes
         # on showing the previous sync's age rather than vouching for a set
         # this run never finished reconciling.
-        c.execute("UPDATE sync_state SET last_success_at=?,"
-                  " completeness='complete', last_error=NULL,"
-                  " next_retry_after=NULL WHERE account_id=? AND resource=?",
-                  (now, account_id, resource))
+        cur = c.execute("UPDATE sync_state SET last_success_at=?,"
+                        " completeness='complete', last_error=NULL,"
+                        " next_retry_after=NULL WHERE account_id=?"
+                        " AND resource=? AND EXISTS (SELECT 1 FROM accounts"
+                        " WHERE account_id=? AND incarnation=?)",
+                        (now, account_id, resource, account_id, incarnation))
+        if not cur.rowcount:
+            # The fence fired: with a live account this row exists — the
+            # guarded attempt stamp above created it — so zero rows means
+            # the account was erased under the run and every guarded write
+            # above refused with it. Detected, not silent: "refreshed" over
+            # a fenced run would report a success whose writes never landed.
+            if out is not None:
+                out["erased"] = True
+            return False
         return True
 
     # `flows.backfill` writes the transactions row of sync_state itself —
@@ -511,21 +579,31 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     # is no window in which the two can disagree. An unrecognised value fails
     # closed: the run keeps its own finding.
     floor_days = _refresh_window_days(c, account_id)
-    result = flows.backfill(ais, c, account, session_id, floor_days=floor_days)
+    result = flows.backfill(ais, c, account, session_id, floor_days=floor_days,
+                            incarnation=incarnation)
     if out is not None:
         # Classifier trailer facts: server-generated ids and the FINAL-state
-        # auto-tagged count, straight from apply_plan.
+        # auto-tagged count, straight from apply_plan — and the fence's own
+        # finding, so `sync` can say WHY nothing landed instead of printing
+        # the "marked partial" line over an account that has no marks left.
         out["new_row_ids"] = list(result.get("new_row_ids") or [])
         out["auto_tagged"] = int(result.get("auto_tagged") or 0)
         out["needs_classification"] = int(
             result.get("needs_classification") or 0)
+        out["erased"] = bool(result.get("erased"))
     if floor_days < flows.BACKFILL_FLOOR_DAYS and standing is not None:
         c.execute(
             "UPDATE sync_state SET completeness=?, last_success_session=?,"
             " last_error=? WHERE account_id=? AND resource='transactions'"
-            " AND completeness='complete'",
+            " AND completeness='complete'"
+            # The restore, too, is a late write from a run that captured its
+            # facts earlier (issue #8): unguarded, it wrote the OLD life's
+            # standing record over the fresh `complete` row a re-linked NEW
+            # life's own deep run had just earned.
+            " AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+            " AND incarnation=?)",
             (standing["completeness"], standing["last_success_session"],
-             standing["last_error"], account_id))
+             standing["last_error"], account_id, account_id, incarnation))
     # The result is READ, not discarded. A capped run returns normally, so
     # "no exception" was never the same thing as "the history is here".
     # The session is named explicitly — `flows.backfill` stamps
@@ -657,6 +735,19 @@ def sync(args: dict) -> str:
                 if _refresh_resource(c, account_id, resource,
                                      automatic=False, out=res_out):
                     lines.append(_account_line(name, resource, "refreshed"))
+                elif res_out.get("erased"):
+                    # The issue-#8 fence fired: the "INCOMPLETE … marked
+                    # partial" line below would be false here — there is no
+                    # sync_state row left to be marked anything, and possibly
+                    # no account. Erasure is the operator's own completed
+                    # action; this line's job is to not contradict it.
+                    lines.append(_account_line(
+                        name, resource,
+                        "NOTHING STORED — this account was erased locally "
+                        "while the refresh was in flight, so nothing the "
+                        "fetch returned was kept. If the erasure was yours, "
+                        "there is nothing to do; a future link_bank can "
+                        "bring the account back."))
                 else:
                     # A capped pagination returns normally, so "refreshed" was
                     # printed over a run that fetched part of the history and

@@ -557,7 +557,7 @@ def silent_backfill(ais, conn, account, session_id, **kwargs):
 
 
 def capped_renewal(conn, ais, *, old_session_id, new_session_id, accounts,
-                   secret):
+                   secret, incarnations=None):
     """`flows.complete_renewal` when the NEW session's fetch hits the page cap.
 
     The ordering is the whole point of the split: the switch does not
@@ -964,7 +964,7 @@ class Base(unittest.TestCase):
         so no test in this file ever produced a non-empty `coverage` table and
         `consent_status`'s gap loop was invisible to the whole suite.
         """
-        apply.record_coverage(self.raw, aid, start, end, session_id)
+        apply.record_coverage(self.raw, aid, start, end, session_id, incarnation="")
 
     def account(self, aid="acc1", session_id=SESSION_ID,
                 currency="EUR", included=1):

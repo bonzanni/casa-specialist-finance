@@ -300,8 +300,17 @@ def verify_accounts(session_accounts: list, whitelisted: list,
 
 
 def complete_renewal(conn, ais, *, old_session_id: str, new_session_id: str,
-                     accounts: list, secret: bytes) -> dict:
+                     accounts: list, secret: bytes, incarnations: dict) -> dict:
     """THE renewal entry point. Deep fetch first, then the one switch.
+
+    `incarnations` is `{account_id: incarnation}` captured by the SAME read
+    that validated the exact bound set — the issue-#8 fence's token, one per
+    account. Every write each backfill makes, and the switch itself, is
+    conditioned on the account still living that life. An account erased (or
+    erased and re-linked) mid-renewal joins `erased_accounts` in the return —
+    present on EVERY path, like `remedy` — nothing is switched, nothing is
+    retired, and the old consent stays the live one: the safe direction when
+    the operator erased an account out from under their own renewal.
 
     A renewal must not close the old session until the new session's deep
     fetch is durably complete. So, strictly:
@@ -368,20 +377,24 @@ def complete_renewal(conn, ais, *, old_session_id: str, new_session_id: str,
                                           secret)
         bindings.append((account_id, account.get("uid")))
 
-    inserted, shallow, short = 0, False, []
+    inserted, shallow, short, erased = 0, False, [], []
     for account_id, uid in bindings:
         # observe=True: a renewal's fetch is one of the two labelled
         # deep-observation runs reference trust can be earned from.
         out = backfill(ais, conn, {"account_id": account_id, "uid": uid},
-                       new_session_id, observe=True)
+                       new_session_id, observe=True,
+                       incarnation=incarnations.get(account_id))
         inserted += out.get("inserted") or 0
         shallow = shallow or bool(out.get("shallow"))
+        if out.get("erased"):
+            erased.append(account_id)
         if not apply.deep_fetch_complete(conn, account_id, new_session_id):
             # The same predicate switch_bindings refuses on, asked here so the
             # caller gets `retired: False` — a durable "come back and finish
             # this" — rather than an exception. One predicate, two uses, so the
             # two can never drift apart. Note it asks whether the FETCH
             # completed, not whether rows came back: a dormant account renews.
+            # An erased account always lands here too — its stamp was fenced.
             short.append(account_id)
     if short:
         # Nothing is switched, nothing is retired and nothing is revoked — the
@@ -394,21 +407,43 @@ def complete_renewal(conn, ais, *, old_session_id: str, new_session_id: str,
         # CANNOT continue this attempt — it would refresh the old bound session
         # and report progress on the wrong consent. The caller must say: revoke
         # the quarantined candidate and authorize again.
+        # `capped` stays True only when a NON-erased account fell short: it
+        # is the "re-run may help" signal, and an erased account has nothing
+        # to re-run against — labelling it capped sent the operator back to
+        # finish a fetch for an account that no longer exists.
         return {"accounts": 0, "generation": None, "retired": False,
                 "inserted": inserted, "shallow": True, "incomplete": short,
-                "capped": True, "completeness": "partial",
+                "capped": bool(set(short) - set(erased)),
+                "completeness": "aborted" if set(short) <= set(erased)
+                else "partial",
+                "erased_accounts": erased,
                 "revoked": False, "revoke_error": None,
                 "remedy": REAUTHORIZE_REMEDY}
 
-    switched = apply.switch_bindings(conn, bindings, new_session_id,
-                                     old_session_id)
+    try:
+        switched = apply.switch_bindings(conn, bindings, new_session_id,
+                                         old_session_id,
+                                         incarnations=incarnations)
+    except apply.AccountErased as exc:
+        # Erased AFTER every fetch completed and BEFORE the switch took its
+        # lock. Same honest outcome as an erasure mid-fetch: nothing
+        # switched, nothing retired, old consent still the live one — and
+        # the report says which account ended it, not a generic failure.
+        return {"accounts": 0, "generation": None, "retired": False,
+                "inserted": inserted, "shallow": shallow,
+                "incomplete": [exc.account_id] if exc.account_id else [],
+                "capped": False, "completeness": "aborted",
+                "erased_accounts": [exc.account_id] if exc.account_id else [],
+                "revoked": False, "revoke_error": None,
+                "remedy": REAUTHORIZE_REMEDY}
     revoked, revoke_error = _revoke(conn, ais, old_session_id)
     # `capped`/`completeness` too, so the caller's two-signal completeness
     # check reads this exactly as it reads a plain backfill result. `remedy` is
-    # present on BOTH paths and None here: a key that appears only on failure
-    # is a key callers forget to read.
+    # present on BOTH paths and None here — and `erased_accounts` on all
+    # three: a key that appears only on failure is a key callers forget to
+    # read.
     return dict(switched, inserted=inserted, shallow=shallow, incomplete=[],
-                capped=False, completeness="complete",
+                capped=False, completeness="complete", erased_accounts=[],
                 revoked=revoked, revoke_error=revoke_error, remedy=None)
 
 
@@ -488,8 +523,9 @@ def _aspsp_of(conn, account: dict) -> str:
     return (stored or account.get("aspsp") or "").strip()
 
 
-def _incomplete(conn, account_id: str, note: str) -> None:
-    """Persist that an attempt happened and proved nothing.
+def _incomplete(conn, account_id: str, note: str, incarnation) -> bool:
+    """Persist that an attempt happened and proved nothing. Returns whether
+    the row landed.
 
     A capped or failed run may keep staging and checkpoint state, but it must
     neither update nor tombstone a canonical row and must record NO coverage.
@@ -498,20 +534,31 @@ def _incomplete(conn, account_id: str, note: str) -> None:
     erasing it would turn one bad page into an apparent total loss — while
     `completeness` goes to 'partial' so every read tool labels its answers as
     covering an incomplete range.
+
+    Guarded on the run's captured `incarnation` like every other late write:
+    a capped or failed run whose account was erased underneath it must not
+    recreate `sync_state` for the erased account — issue #8's fence covers
+    the failure paths too, because a resurrection through the error path is
+    still a resurrection. False means the guard refused; the caller converts
+    that into its erased report (the failed path still re-raises regardless).
     """
     now = dt.datetime.now().isoformat()
     prior = conn.execute(
         "SELECT last_success_at, oldest_fetched, last_success_session"
         " FROM sync_state WHERE account_id=? AND resource='transactions'",
         (account_id,)).fetchone()
-    conn.execute(
+    cur = conn.execute(
         "INSERT OR REPLACE INTO sync_state(account_id, resource,"
         " last_attempt_at, last_success_at, completeness, last_error,"
         " next_retry_after, oldest_fetched, last_success_session)"
-        " VALUES (?,'transactions',?,?,'partial',?,NULL,?,?)",
+        " SELECT ?,'transactions',?,?,'partial',?,NULL,?,?"
+        " WHERE EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+        " AND incarnation=?)",
         (account_id, now, prior["last_success_at"] if prior else None, note,
          prior["oldest_fetched"] if prior else None,
-         prior["last_success_session"] if prior else None))
+         prior["last_success_session"] if prior else None,
+         account_id, incarnation))
+    return bool(cur.rowcount)
 
 
 def _proven_lower_bound(fetched: list, requested_from: str) -> str | None:
@@ -538,7 +585,7 @@ def _proven_lower_bound(fetched: list, requested_from: str) -> str | None:
 
 def backfill(ais, conn, account: dict, session_id: str,
              floor_days: int = BACKFILL_FLOOR_DAYS,
-             observe: bool = False) -> dict:
+             observe: bool = False, *, incarnation) -> dict:
     """Exhaustive deep backfill, INSIDE the fresh-SCA window.
 
     `account` is the ledger-side dict {"account_id", "uid"}; the ASPSP is read
@@ -558,8 +605,12 @@ def backfill(ais, conn, account: dict, session_id: str,
     sample size bounds what silence proves, never what a sighting proves.
 
     Returns {"inserted", "proved_from", "proved_to", "shallow", "pages",
-    "capped", "completeness"} — **both completeness signals on EVERY return
-    path**, the capped one included. The consumer reads a missing
+    "capped", "completeness", "erased"} — **the completeness signals and
+    `erased` on EVERY return path**, the capped one included. `erased: True`
+    is the issue-#8 fence firing: the account was erased (or erased and
+    re-linked) while this run held its pages, every write refused, and
+    nothing durable exists for this run — `completeness` is then 'aborted',
+    which no consumer may read as complete. The consumer reads a missing
     `completeness` as complete, so a branch that omits it is a branch that
     reports an unfinished fetch as a finished one; the durable
     `sync_state.completeness` written alongside carries the identical fact, and
@@ -620,18 +671,31 @@ def backfill(ais, conn, account: dict, session_id: str,
     end = (today + dt.timedelta(days=1)).isoformat()
     aid = account["account_id"]
 
-    # The incarnation the evidence guard requires: captured BEFORE the first
-    # provider fetch, so evidence filed at the end of this run can only ever
-    # describe the life of the account whose pages it is about to measure.
-    # Captured after pagination it guards nothing: forget_local_account plus
-    # a re-link of the same IBAN DURING the fetch mints a new token under the
-    # SAME deterministic account_id, and a late read would hand this run the
-    # new life's token for pages fetched from the old one. A missing account
-    # row reads as None, which the guard can never match -- the fail-closed
-    # direction, since absent evidence never grants.
-    inc_row = conn.execute("SELECT incarnation FROM accounts"
-                           " WHERE account_id=?", (aid,)).fetchone()
-    incarnation = inc_row["incarnation"] if inc_row is not None else None
+    # `incarnation` is the CALLER's capture, made atomically with the binding
+    # read this run fetches under, and required — issue #8. This function
+    # used to read the token here, at entry, and that read races the caller's
+    # own earlier account read: a forget-and-relink between the two hands
+    # this run the NEW life's token for pages it is about to fetch under the
+    # OLD life's uid/session, and every guard below then passes. Every write
+    # this run makes — plan rows, evidence, coverage, sync_state, on the
+    # failure paths too — is conditioned on this token still being the live
+    # one, inside the same transaction as the write. A None (the account row
+    # was already gone at capture) matches no row: fail-closed.
+
+    def _erased(pages: int) -> dict:
+        """The report of a run fenced off because its account was erased.
+
+        Neither a failure nor a success: `completeness` is 'aborted' (never
+        'complete', so no consumer can credit it), nothing durable was
+        written, and `erased` says WHY nothing landed. `forget_local_account`
+        already told the operator what was erased; this run's job is only to
+        not contradict it.
+        """
+        return {"inserted": 0, "proved_from": None, "proved_to": None,
+                "shallow": False, "pages": pages,
+                "capped": False, "completeness": "aborted", "erased": True,
+                "new_row_ids": [], "auto_tagged": 0,
+                "needs_classification": 0}
 
     # ---- stage every page; NOTHING destructive runs until this finishes ----
     staged, key, pages, capped = [], None, 0, False
@@ -648,12 +712,21 @@ def backfill(ais, conn, account: dict, session_id: str,
     except Exception:
         # A 429 or a dropped socket mid-pagination is exactly the incomplete
         # fetch above: record the attempt, prove nothing, and re-raise so the
-        # caller cannot mistake a silent zero for an empty account.
-        _incomplete(conn, aid, FAILED_NOTE)
+        # caller cannot mistake a silent zero for an empty account. The
+        # attempt note is fenced like every other write — an erased account
+        # records nothing — but the exception re-raises REGARDLESS: what the
+        # provider did and what the operator did are two different facts,
+        # and the caller still has to hear the first one.
+        _incomplete(conn, aid, FAILED_NOTE, incarnation)
         raise
 
     if capped:
-        _incomplete(conn, aid, CAPPED_NOTE)
+        if not _incomplete(conn, aid, CAPPED_NOTE, incarnation):
+            # The cap happened, but the account was erased underneath the
+            # run — and "erased" is the finding that decides what the
+            # operator may rely on: a capped report would send them back to
+            # re-run a backfill for an account that no longer exists.
+            return _erased(pages)
         # `capped` and `completeness` on THIS path too. The contract says
         # every return carries both and that a missing signal means incomplete,
         # but the consumer defaults an absent `completeness` to "complete" — so
@@ -663,7 +736,7 @@ def backfill(ais, conn, account: dict, session_id: str,
         # about, and a signal that only survives by accident is not a signal.
         return {"inserted": 0, "proved_from": None, "proved_to": None,
                 "shallow": True, "pages": pages,
-                "capped": True, "completeness": "partial",
+                "capped": True, "completeness": "partial", "erased": False,
                 "new_row_ids": [], "auto_tagged": 0,
                 "needs_classification": 0}
 
@@ -740,14 +813,29 @@ def backfill(ais, conn, account: dict, session_id: str,
     def _evidence_and_revalidate(c):
         """Inside apply_plan's BEGIN IMMEDIATE, before any plan row lands.
 
-        Order is load-bearing: (1) file THIS run's evidence, so
-        no state exists in which the run's rows are committed and its
-        demotion is not; (2) re-derive trust under the write lock; (3) hand
-        back a heuristic replan when a plan built under trust arrives at a
-        ledger that has since demoted — a concurrent deep run can file a
-        reuse event between this run's derivation above and this lock.
-        Grants never replan: a plan built untrusted is always licensed.
+        Order is load-bearing: (0) THE FENCE — is the account still living
+        the life this run captured? Asked here, under the write lock that
+        holds through COMMIT, because this is the one place the answer
+        cannot change between the asking and the writing.
+        `forget_local_account`'s own BEGIN IMMEDIATE orders entirely before
+        or entirely after this transaction, so a run whose account was
+        erased (or erased and re-linked — same deterministic id, new token)
+        raises `apply.AccountErased`, the whole plan rolls back, and the
+        pages this run holds in memory land nowhere. Then (1) file THIS
+        run's evidence, so no state exists in which the run's rows are
+        committed and its demotion is not; (2) re-derive trust under the
+        write lock; (3) hand back a heuristic replan when a plan built under
+        trust arrives at a ledger that has since demoted — a concurrent deep
+        run can file a reuse event between this run's derivation above and
+        this lock. Grants never replan: a plan built untrusted is always
+        licensed.
         """
+        live = c.execute("SELECT 1 FROM accounts WHERE account_id=?"
+                         " AND incarnation=?", (aid, incarnation)).fetchone()
+        if live is None:
+            raise apply.AccountErased(
+                "account %s was erased while this run was fetching; nothing "
+                "from the fetch may land" % aid, aid)
         if observe:
             # The labelled deep run files its observation whatever it saw --
             # a zero-row dormant account included: "measured, and nothing"
@@ -771,8 +859,14 @@ def backfill(ais, conn, account: dict, session_id: str,
                                         current, allocated=allocated)
         return None
 
-    stats = apply.apply_plan(conn, aid, plan,      # one transaction, or raises
-                             pre_apply=_evidence_and_revalidate)
+    try:
+        stats = apply.apply_plan(conn, aid, plan,  # one transaction, or raises
+                                 pre_apply=_evidence_and_revalidate)
+    except apply.AccountErased:
+        # ONLY the fence's own signal is converted; every other exception —
+        # provider, plan, database — keeps its meaning and propagates. The
+        # rollback already unwound rows, evidence and allocations together.
+        return _erased(pages)
 
     span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
                                           - dt.date.fromisoformat(proved_from)).days
@@ -799,7 +893,15 @@ def backfill(ais, conn, account: dict, session_id: str,
         # we ever have is exactly the confident lie this design refuses.
         # `last_success_session` below carries the narrower, answerable fact —
         # the retrieval completed — which is what a renewal actually needs.
-        apply.record_coverage(conn, aid, proved_from, proved_to, session_id)
+        #
+        # False from the guard means the account was erased between
+        # apply_plan's commit and this separate transaction: the rows this
+        # run committed are already gone (forget deleted them), so coverage
+        # attesting to them would be the confident lie, and the honest
+        # report for the WHOLE run is "erased" — the end state holds nothing.
+        if not apply.record_coverage(conn, aid, proved_from, proved_to,
+                                     session_id, incarnation=incarnation):
+            return _erased(pages)
 
     now = dt.datetime.now().isoformat()
     # A trust transition is DISCLOSED, not silent, beside the shallow and
@@ -823,18 +925,24 @@ def backfill(ais, conn, account: dict, session_id: str,
     # completed — which is why apply.switch_bindings can check it instead of
     # trusting that its caller backfilled first. Unlike coverage it does not
     # depend on rows coming back, so a dormant account renews normally.
-    conn.execute(
+    cur = conn.execute(
         "INSERT OR REPLACE INTO sync_state(account_id, resource,"
         " last_attempt_at, last_success_at, completeness, last_error,"
         " next_retry_after, oldest_fetched, last_success_session)"
-        " VALUES (?,'transactions',?,?,?,?,NULL,?,?)",
+        " SELECT ?,'transactions',?,?,?,?,NULL,?,?"
+        " WHERE EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+        " AND incarnation=?)",
         (aid, now, now, "complete", "; ".join(notes) or None, proved_from,
-         session_id))
+         session_id, aid, incarnation))
+    if not cur.rowcount:
+        # Erased between the previous write and this one; same reasoning as
+        # the coverage guard above — the end state holds nothing, say so.
+        return _erased(pages)
     # The returned pair and the durable row are written from the same fact, in
     # the same place, so a caller reading either learns the same thing.
     return {"inserted": stats["inserted"], "proved_from": proved_from,
             "proved_to": proved_to, "shallow": shallow, "pages": pages,
-            "capped": False, "completeness": "complete",
+            "capped": False, "completeness": "complete", "erased": False,
             "new_row_ids": stats["inserted_row_ids"],
             "auto_tagged": stats["auto_tagged"],
             "needs_classification": stats["needs_classification"]}

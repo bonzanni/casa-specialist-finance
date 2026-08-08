@@ -303,7 +303,7 @@ class TestBackfill(unittest.TestCase):
         ais = FakeAIS([([raw_tx("2024-08-05", ref="R1"),
                          raw_tx("2025-01-09", ref="R2", remittance="huur")], "k1"),
                        ([raw_tx("2026-08-01", ref="R3", remittance="energie")], None)])
-        out = flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(out["pages"], 2)
         self.assertEqual(out["inserted"], 3)
         self.assertEqual(ais.calls[1][2], "k1")        # the key is handed back
@@ -318,7 +318,7 @@ class TestBackfill(unittest.TestCase):
 
     def test_date_from_sits_at_the_provider_floor(self):
         ais = FakeAIS([([], None)])
-        flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(ais.calls[0][1], "2018-08-25")     # TODAY − 2900 days
         # 8 years back is rejected outright, so the floor keeps a margin.
         self.assertLess(flows.BACKFILL_FLOOR_DAYS, 8 * 365)
@@ -329,14 +329,14 @@ class TestBackfill(unittest.TestCase):
         success."""
         ais = FakeAIS([([raw_tx("2026-05-05", ref="R1"),
                          raw_tx("2026-08-01", ref="R2", remittance="huur")], None)])
-        out = flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertTrue(out["shallow"])
         self.assertEqual(out["proved_from"], "2026-05-05")
         self.assertEqual(self._coverage(), [("2026-05-05", "2026-08-04")])
         self.assertEqual(self._sync()["last_error"], flows.SHALLOW_NOTE)
 
     def test_the_page_cap_fails_loudly_and_proves_nothing(self):
-        out = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1")
+        out = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(out["pages"], flows.MAX_PAGES)
         self.assertIsNone(out["proved_from"])
         self.assertIsNone(out["proved_to"])
@@ -355,7 +355,7 @@ class TestBackfill(unittest.TestCase):
         branch that omitted them was the branch where omitting them reads as
         success. The durable row masked it; a signal that survives only by
         accident is not a signal."""
-        out = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1")
+        out = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         self.assertIn("capped", out)
         self.assertIn("completeness", out)
         self.assertTrue(out["capped"])
@@ -367,7 +367,7 @@ class TestBackfill(unittest.TestCase):
         """The other half of the same rule: "complete" must be stated, not
         inferred from an absence."""
         out = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)]),
-                             self.conn, ACCOUNT, "s1")
+                             self.conn, ACCOUNT, "s1", incarnation="")
         self.assertIs(out["capped"], False)
         self.assertEqual(out["completeness"], "complete")
         self.assertEqual(out["completeness"], self._sync()["completeness"])
@@ -386,7 +386,7 @@ class TestBackfill(unittest.TestCase):
             " VALUES ('acc1','k-page-61',0,'2025-03-04','2025-03-04',-1234,"
             "'EUR','DBIT','BOOK','Voorbeeld Supermarkt','huur','active',"
             "'inserted','2025-03-04','2025-03-04')")
-        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1")
+        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         row = self.conn.execute(
             "SELECT state, state_reason FROM transactions"
             " WHERE identity_key='k-page-61'").fetchone()
@@ -401,7 +401,7 @@ class TestBackfill(unittest.TestCase):
         It re-raises so the caller cannot read a silent zero as an empty
         account."""
         with self.assertRaises(OSError):
-            flows.backfill(BrokenAIS(), self.conn, ACCOUNT, "s1")
+            flows.backfill(BrokenAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) AS c FROM transactions").fetchone()["c"], 0)
         self.assertEqual(self._coverage(), [])
@@ -413,9 +413,9 @@ class TestBackfill(unittest.TestCase):
     def test_an_incomplete_run_does_not_erase_an_earlier_success(self):
         """One bad page must not look like a total loss."""
         ais = FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)])
-        flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         good = self._sync()["last_success_at"]
-        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1")
+        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         row = self._sync()
         self.assertEqual(row["completeness"], "partial")
         self.assertEqual(row["last_success_at"], good)
@@ -427,9 +427,9 @@ class TestBackfill(unittest.TestCase):
         what lets apply.switch_bindings check the ledger instead of trusting
         that its caller backfilled first."""
         flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1")
+                       self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(self._sync()["last_success_session"], "s1")
-        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s2")
+        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s2", incarnation="")
         row = self._sync()
         self.assertEqual(row["completeness"], "partial")
         self.assertEqual(row["last_success_session"], "s1")   # NOT s2
@@ -448,7 +448,7 @@ class TestBackfill(unittest.TestCase):
         ingest.reconcile = spy
         self.addCleanup(setattr, ingest, "reconcile", real)
         flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1")
+                       self.conn, ACCOUNT, "s1", incarnation="")
         self.assertTrue(seen["capability"]["ref_stable"])
         self.assertEqual(seen["capability"]["ref_scope"], "account")
         self.assertIsNone(self._sync()["last_error"])
@@ -466,7 +466,7 @@ class TestBackfill(unittest.TestCase):
         flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1"),
                                   raw_tx("2026-08-01", ref="R2",
                                          remittance="huur")], None)]),
-                       self.conn, ACCOUNT, "s1", observe=True)
+                       self.conn, ACCOUNT, "s1", observe=True, incarnation="")
         got = self._observations()
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["kind"], "deep")
@@ -477,30 +477,30 @@ class TestBackfill(unittest.TestCase):
     def test_a_zero_row_deep_run_still_files_its_observation(self):
         # "Measured, and nothing" is a different fact from "never measured".
         flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
-                       observe=True)
+                       observe=True, incarnation="")
         got = self._observations()
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["rows_total"], 0)
 
     def test_a_narrow_run_files_nothing_without_reuse(self):
         flows.backfill(FakeAIS([([raw_tx("2026-08-01", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1", floor_days=9)
+                       self.conn, ACCOUNT, "s1", floor_days=9, incarnation="")
         self.assertEqual(self._observations(), [])
 
     def test_a_capped_run_files_nothing(self):
-        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", observe=True)
+        flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", observe=True, incarnation="")
         self.assertEqual(self._observations(), [])
 
     def test_a_failed_run_files_nothing(self):
         with self.assertRaises(OSError):
             flows.backfill(BrokenAIS(), self.conn, ACCOUNT, "s1",
-                           observe=True)
+                           observe=True, incarnation="")
         self.assertEqual(self._observations(), [])
 
     def test_the_deep_observation_label_refuses_a_narrow_window(self):
         with self.assertRaises(ValueError):
             flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
-                           floor_days=9, observe=True)
+                           floor_days=9, observe=True, incarnation="")
 
     def test_trust_is_earned_end_to_end_and_disclosed(self):
         # A fresh account (no observe() fixture): one completed deep run over
@@ -512,7 +512,7 @@ class TestBackfill(unittest.TestCase):
                        amount=str(10 + i), ref="R%d" % i)
                 for i in range(110)]                     # 110 tx over 327 days
         flows.backfill(FakeAIS([(rows, None)]), self.conn, ACCOUNT, "s1",
-                       observe=True)
+                       observe=True, incarnation="")
         got = provenance.capability(self.conn, "Revolut", "acc1")
         self.assertTrue(got["ref_stable"])
         self.assertEqual(got["observed_n"], 110)
@@ -535,7 +535,7 @@ class TestBackfill(unittest.TestCase):
         self.addCleanup(setattr, ingest, "reconcile", real)
         flows.backfill(FakeAIS([([raw_tx("2026-06-01", ref="R1"),
                                   raw_tx("2026-07-01", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1", floor_days=90)
+                       self.conn, ACCOUNT, "s1", floor_days=90, incarnation="")
         self.assertFalse(seen["caps"][0]["ref_stable"])
         got = self._observations()
         self.assertEqual(len(got), 1)
@@ -551,7 +551,7 @@ class TestBackfill(unittest.TestCase):
         # reuse_event would say nothing new.
         flows.backfill(FakeAIS([([raw_tx("2026-06-01", ref="R1"),
                                   raw_tx("2026-07-01", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1", observe=True)
+                       self.conn, ACCOUNT, "s1", observe=True, incarnation="")
         got = self._observations()
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["kind"], "deep")
@@ -589,7 +589,7 @@ class TestBackfill(unittest.TestCase):
                 return (rows, None)
 
         flows.backfill(RelinkingAIS(), self.conn, ACCOUNT, "s1",
-                       observe=True)
+                       observe=True, incarnation="")
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM ref_observations WHERE account_id='acc1'"
             ).fetchone()[0], 0)
@@ -633,7 +633,7 @@ class TestBackfill(unittest.TestCase):
         # stored amount in place.
         flows.backfill(FakeAIS([([raw_tx("2026-08-01", amount="56.78",
                                          ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1", floor_days=90)
+                       self.conn, ACCOUNT, "s1", floor_days=90, incarnation="")
         self.assertEqual(calls, [True, False],
                          "the plan must be rebuilt untrusted inside the "
                          "apply transaction")
@@ -650,7 +650,7 @@ class TestBackfill(unittest.TestCase):
         self.conn.execute(
             "UPDATE accounts SET aspsp='Revolut NL' WHERE account_id='acc1'")
         flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)]),
-                       self.conn, ACCOUNT, "s1")
+                       self.conn, ACCOUNT, "s1", incarnation="")
         note = self._sync()["last_error"]
         self.assertIn("Revolut NL", note)
         # This account HAS evidence -- recorded under the old spelling -- so
@@ -670,10 +670,10 @@ class TestBackfill(unittest.TestCase):
         what a standing order looks like."""
         deep = FakeAIS([([raw_tx("2026-06-05", remittance="huur"),
                           raw_tx("2026-07-05", remittance="huur")], None)])
-        self.assertEqual(flows.backfill(deep, self.conn, ACCOUNT, "s1")["inserted"], 2)
+        self.assertEqual(flows.backfill(deep, self.conn, ACCOUNT, "s1", incarnation="")["inserted"], 2)
 
         narrow = FakeAIS([([raw_tx("2026-08-01", remittance="huur")], None)])
-        out = flows.backfill(narrow, self.conn, ACCOUNT, "s1", floor_days=7)
+        out = flows.backfill(narrow, self.conn, ACCOUNT, "s1", floor_days=7, incarnation="")
         self.assertEqual(narrow.calls[0][1], "2026-07-27")   # the older two are out of view
         self.assertEqual(out["inserted"], 1)
         rows = [dict(r) for r in self.conn.execute(
@@ -691,12 +691,12 @@ class TestBackfill(unittest.TestCase):
         remembers it is spent. A later pass carrying the original content must
         allocate above it, not step into it."""
         first = FakeAIS([([raw_tx("2026-07-01", "12.34", ref="R1")], None)])
-        flows.backfill(first, self.conn, ACCOUNT, "s1")
+        flows.backfill(first, self.conn, ACCOUNT, "s1", incarnation="")
         original = self.conn.execute(
             "SELECT identity_key, occurrence FROM transactions").fetchone()
 
         corrected = FakeAIS([([raw_tx("2026-07-02", "15.00", ref="R1")], None)])
-        flows.backfill(corrected, self.conn, ACCOUNT, "s1")
+        flows.backfill(corrected, self.conn, ACCOUNT, "s1", incarnation="")
         moved = self.conn.execute(
             "SELECT identity_key, occurrence FROM transactions").fetchone()
         self.assertNotEqual(moved["identity_key"], original["identity_key"])
@@ -704,7 +704,7 @@ class TestBackfill(unittest.TestCase):
         # a third pass in which the ORIGINAL content arrives again, reference-less
         again = FakeAIS([([raw_tx("2026-07-02", "15.00", ref="R1"),
                            raw_tx("2026-07-02", "12.34")], None)])
-        flows.backfill(again, self.conn, ACCOUNT, "s1")
+        flows.backfill(again, self.conn, ACCOUNT, "s1", incarnation="")
         rows = [dict(r) for r in self.conn.execute(
             "SELECT identity_key, occurrence, state FROM transactions")]
         self.assertEqual(len(rows), 2)
@@ -753,7 +753,8 @@ class TestCompleteRenewal(unittest.TestCase):
     def renew(self, ais):
         return flows.complete_renewal(
             self.conn, ais, old_session_id="s-old", new_session_id="s-new",
-            accounts=self.records(), secret=self.secret)
+            accounts=self.records(), secret=self.secret,
+            incarnations={self.aid: ""})
 
     def account(self):
         return dict(self.conn.execute("SELECT * FROM accounts").fetchone())
@@ -996,10 +997,10 @@ class TestAccountScopingAcrossFlows(unittest.TestCase):
 
         ais_a = FakeAIS([([raw_tx("2024-08-05", "12.34", ref="RA")], None)])
         out_a = flows.backfill(ais_a, self.conn, {"account_id": "acc-A",
-                                                   "uid": "uid-A"}, "s1")
+                                                   "uid": "uid-A"}, "s1", incarnation="")
         ais_b = FakeAIS([([raw_tx("2024-09-09", "12.34", ref="RB")], None)])
         out_b = flows.backfill(ais_b, self.conn, {"account_id": "acc-B",
-                                                   "uid": "uid-B"}, "s1")
+                                                   "uid": "uid-B"}, "s1", incarnation="")
 
         self.assertEqual(out_a["inserted"], 1)
         self.assertEqual(out_b["inserted"], 1)
@@ -1092,7 +1093,8 @@ class TestAccountScopingAcrossFlows(unittest.TestCase):
         ]
         out = flows.complete_renewal(
             self.conn, ais, old_session_id="s-old", new_session_id="s-new",
-            accounts=records, secret=secret)
+            accounts=records, secret=secret,
+            incarnations={aid1: "", aid2: ""})
 
         self.assertTrue(out["retired"])
         self.assertEqual(out["accounts"], 2)
@@ -1182,14 +1184,14 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
                           raw_tx("2025-02-02", ref="R2", remittance="huur"),
                           raw_tx("2026-07-20", ref="R3", remittance="energie")],
                          None)])
-        out1 = flows.backfill(deep, self.conn, ACCOUNT, "s1")
+        out1 = flows.backfill(deep, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(out1["inserted"], 3)
 
         # the SAME session, thirty minutes later: only the most recent row
         # comes back, paginating CLEANLY -- not capped, not an exception.
         truncated = FakeAIS([([raw_tx("2026-07-20", ref="R3",
                                       remittance="energie")], None)])
-        out2 = flows.backfill(truncated, self.conn, ACCOUNT, "s1")
+        out2 = flows.backfill(truncated, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertFalse(out2["capped"])
         self.assertEqual(out2["completeness"], "complete")
 
@@ -1225,13 +1227,13 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
                            raw_tx("2024-08-05", ref="MID", remittance="huur"),
                            raw_tx("2026-07-01", ref="NEW", remittance="loon")],
                           None)])
-        flows.backfill(first, self.conn, ACCOUNT, "s1")
+        flows.backfill(first, self.conn, ACCOUNT, "s1", incarnation="")
 
         # a WIDE span "proven" again; MID is missing from the response.
         second = FakeAIS([([raw_tx("2023-01-01", ref="OLD"),
                             raw_tx("2026-07-01", ref="NEW", remittance="loon")],
                            None)])
-        out = flows.backfill(second, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(second, self.conn, ACCOUNT, "s1", incarnation="")
 
         rows = {r["booking_date"]: r for r in self._rows()}
         self.assertEqual(rows["2024-08-05"]["state"], "active")
@@ -1260,7 +1262,7 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
                           raw_tx("2023-09-01", ref="R4", remittance="internet"),
                           raw_tx("2026-07-20", ref="R5", remittance="loon")],
                          None)])
-        flows.backfill(seed, self.conn, ACCOUNT, "s1")
+        flows.backfill(seed, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(len(self._rows()), 5)
 
         # thirty minutes later: the SAME session, clean, but truncated -- and
@@ -1271,7 +1273,7 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
                                raw_tx("2026-07-20", ref="R5",
                                       remittance="loon")],
                               None)])
-        out = flows.backfill(truncated, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(truncated, self.conn, ACCOUNT, "s1", incarnation="")
 
         rows = self._rows()
         self.assertEqual(len(rows), 5)
@@ -1301,7 +1303,7 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
         reintroduced two functions away: re-linking a genuinely dormant
         account reproduces the same nothing, and nothing would ever clear the
         note again."""
-        out = flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1")
+        out = flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1", incarnation="")
         self.assertFalse(out["shallow"])
         self.assertEqual(out["completeness"], "complete")
         self.assertIsNone(out["proved_from"])
@@ -1317,7 +1319,7 @@ class TestBackfillAndWhitelistSafety(unittest.TestCase):
         SHALLOW_NOTE exist to name, and the fix must not blunt that."""
         out = flows.backfill(
             FakeAIS([([raw_tx("2026-07-01", ref="R1")], None)]),
-            self.conn, ACCOUNT, "s1")
+            self.conn, ACCOUNT, "s1", incarnation="")
         self.assertTrue(out["shallow"])
         self.assertIsNotNone(out["proved_from"])
         row = self.conn.execute(
@@ -1468,7 +1470,7 @@ class TestBackfillRuleKeys(TestBackfill):
 
     def test_backfill_returns_new_row_ids_and_auto_tagged(self):
         ais = FakeAIS([([raw_tx("2026-08-01", ref="R1")], None)])
-        out = flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(len(out["new_row_ids"]), out["inserted"])
         self.assertEqual(out["auto_tagged"], 0)
 
@@ -1479,7 +1481,7 @@ class TestBackfillRuleKeys(TestBackfill):
         self._mint_remittance_rule()
         ais = FakeAIS([([raw_tx("2026-08-01", ref="R9",
                                 remittance="energie")], None)])
-        out = flows.backfill(ais, self.conn, ACCOUNT, "s1")
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", incarnation="")
         self.assertEqual(out["auto_tagged"], 1)
         rid = out["new_row_ids"][0]
         tags = sorted(r[0] for r in self.conn.execute(
@@ -1488,10 +1490,318 @@ class TestBackfillRuleKeys(TestBackfill):
 
     def test_zero_row_fetch_and_capped_run_both_carry_the_keys(self):
         empty = flows.backfill(FakeAIS([([], None)]), self.conn,
-                               ACCOUNT, "s1")
+                               ACCOUNT, "s1", incarnation="")
         self.assertEqual(empty["new_row_ids"], [])
         self.assertEqual(empty["auto_tagged"], 0)
-        capped = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1")
+        capped = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1", incarnation="")
         self.assertTrue(capped["capped"])
         self.assertEqual(capped["new_row_ids"], [])
         self.assertEqual(capped["auto_tagged"], 0)
+
+
+def erase_account(conn, account_id="acc1"):
+    """What `forget_local_account` leaves behind, table for table: the
+    row-keyed satellites through the same subquery, then every
+    account-scoped table including the account row itself."""
+    for table in ("transaction_refs", "transaction_tags", "transaction_notes"):
+        conn.execute("DELETE FROM %s WHERE row_id IN (SELECT row_id FROM"
+                     " transactions WHERE account_id=?)" % table, (account_id,))
+    for table in ("transactions", "occurrence_alloc", "balances", "coverage",
+                  "sync_state", "attempts", "accounts", "ref_observations"):
+        conn.execute("DELETE FROM %s WHERE account_id=?" % table, (account_id,))
+
+
+def relink_account(conn, account_id="acc1", incarnation="life-2"):
+    """The same IBAN linked again: the deterministic id comes back IDENTICAL,
+    only the incarnation token tells the new life from the old."""
+    conn.execute(
+        "INSERT INTO accounts(account_id, uid, session_id, currency, aspsp,"
+        " incarnation) VALUES (?,?,?,?,?,?)",
+        (account_id, "uid-2", "s2", "EUR", "Revolut", incarnation))
+
+
+class TestErasureFence(unittest.TestCase):
+    """Issue #8: an in-flight backfill must not resurrect an account
+    `forget_local_account` just erased.
+
+    The fence is the incarnation captured by the caller with its binding
+    read, checked inside the same transaction as every write. These tests
+    interleave the erasure (and the erase-then-relink twin, which the
+    deterministic account_id makes indistinguishable by existence alone)
+    at every seam of one run: mid-pagination, mid-apply, between apply and
+    coverage, between coverage and the completeness stamp, and on the
+    capped and failed paths.
+    """
+
+    LIFE = "life-1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = store.open_db(pathlib.Path(self.tmp.name) / "f.sqlite")
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency,"
+            " aspsp, incarnation) VALUES ('acc1','uid-1','s1','EUR',"
+            " 'Revolut',?)", (self.LIFE,))
+        observe(self.conn)
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.tmp.cleanup()
+
+    def counts(self):
+        """Everything a resurrected run could have written for acc1."""
+        out = {}
+        for table in ("transactions", "sync_state", "coverage",
+                      "ref_observations", "occurrence_alloc", "balances"):
+            out[table] = self.conn.execute(
+                "SELECT COUNT(*) FROM %s WHERE account_id='acc1'"
+                % table).fetchone()[0]
+        for table in ("transaction_tags", "transaction_refs",
+                      "transaction_notes"):
+            out[table] = self.conn.execute(
+                "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+        return out
+
+    def erasing_ais(self, relink=False, endless=False, broken=False):
+        conn = self.conn
+
+        class ErasingAIS:
+            """Erases acc1 while the (first) transactions call is in flight
+            — the pages come back to a run whose account is already gone."""
+
+            def __init__(self):
+                self.calls = 0
+                self.deleted = []
+
+            def transactions(self, uid, date_from, continuation_key=None):
+                self.calls += 1
+                if self.calls == 1:
+                    erase_account(conn)
+                    if relink:
+                        relink_account(conn)
+                if broken and self.calls > 1:
+                    raise OSError("connection reset")
+                rows = [raw_tx("2024-08-05", ref="R%d" % self.calls),
+                        raw_tx("2026-07-01", ref="Q%d" % self.calls,
+                               remittance="huur")]
+                if endless or broken:
+                    return (rows, "k%d" % self.calls)
+                return (rows, None)
+
+            def delete_session(self, sid):
+                self.deleted.append(sid)
+                return {"deleted": True}
+
+        return ErasingAIS()
+
+    def assert_erased_report(self, out):
+        self.assertIs(out["erased"], True)
+        self.assertEqual(out["inserted"], 0)
+        self.assertEqual(out["completeness"], "aborted")
+        self.assertIs(out["capped"], False)
+        self.assertIsNone(out["proved_from"])
+        self.assertEqual(out["new_row_ids"], [])
+
+    def assert_nothing_landed(self):
+        for table, n in self.counts().items():
+            self.assertEqual(n, 0, "%s resurrected for the erased account"
+                             % table)
+
+    def test_an_erasure_between_pagination_and_apply_lands_nothing(self):
+        out = flows.backfill(self.erasing_ais(), self.conn, ACCOUNT, "s1",
+                             observe=True, incarnation=self.LIFE)
+        self.assert_erased_report(out)
+        self.assert_nothing_landed()
+
+    def test_a_forget_and_relink_lands_nothing_under_the_new_life(self):
+        out = flows.backfill(self.erasing_ais(relink=True), self.conn,
+                             ACCOUNT, "s1", observe=True,
+                             incarnation=self.LIFE)
+        self.assert_erased_report(out)
+        # The new life exists and is untouched: no transactions, no
+        # sync_state, no coverage, no evidence attach to it.
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM accounts WHERE account_id='acc1'"
+            " AND incarnation='life-2'").fetchone()[0], 1)
+        for table in ("transactions", "sync_state", "coverage",
+                      "ref_observations"):
+            self.assertEqual(self.conn.execute(
+                "SELECT COUNT(*) FROM %s WHERE account_id='acc1'"
+                % table).fetchone()[0], 0,
+                "%s from the old life landed under the new one" % table)
+
+    def test_an_erasure_after_apply_committed_is_still_reported_erased(self):
+        """The erasure lands between apply_plan's commit and coverage's own
+        transaction. The committed rows are gone (the erasure deleted them),
+        coverage's guard refuses, and the report says erased — never a
+        success whose rows do not exist."""
+        real = apply.record_coverage
+        conn = self.conn
+
+        def racing(c, aid, start, end, session_id, *, incarnation):
+            erase_account(conn)
+            return real(c, aid, start, end, session_id,
+                        incarnation=incarnation)
+
+        apply.record_coverage = racing
+        self.addCleanup(setattr, apply, "record_coverage", real)
+        out = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")],
+                                       None)]),
+                             self.conn, ACCOUNT, "s1", incarnation=self.LIFE)
+        self.assert_erased_report(out)
+        self.assert_nothing_landed()
+
+    def test_an_erasure_between_coverage_and_the_stamp_is_reported_erased(self):
+        """The narrowest window: coverage committed, then the erasure, then
+        the completeness stamp — which must refuse rather than resurrect
+        sync_state, and the run must still report erased."""
+        real = apply.record_coverage
+        conn = self.conn
+
+        def racing(c, aid, start, end, session_id, *, incarnation):
+            ok = real(c, aid, start, end, session_id, incarnation=incarnation)
+            erase_account(conn)
+            return ok
+
+        apply.record_coverage = racing
+        self.addCleanup(setattr, apply, "record_coverage", real)
+        out = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")],
+                                       None)]),
+                             self.conn, ACCOUNT, "s1", incarnation=self.LIFE)
+        self.assert_erased_report(out)
+        self.assert_nothing_landed()
+
+    def test_a_capped_run_on_an_erased_account_reports_erased_not_capped(self):
+        """A capped report says "re-run the backfill" — the wrong thing to
+        tell an operator about an account they just erased — and its durable
+        half would recreate sync_state. Both are fenced."""
+        out = flows.backfill(self.erasing_ais(endless=True), self.conn,
+                             ACCOUNT, "s1", incarnation=self.LIFE)
+        self.assert_erased_report(out)
+        self.assertEqual(out["pages"], flows.MAX_PAGES)
+        self.assert_nothing_landed()
+
+    def test_a_failed_run_on_an_erased_account_records_nothing_and_raises(self):
+        """What the provider did and what the operator did are different
+        facts: the exception still propagates, but the failure note must not
+        recreate sync_state for the erased account."""
+        with self.assertRaises(OSError):
+            flows.backfill(self.erasing_ais(broken=True), self.conn,
+                           ACCOUNT, "s1", incarnation=self.LIFE)
+        self.assert_nothing_landed()
+
+    def test_ordinary_runs_carry_erased_false_on_every_path(self):
+        """The two-signal rule extended: `erased` is present and False on
+        the success and capped paths, so a consumer never has to treat an
+        absent key as a claim."""
+        done = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")],
+                                        None)]),
+                              self.conn, ACCOUNT, "s1",
+                              incarnation=self.LIFE)
+        self.assertIs(done["erased"], False)
+        self.assertEqual(done["completeness"], "complete")
+        capped = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1",
+                                incarnation=self.LIFE)
+        self.assertIs(capped["erased"], False)
+        self.assertIs(capped["capped"], True)
+
+    def test_a_none_incarnation_matches_no_life_and_writes_nothing(self):
+        """The caller found no account row at capture: every write refuses.
+        Backfilling an account that never existed must not mint its ledger
+        rows as a side effect."""
+        # the fixture's seeded evidence goes with the account, as a real
+        # erasure would take it — what remains after the run is the run's
+        self.conn.execute("DELETE FROM accounts WHERE account_id='acc1'")
+        self.conn.execute("DELETE FROM ref_observations"
+                          " WHERE account_id='acc1'")
+        out = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")],
+                                       None)]),
+                             self.conn, ACCOUNT, "s1", incarnation=None)
+        self.assert_erased_report(out)
+        self.assert_nothing_landed()
+
+
+class TestRenewalErasureFence(unittest.TestCase):
+    """Issue #8 at the renewal's two seams: an account erased mid-fetch, and
+    one erased after every fetch completed but before the switch."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = store.open_db(pathlib.Path(self.tmp.name) / "f.sqlite")
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.secret = store.local_secret(self.conn)
+        self.aid = store.account_id(IBAN_R, "EUR", self.secret)
+        self.conn.execute(
+            "INSERT INTO sessions(session_id, aspsp_name, status, generation)"
+            " VALUES ('s-old','Revolut','AUTHORIZED',4)")
+        self.conn.execute(
+            "INSERT INTO sessions(session_id, aspsp_name, status, generation)"
+            " VALUES ('s-new','Revolut','REVIEW_REQUIRED',0)")
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency,"
+            " aspsp, incarnation) VALUES (?, 'uid-old', 's-old', 'EUR',"
+            " 'Revolut', 'life-1')", (self.aid,))
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.tmp.cleanup()
+
+    def renew(self, ais):
+        return flows.complete_renewal(
+            self.conn, ais, old_session_id="s-old", new_session_id="s-new",
+            accounts=[{"uid": "uid-new", "iban": IBAN_R, "currency": "EUR",
+                       "aspsp": "Revolut", "account_id": self.aid}],
+            secret=self.secret, incarnations={self.aid: "life-1"})
+
+    def test_an_account_erased_mid_fetch_switches_nothing(self):
+        conn, aid = self.conn, self.aid
+
+        class ErasingAIS(FakeAIS):
+            def transactions(inner, uid, date_from, continuation_key=None):
+                erase_account(conn, aid)
+                return FakeAIS.transactions(inner, uid, date_from,
+                                            continuation_key)
+
+        out = self.renew(ErasingAIS([([raw_tx("2024-08-05", ref="R1")],
+                                      None)]))
+        self.assertIs(out["retired"], False)
+        self.assertEqual(out["erased_accounts"], [self.aid])
+        self.assertIs(out["capped"], False)
+        self.assertEqual(out["completeness"], "aborted")
+        self.assertEqual(out["remedy"], flows.REAUTHORIZE_REMEDY)
+        # nothing switched, nothing revoked, nothing written for the account
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM sessions WHERE session_id='s-new'"
+            ).fetchone()[0], "REVIEW_REQUIRED")
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM transactions").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sync_state").fetchone()[0], 0)
+
+    def test_an_erasure_after_the_fetch_and_before_the_switch_is_named(self):
+        """Every fetch completed; the erasure lands just before
+        switch_bindings. The refusal must come back as the erased report —
+        not as a generic "has not completed a history fetch" crash about an
+        account that no longer exists."""
+        real = apply.switch_bindings
+        conn, aid = self.conn, self.aid
+
+        def racing(c, bindings, new_session_id, old_session_id, *,
+                   incarnations):
+            erase_account(conn, aid)
+            return real(c, bindings, new_session_id, old_session_id,
+                        incarnations=incarnations)
+
+        apply.switch_bindings = racing
+        self.addCleanup(setattr, apply, "switch_bindings", real)
+        out = self.renew(FakeAIS([([raw_tx("2024-08-05", ref="R1")], None)]))
+        self.assertIs(out["retired"], False)
+        self.assertEqual(out["erased_accounts"], [self.aid])
+        self.assertEqual(out["completeness"], "aborted")
+        self.assertEqual(out["remedy"], flows.REAUTHORIZE_REMEDY)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM sessions WHERE session_id='s-new'"
+            ).fetchone()[0], "REVIEW_REQUIRED")

@@ -372,7 +372,7 @@ class TestConsentStatus(Base):
         aid = apply.upsert_account(
             self.raw, {"uid": "u1", "iban": LINKED_IBAN, "currency": "EUR",
                        "name": "Betaalrekening", "aspsp": "Rabobank"},
-            SESSION_ID, secret)
+            SESSION_ID, secret)[0]
         with self.assertRaises(apply.RebindRefused):
             apply.upsert_account(
                 self.raw, {"uid": "u2", "iban": LINKED_IBAN, "currency": "EUR",
@@ -1016,12 +1016,13 @@ class TestRenewal(Base):
         seen = {}
         real = flows.complete_renewal
 
-        def spy(conn, ais, *, old_session_id, new_session_id, accounts, secret):
+        def spy(conn, ais, *, old_session_id, new_session_id, accounts, secret,
+                incarnations):
             seen.update(old=old_session_id, new=new_session_id,
                         n=len(accounts))
             return real(conn, ais, old_session_id=old_session_id,
                         new_session_id=new_session_id, accounts=accounts,
-                        secret=secret)
+                        secret=secret, incarnations=incarnations)
         self.addCleanup(setattr, flows, "complete_renewal", real)
         flows.complete_renewal = spy
 
@@ -1697,7 +1698,7 @@ class TestStructuralGuarantees(Base):
         call("link_bank", aspsp="Rabobank", country="NL", psu_type="personal")
 
         def lying_renewal(conn, ais, *, old_session_id, new_session_id,
-                          accounts, secret):
+                          accounts, secret, incarnations=None):
             # Claims the switch happened, writes no durable completeness.
             return {"accounts": len(accounts), "generation": 2,
                     "retired": True, "revoked": True, "revoke_error": None,
@@ -3600,3 +3601,50 @@ class TestSetupApplicationRung(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCollectNamesErasure(Base):
+    """Issue #8 at the authorization surface: a backfill fenced off because
+    its account was erased mid-flight must be reported as exactly that —
+    never as "INCOMPLETE HISTORY … marked partial", which would be false on
+    both counts (there is no sync_state row left, and nothing to resume)."""
+
+    def _erasing_transactions(self, aid):
+        inner = self.ais.transactions
+
+        def erasing(uid, date_from, continuation_key=None):
+            self.raw.execute("DELETE FROM accounts WHERE account_id=?",
+                             (aid,))
+            return inner(uid, date_from, continuation_key)
+
+        self.ais.transactions = erasing
+
+    def test_a_first_link_erased_mid_backfill_reports_nothing_stored(self):
+        self._erasing_transactions(self.expected_account_id())
+        out = self.collect()
+        self.assertEqual(self.marker(), "verified_partial")
+        self.assertIn("NOTHING STORED", out)
+        self.assertNotIn("INCOMPLETE HISTORY", out)
+        self.assertIn("link_bank again", out)
+        self.assertEqual(self.count("transactions"), 0)
+        self.assertEqual(self.count("sync_state"), 0)
+        self.assertEqual(self.count("coverage"), 0)
+
+    def test_a_renewal_erased_mid_backfill_switches_nothing_and_says_so(self):
+        self.collect(state_hash=STATE_HASH)
+        self.assertEqual(self.marker(STATE_HASH), "verified")
+        call("link_bank", aspsp="Rabobank", country="NL", psu_type="personal")
+        self.ais = FakeAIS(session_id=OTHER_SESSION_ID)
+        self._erasing_transactions(self.expected_account_id())
+        out = self.collect()
+        self.assertEqual(self.marker(), "verified_partial")
+        self.assertIn("NOTHING STORED", out)
+        self.assertIn("nothing was switched", out)
+        self.assertNotIn("INCOMPLETE HISTORY", out)
+        # the old consent was neither retired nor revoked
+        old = dict(self.raw.execute(
+            "SELECT status, closed_at FROM sessions WHERE session_id=?",
+            (SESSION_ID,)).fetchone())
+        self.assertEqual(old["status"], "AUTHORIZED")
+        self.assertIsNone(old["closed_at"])
+        self.assertEqual(self.ais.deleted, [])

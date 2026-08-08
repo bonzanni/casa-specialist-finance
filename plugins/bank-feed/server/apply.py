@@ -53,6 +53,28 @@ def _now() -> str:
     return _dt.datetime.now().isoformat()
 
 
+class AccountErased(Exception):
+    """A write was refused because the account's life ended under the run.
+
+    Raised only inside a write transaction, when the incarnation a run
+    captured at its start is no longer the account's live one — the account
+    was erased (`forget_local_account`), or erased and re-linked, while the
+    run held its fetched pages in memory. The raiser's transaction rolls
+    back whole, so nothing the run staged lands.
+
+    This is NEITHER a failure of the run NOR a defect: the honest outcome is
+    a run that reports it stopped because the account was erased underneath
+    it. `flows.backfill` converts it into that report; `flows.complete_renewal`
+    converts it into a renewal that switched nothing and says why.
+
+    Carries the account it refused for; it NEVER carries a session id.
+    """
+
+    def __init__(self, message: str, account_id: str = ""):
+        super().__init__(message)
+        self.account_id = account_id
+
+
 class RebindRefused(Exception):
     """A binding would have moved without exact-match evidence: an exact
     `account_id` match carries labels and history forward, and anything else
@@ -73,7 +95,8 @@ class RebindRefused(Exception):
         self.account_id = account_id
 
 
-def record_binding_review(conn, account_id: str, note: str) -> None:
+def record_binding_review(conn, account_id: str, note: str,
+                          incarnation) -> None:
     """Record, durably, that this account's binding needs a human decision.
 
     `sync_state` rather than a table of its own: it is already keyed
@@ -82,15 +105,28 @@ def record_binding_review(conn, account_id: str, note: str) -> None:
     every resource rather than only 'transactions' — so a review lands
     somewhere an operator already looks instead of in a table nothing queries.
     The note names the account and the bank and never a session id.
+
+    `incarnation` is required and the write is conditioned on it, the same
+    guard every other late write carries: this upsert used to be
+    unconditional, which made the REFUSAL paths that call it into
+    resurrection paths of their own — a rebind refused because the account
+    was erased (or erased and re-linked) underneath its flow would have
+    recorded the OLD attempt's review row under the account's NEW life, or
+    recreated `sync_state` for an account `forget_local_account` had just
+    reported gone. When the token no longer matches, the refusal itself
+    still happens — it simply leaves no durable note, because there is no
+    account of this life to leave it about.
     """
     conn.execute(
         "INSERT INTO sync_state(account_id, resource, last_attempt_at,"
-        " completeness, last_error) VALUES (?,'account_binding',?,"
-        "'review_required',?)"
+        " completeness, last_error)"
+        " SELECT ?,'account_binding',?,'review_required',?"
+        " WHERE EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+        " AND incarnation=?)"
         " ON CONFLICT(account_id, resource) DO UPDATE SET"
         " last_attempt_at=excluded.last_attempt_at,"
         " completeness='review_required', last_error=excluded.last_error",
-        (account_id, _now(), note))
+        (account_id, _now(), note, account_id, incarnation))
 
 
 def _row_id(entry) -> int:
@@ -102,10 +138,21 @@ def _row_id(entry) -> int:
     return int(entry["row_id"])
 
 
-def upsert_account(conn, account: dict, session_id: str, secret: bytes) -> str:
+def upsert_account(conn, account: dict, session_id: str, secret: bytes):
     """Durable account_id from IBAN + currency; `uid` is only the current
     session's handle, so a renewal updates the row instead of forking a new
     account.
+
+    Returns `(account_id, incarnation)` — the id AND the life token this
+    upsert's own read or write established: the token it minted on the
+    INSERT path, or the one read by the SAME initial SELECT that decides the
+    rebind refusal on the UPDATE path, with the UPDATE itself conditioned on
+    that token still being live. The pair is what a caller must fetch under.
+    Capturing the token with a LATER read instead is the defect this return
+    exists to prevent: a forget-and-relink between this call and that read
+    would hand the caller the NEW life's token for pages it is about to
+    fetch under the binding this call established for the OLD one, and
+    every downstream incarnation guard would then pass.
 
     `account` is {"uid", "iban", "currency", "name", "aspsp"}. The IBAN comes
     from the provider payload's NESTED account_id.iban — the caller unwraps it.
@@ -165,7 +212,7 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes) -> str:
     aid = store.account_id(iban, account.get("currency") or "", secret)
     now = _now()
     masked = f"{iban[:4]}…{iban[-4:]}" if len(iban) > 8 else iban
-    exists = conn.execute("SELECT uid, session_id FROM accounts"
+    exists = conn.execute("SELECT uid, session_id, incarnation FROM accounts"
                           " WHERE account_id=?", (aid,)).fetchone()
     aspsp = (account.get("aspsp") or "").strip() or None   # None => keep/default
     if exists:
@@ -203,34 +250,56 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes) -> str:
                 "backfills, then switches every binding at once. Nothing was "
                 "changed. Re-run the authorization, or unlink this bank and "
                 "link it again." % (aid, what))
-            record_binding_review(conn, aid, note)
+            record_binding_review(conn, aid, note, exists["incarnation"])
             raise RebindRefused(note, aid)
-        conn.execute(
+        cur = conn.execute(
             "UPDATE accounts SET uid=?, session_id=?, last_seen=?,"
             " name=COALESCE(?, name), product=COALESCE(?, product),"
             " currency=COALESCE(?, currency), usage=COALESCE(?, usage),"
             " aspsp=COALESCE(?, aspsp)"
-            " WHERE account_id=?",
+            # Conditioned on the life the SELECT above read, not on bare
+            # existence: `account_id` is a deterministic HMAC, so a
+            # forget-and-relink between that SELECT and this autocommit
+            # UPDATE puts a NEW life under the same id — and an unconditioned
+            # UPDATE would stamp the OLD flow's uid/session onto it. The
+            # history fences downstream would still refuse every write made
+            # under the stale token; this clause is what stops the new life
+            # from durably carrying the old binding itself.
+            " WHERE account_id=? AND incarnation=?",
             (account.get("uid"), session_id, now, account.get("name"),
              account.get("product"), account.get("currency"),
-             account.get("usage"), aspsp, aid))
-    else:
-        # `incarnation` is minted HERE, once per creation, because the
-        # account_id above is a deterministic HMAC of IBAN+currency: erase
-        # this account and link the same IBAN again and the id comes back
-        # IDENTICAL. The random token is what tells the two lives apart --
-        # provenance.record_observation refuses to file reference evidence
-        # under an incarnation other than the one the measuring run captured
-        # at its start, so a backfill paused across a forget-and-relink cannot
-        # attach its stale measurements to the account's new life.
-        conn.execute(
-            "INSERT INTO accounts(account_id, uid, session_id, iban_masked,"
-            " name, product, currency, usage, aspsp, incarnation, included,"
-            " first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)",
-            (aid, account.get("uid"), session_id, masked, account.get("name"),
-             account.get("product"), account.get("currency"),
-             account.get("usage"), aspsp or "", secrets.token_hex(8), now, now))
-    return aid
+             account.get("usage"), aspsp, aid, exists["incarnation"]))
+        if cur.rowcount != 1:
+            # No durable note: the zero-row cause IS that this life is gone,
+            # so `record_binding_review`'s own guard could never land one —
+            # and writing it unguarded is the resurrection this fence exists
+            # to prevent. The refusal alone is the honest outcome.
+            raise RebindRefused(
+                "the account changed identity while this link was binding "
+                "it — it was erased, or erased and re-linked, underneath "
+                "this authorization. Nothing was changed. Re-run the "
+                "authorization if the account is still linked.", aid)
+        return aid, exists["incarnation"]
+    # `incarnation` is minted HERE, once per creation, because the
+    # account_id above is a deterministic HMAC of IBAN+currency: erase
+    # this account and link the same IBAN again and the id comes back
+    # IDENTICAL. The random token is what tells the two lives apart --
+    # provenance.record_observation refuses to file reference evidence
+    # under an incarnation other than the one the measuring run captured
+    # at its start, so a backfill paused across a forget-and-relink cannot
+    # attach its stale measurements to the account's new life. A concurrent
+    # relink between the SELECT above and this INSERT collides on the
+    # primary key and raises — fail-closed, reported by the exchange as its
+    # own failure rather than absorbed.
+    incarnation = secrets.token_hex(8)
+    conn.execute(
+        "INSERT INTO accounts(account_id, uid, session_id, iban_masked,"
+        " name, product, currency, usage, aspsp, incarnation, included,"
+        " first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)",
+        (aid, account.get("uid"), session_id, masked, account.get("name"),
+         account.get("product"), account.get("currency"),
+         account.get("usage"), aspsp or "", incarnation, now, now))
+    return aid, incarnation
 
 
 _ALLOC_CHUNK = 400          # well under SQLite's default parameter limit
@@ -359,8 +428,19 @@ def deep_fetch_complete(conn, account_id: str, session_id: str) -> bool:
 
 
 def switch_bindings(conn, bindings, new_session_id: str,
-                    old_session_id: str) -> dict:
+                    old_session_id: str, *, incarnations) -> dict:
     """Promote, switch, bump, retire — ONE transaction, and it runs LAST.
+
+    `incarnations` is `{account_id: incarnation}`, captured by the SAME read
+    that validated the renewal's exact account set, and re-checked here
+    INSIDE the transaction before anything is written. The per-account
+    UPDATE below was already fail-closed against an account erased or
+    re-linked after the last backfill — its `(account_id, old_session_id)`
+    key hits zero rows and the whole switch rolls back — but it failed as a
+    generic ValueError, which the caller could only report as a broken
+    renewal. The revalidation turns that into `AccountErased`, which
+    `flows.complete_renewal` converts into the honest outcome: nothing
+    switched, nothing retired, and the report names the erasure.
 
     `flows.complete_renewal` owns the ordering and calls this as its final
     step; nothing else calls it. It does four things and only together:
@@ -418,6 +498,22 @@ def switch_bindings(conn, bindings, new_session_id: str,
         raise ValueError("a renewal that binds nothing is not a renewal")
     if not new_session_id or new_session_id == old_session_id:
         raise ValueError("a renewal switches onto a DIFFERENT session")
+    # Erasure is asked about FIRST, because the unfetched check below reads
+    # sync_state — which `forget_local_account` deletes — so an account
+    # erased after its fetch completed would otherwise surface as a generic
+    # "has not completed a history fetch" refusal and a review note about an
+    # account that no longer exists. This read is best-effort (no lock yet);
+    # the re-check inside the transaction below is the authoritative one.
+    for account_id, _uid in pairs:
+        if conn.execute("SELECT 1 FROM accounts WHERE account_id=?"
+                        " AND incarnation=?",
+                        (account_id,
+                         incarnations.get(account_id))).fetchone() is None:
+            raise AccountErased(
+                "account %s was erased (or erased and re-linked) after the "
+                "renewal's fetch completed; nothing was switched and the "
+                "existing consent is still the live one" % account_id,
+                account_id)
     unfetched = sorted(a for a, _ in pairs
                        if not deep_fetch_complete(conn, a, new_session_id))
     if unfetched:
@@ -428,12 +524,28 @@ def switch_bindings(conn, bindings, new_session_id: str,
                 "new one's deep fetch is complete. Run the authorization "
                 "again." % (len(unfetched), len(pairs)))
         for account_id in unfetched:
-            record_binding_review(conn, account_id, note)
+            record_binding_review(conn, account_id, note,
+                                  incarnations.get(account_id))
         raise RebindRefused(note, unfetched[0])
 
     now = _now()
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Under the write lock, before anything is written: is every account
+        # still living the life the renewal validated? The per-account UPDATE
+        # below already fails closed on a moved binding, but "erased under
+        # the renewal" deserves its own name — the caller converts it into a
+        # report, not a crash.
+        for account_id, _uid in pairs:
+            live = conn.execute(
+                "SELECT 1 FROM accounts WHERE account_id=? AND incarnation=?",
+                (account_id, incarnations.get(account_id))).fetchone()
+            if live is None:
+                raise AccountErased(
+                    "account %s was erased (or erased and re-linked) after "
+                    "the renewal's fetch completed; nothing was switched and "
+                    "the existing consent is still the live one" % account_id,
+                    account_id)
         if conn.execute("SELECT 1 FROM sessions WHERE session_id=?",
                         (new_session_id,)).fetchone() is None:
             raise ValueError("the renewed session has no row yet; record it "
@@ -846,8 +958,8 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
 
 
 def record_coverage(conn, account_id: str, start: str, end: str,
-                    session_id: str) -> None:
-    """Record a PROVEN interval, merged on write.
+                    session_id: str, *, incarnation) -> bool:
+    """Record a PROVEN interval, merged on write. Returns whether it did.
 
     Only ever called after apply_plan committed: coverage attests to what is
     durably in the ledger, never to what an HTTP call returned. Every stored
@@ -855,11 +967,25 @@ def record_coverage(conn, account_id: str, start: str, end: str,
     stays a disjoint set and a direct reader sees merged intervals too. The
     surviving row carries the newest session_id — the session that just
     proved the widened interval.
+
+    `incarnation` is required: this runs in its OWN transaction, after
+    apply_plan's committed, so `forget_local_account` can land between the
+    two — and coverage written then would attest to rows the erasure just
+    deleted, for an account that may already be living a new life under the
+    same deterministic id. The token is re-checked under this transaction's
+    write lock; a mismatch writes nothing and returns False, which the
+    caller must convert into its erased report rather than a success.
     """
     if not (start < end):
         raise ValueError(f"empty coverage interval [{start}, {end})")
     conn.execute("BEGIN IMMEDIATE")
     try:
+        live = conn.execute("SELECT 1 FROM accounts WHERE account_id=?"
+                            " AND incarnation=?",
+                            (account_id, incarnation)).fetchone()
+        if live is None:
+            conn.execute("ROLLBACK")
+            return False
         touching = [(r["interval_start"], r["interval_end"]) for r in conn.execute(
             "SELECT interval_start, interval_end FROM coverage"
             " WHERE account_id=? AND complete=1 AND interval_start <= ?"
@@ -878,6 +1004,7 @@ def record_coverage(conn, account_id: str, start: str, end: str,
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return True
 
 
 def merged_coverage(conn, account_id: str) -> list:

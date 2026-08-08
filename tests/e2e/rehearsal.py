@@ -134,7 +134,7 @@ def _ingest(ais, session):
     conn = store.open_db(DB_FILE)
     secret = store.local_secret(conn)
     acct = accounts[0]
-    account_id = apply.upsert_account(
+    account_id, incarnation = apply.upsert_account(
         conn,
         {"uid": acct["uid"], "iban": (acct.get("account_id") or {}).get("iban"),
          "currency": acct.get("currency"), "name": acct.get("name"),
@@ -147,7 +147,8 @@ def _ingest(ais, session):
             "AND state='vanished'", (account_id,)).fetchone()[0]
 
     led = {"uid": acct["uid"], "account_id": account_id}
-    first = flows.backfill(ais, conn, led, session["session_id"])
+    first = flows.backfill(ais, conn, led, session["session_id"],
+                           incarnation=incarnation)
     print(f"first ingest : inserted={first['inserted']} "
           f"proved={first['proved_from']}..{first['proved_to']} "
           f"shallow={first['shallow']} pages={first['pages']} "
@@ -157,7 +158,8 @@ def _ingest(ais, session):
               "before the full span was proved")
 
     before = _tombstones()
-    second = flows.backfill(ais, conn, led, session["session_id"])
+    second = flows.backfill(ais, conn, led, session["session_id"],
+                            incarnation=incarnation)
     after = _tombstones()
     print(f"re-ingest    : inserted={second['inserted']}")
     assert second["inserted"] == 0 and after == before, (

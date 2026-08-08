@@ -341,40 +341,49 @@ class TestSupersede(Base):
 
 
 class TestCoverage(Base):
+    def setUp(self):
+        # record_coverage now refuses to attest for an account with no live
+        # row (issue #8), so the accounts these tests cover must exist; the
+        # schema-default incarnation '' is the life the calls name.
+        super().setUp()
+        for acc in ("acc1", "acc2", "acc3"):
+            self.conn.execute(
+                "INSERT INTO accounts(account_id) VALUES (?)", (acc,))
+
     def _rows(self):
         return self.conn.execute(
             "SELECT COUNT(*) FROM coverage WHERE account_id='acc1'").fetchone()[0]
 
     def test_overlapping_intervals_are_merged_on_write(self):
-        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-03-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2026-02-01", "2026-04-01", "s2")
+        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-03-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2026-02-01", "2026-04-01", "s2", incarnation="")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2026-01-01", "2026-04-01")])
         self.assertEqual(self._rows(), 1)      # merged ON WRITE, not on read
 
     def test_adjacent_intervals_are_merged_on_write(self):
-        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2026-02-01", "2026-03-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2026-02-01", "2026-03-01", "s1", incarnation="")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2026-01-01", "2026-03-01")])
         self.assertEqual(self._rows(), 1)
 
     def test_disjoint_intervals_are_not_merged(self):
-        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2026-03-01", "2026-04-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2026-03-01", "2026-04-01", "s1", incarnation="")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2026-01-01", "2026-02-01"),
                           ("2026-03-01", "2026-04-01")])
         self.assertEqual(self._rows(), 2)
 
     def test_a_gap_is_reported_as_a_hole(self):
-        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2026-03-01", "2026-04-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2026-03-01", "2026-04-01", "s1", incarnation="")
         self.assertEqual(apply.holes(self.conn, "acc1", "2026-01-01", "2026-04-01"),
                          [("2026-02-01", "2026-03-01")])
 
     def test_a_range_outside_all_coverage_is_entirely_a_hole(self):
-        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2026-01-01", "2026-02-01", "s1", incarnation="")
         self.assertEqual(apply.holes(self.conn, "acc1", "2026-05-01", "2026-06-01"),
                          [("2026-05-01", "2026-06-01")])
 
@@ -384,11 +393,19 @@ class TestPurgeTrimsCoverage(Base):
     coverage: it reports deliberately erased history as PROVEN, and the gap
     disclosure has no way to notice."""
 
+    def setUp(self):
+        # Same issue-#8 precondition as TestCoverage: coverage is only ever
+        # recorded for an account that exists.
+        super().setUp()
+        for acc in ("acc1", "acc2", "acc3"):
+            self.conn.execute(
+                "INSERT INTO accounts(account_id) VALUES (?)", (acc,))
+
     def test_a_spanning_interval_is_trimmed_to_start_at_the_cutoff(self):
         """The exact case. A [2020, 2026) interval survived a
         purge-before-2024 completely unchanged, so 2020–2024 went on being
         reported as proven after the operator erased it."""
-        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         stats = apply.purge_before(self.conn, "2024-01-01")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2024-01-01", "2026-01-01")])
@@ -398,8 +415,8 @@ class TestPurgeTrimsCoverage(Base):
             [("2020-01-01", "2024-01-01")])      # the erased span reads as a hole
 
     def test_an_interval_wholly_before_the_cutoff_is_dropped(self):
-        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2021-01-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2025-01-01", "2026-01-01", "s2")
+        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2021-01-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2025-01-01", "2026-01-01", "s2", incarnation="")
         stats = apply.purge_before(self.conn, "2024-01-01")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2025-01-01", "2026-01-01")])
@@ -407,7 +424,7 @@ class TestPurgeTrimsCoverage(Base):
                          (1, 0))
 
     def test_an_interval_at_or_after_the_cutoff_is_untouched(self):
-        apply.record_coverage(self.conn, "acc1", "2024-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2024-01-01", "2026-01-01", "s1", incarnation="")
         stats = apply.purge_before(self.conn, "2024-01-01")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2024-01-01", "2026-01-01")])
@@ -428,8 +445,8 @@ class TestPurgeTrimsCoverage(Base):
             "SELECT provider_ref FROM transaction_refs")}, {"NEW"})
 
     def test_a_purge_scoped_to_one_account_leaves_the_others_alone(self):
-        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2026-01-01", "s1")
-        apply.record_coverage(self.conn, "acc2", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc2", "2020-01-01", "2026-01-01", "s1", incarnation="")
         apply.purge_before(self.conn, "2024-01-01", account_id="acc1")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2024-01-01", "2026-01-01")])
@@ -441,7 +458,7 @@ class TestPurgeTrimsCoverage(Base):
         A spanning interval left behind on the second account is the same lie
         as one left behind on the first."""
         for acc in ("acc1", "acc2", "acc3"):
-            apply.record_coverage(self.conn, acc, "2020-01-01", "2026-01-01", "s1")
+            apply.record_coverage(self.conn, acc, "2020-01-01", "2026-01-01", "s1", incarnation="")
         stats = apply.purge_before(self.conn, "2024-01-01")
         self.assertEqual(stats["coverage_trimmed"], 3)
         for acc in ("acc1", "acc2", "acc3"):
@@ -451,8 +468,8 @@ class TestPurgeTrimsCoverage(Base):
     def test_a_purge_that_erases_nothing_still_leaves_coverage_disjoint(self):
         """record_coverage merges on write, and trimming must preserve that:
         the surviving set stays a disjoint, ordered set of proven intervals."""
-        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2022-01-01", "s1")
-        apply.record_coverage(self.conn, "acc1", "2023-01-01", "2026-01-01", "s2")
+        apply.record_coverage(self.conn, "acc1", "2020-01-01", "2022-01-01", "s1", incarnation="")
+        apply.record_coverage(self.conn, "acc1", "2023-01-01", "2026-01-01", "s2", incarnation="")
         apply.purge_before(self.conn, "2019-01-01")
         self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
                          [("2020-01-01", "2022-01-01"),
@@ -468,7 +485,7 @@ class TestAccountUpsert(Base):
         secret = store.local_secret(self.conn)
         a1 = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                               "currency": "EUR",
-                                              "name": "N. Voorbeeld"}, "s1", secret)
+                                              "name": "N. Voorbeeld"}, "s1", secret)[0]
         with self.assertRaises(apply.RebindRefused) as cm:
             apply.upsert_account(self.conn, {"uid": "u2-NEW", "iban": IBAN,
                                              "currency": "EUR",
@@ -483,13 +500,13 @@ class TestAccountUpsert(Base):
         recorded, so labels and everything else simply stay put."""
         secret = store.local_secret(self.conn)
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
-                                               "currency": "EUR"}, "s1", secret)
+                                               "currency": "EUR"}, "s1", secret)[0]
         self.conn.execute("UPDATE accounts SET label='huishouden',"
                           " category='personal' WHERE account_id=?", (aid,))
         again = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                                  "currency": "EUR",
                                                  "name": "N. Voorbeeld"},
-                                     "s1", secret)
+                                     "s1", secret)[0]
         got = self.conn.execute("SELECT label, category, uid, session_id, name"
                                 " FROM accounts WHERE account_id=?",
                                 (aid,)).fetchone()
@@ -506,7 +523,7 @@ class TestAccountUpsert(Base):
             "uid": provider["uid"],
             "iban": (provider.get("account_id") or {}).get("iban"),
             "currency": provider["currency"], "name": provider["name"]},
-            "s1", secret)
+            "s1", secret)[0]
         self.assertEqual(aid, store.account_id(IBAN, "EUR", secret))
         # Handing the RAW provider payload straight in used to produce
         # HMAC("|EUR") for every account. It must fail loudly instead.
@@ -521,7 +538,7 @@ class TestAccountUpsert(Base):
         secret = store.local_secret(self.conn)
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                                "currency": "EUR",
-                                               "aspsp": "ABN AMRO"}, "s1", secret)
+                                               "aspsp": "ABN AMRO"}, "s1", secret)[0]
         self.assertEqual(self.conn.execute(
             "SELECT aspsp FROM accounts WHERE account_id=?",
             (aid,)).fetchone()[0], "ABN AMRO")
@@ -532,7 +549,7 @@ class TestAccountUpsert(Base):
         secret = store.local_secret(self.conn)
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                                "currency": "EUR",
-                                               "aspsp": "Rabobank"}, "s1", secret)
+                                               "aspsp": "Rabobank"}, "s1", secret)[0]
         apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                          "currency": "EUR"}, "s1", secret)
         self.assertEqual(self.conn.execute(
@@ -546,7 +563,7 @@ class TestAccountUpsert(Base):
         requires. An update must not re-mint it: one life, one token."""
         secret = store.local_secret(self.conn)
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
-                                               "currency": "EUR"}, "s1", secret)
+                                               "currency": "EUR"}, "s1", secret)[0]
         first = self.conn.execute(
             "SELECT incarnation FROM accounts WHERE account_id=?",
             (aid,)).fetchone()[0]
@@ -560,7 +577,7 @@ class TestAccountUpsert(Base):
         self.conn.execute("DELETE FROM accounts WHERE account_id=?", (aid,))
         again = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
                                                  "currency": "EUR"}, "s1",
-                                     secret)
+                                     secret)[0]
         second = self.conn.execute(
             "SELECT incarnation FROM accounts WHERE account_id=?",
             (again,)).fetchone()[0]
@@ -601,7 +618,7 @@ class TestAccountUpsert(Base):
         # Surrounding whitespace is still stripped, not refused: that is the
         # ordinary shape of a provider payload and it normalises unambiguously.
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": " %s\n" % IBAN,
-                                               "currency": "EUR"}, "s1", secret)
+                                               "currency": "EUR"}, "s1", secret)[0]
         self.assertEqual(aid, store.account_id(IBAN, "EUR", secret))
 
     def test_an_account_with_no_aspsp_reads_as_the_empty_string(self):
@@ -610,7 +627,7 @@ class TestAccountUpsert(Base):
         the correct fail-closed direction."""
         secret = store.local_secret(self.conn)
         aid = apply.upsert_account(self.conn, {"uid": "u1", "iban": IBAN,
-                                               "currency": "EUR"}, "s1", secret)
+                                               "currency": "EUR"}, "s1", secret)[0]
         self.assertEqual(self.conn.execute(
             "SELECT aspsp FROM accounts WHERE account_id=?",
             (aid,)).fetchone()[0], "")
@@ -630,7 +647,7 @@ class TestUnreviewedRebindingIsRefused(Base):
         return apply.upsert_account(
             self.conn, {"uid": uid, "iban": IBAN, "currency": "EUR",
                         "aspsp": "Rabobank"}, session_id,
-            store.local_secret(self.conn))
+            store.local_secret(self.conn))[0]
 
     def account(self):
         return self.conn.execute("SELECT * FROM accounts").fetchone()
@@ -668,7 +685,7 @@ class TestUnreviewedRebindingIsRefused(Base):
         self.conn.execute("INSERT INTO accounts(account_id) VALUES (?)", (aid,))
         again = apply.upsert_account(
             self.conn, {"uid": "u1", "iban": IBAN, "currency": "EUR"},
-            "s1", secret)
+            "s1", secret)[0]
         got = self.conn.execute("SELECT uid, session_id FROM accounts"
                                 " WHERE account_id=?", (aid,)).fetchone()
         self.assertEqual(again, aid)
@@ -811,6 +828,11 @@ class TestSwitchBindings(Base):
     def bindings(self):
         return [(self.aid, "new-1"), (self.other, "new-2")]
 
+    def incs(self):
+        """The life tokens the renewal's validation read captured — here the
+        schema default '' both fixtures rows carry."""
+        return {self.aid: "", self.other: ""}
+
     def fetched(self, *account_ids, session_id="s-new", completeness="complete"):
         """The stamp flows.backfill leaves once apply_plan has committed.
 
@@ -836,7 +858,7 @@ class TestSwitchBindings(Base):
 
     def test_it_promotes_switches_bumps_and_retires_together(self):
         self.fetched()
-        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual((out["accounts"], out["generation"], out["retired"]),
                          (2, 5, True))
         rows = self.accounts()
@@ -865,7 +887,7 @@ class TestSwitchBindings(Base):
         renewal aborts."""
         self.fetched()
         callbacks._stage_ledger(self.conn)
-        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual((out["accounts"], out["generation"], out["retired"]),
                          (2, 5, True))
         new = self.session("s-new")
@@ -883,7 +905,7 @@ class TestSwitchBindings(Base):
         second, or the switch either forks the live consent or hides a grant
         that is still live at the bank."""
         self.fetched()
-        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         live = [r["session_id"] for r in self.conn.execute(
             "SELECT session_id FROM sessions WHERE aspsp_name='Rabobank'"
             " AND closed_at IS NULL AND status='AUTHORIZED'")]
@@ -897,7 +919,7 @@ class TestSwitchBindings(Base):
         `closed_at` on a renewed-away session, and only the provider's
         confirmation gets it."""
         self.fetched()
-        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         apply.record_revocation(self.conn, "s-old", revoked=True)
         old = self.session("s-old")
         self.assertEqual(old["status"], "CLOSED")
@@ -912,7 +934,7 @@ class TestSwitchBindings(Base):
         `unlink_bank` can retry against. Hiding a consent we did not revoke is
         the stranding a quarantine exists to undo."""
         self.fetched()
-        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         apply.record_revocation(self.conn, "s-old", revoked=False)
         old = self.session("s-old")
         self.assertEqual(old["status"], apply.REVOKE_FAILED_STATUS)
@@ -934,7 +956,7 @@ class TestSwitchBindings(Base):
         re-included an account the operator had excluded would change every
         balance and total in the system."""
         self.fetched()
-        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         for row in self.accounts().values():
             self.assertEqual((row["label"], row["included"]),
                              ("huishouden", 0))
@@ -947,7 +969,7 @@ class TestSwitchBindings(Base):
         assumed from call order."""
         self.fetched(self.aid)                     # only one of the two fetched
         with self.assertRaises(apply.RebindRefused) as cm:
-            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertIn("has not completed a history fetch", str(cm.exception))
         self.assertEqual({r["session_id"] for r in self.accounts().values()},
                          {"s-old"})
@@ -959,7 +981,7 @@ class TestSwitchBindings(Base):
         nothing about whether the NEW consent can read it."""
         self.fetched(session_id="s-old")
         with self.assertRaises(apply.RebindRefused):
-            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual({r["session_id"] for r in self.accounts().values()},
                          {"s-old"})
 
@@ -971,7 +993,7 @@ class TestSwitchBindings(Base):
         self.conn.execute("UPDATE accounts SET session_id='s-elsewhere'"
                           " WHERE account_id=?", (self.other,))
         with self.assertRaises(ValueError):
-            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual(self.accounts()[self.aid]["session_id"], "s-old")
         self.assertEqual(self.session("s-new")["status"], "REVIEW_REQUIRED")
 
@@ -998,7 +1020,7 @@ class TestSwitchBindings(Base):
 
         broken = FailOnSecondAccount(self.conn, "UPDATE accounts SET uid=", 1)
         with self.assertRaises(sqlite3.OperationalError):
-            apply.switch_bindings(broken, self.bindings(), "s-new", "s-old")
+            apply.switch_bindings(broken, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         rows = self.accounts()
         self.assertEqual({r["session_id"] for r in rows.values()}, {"s-old"})
         self.assertEqual(rows[self.aid]["uid"], "old-" + self.aid[:4])
@@ -1016,7 +1038,7 @@ class TestSwitchBindings(Base):
         self.fetched()
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM coverage").fetchone()[0], 0)
-        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        out = apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertTrue(out["retired"])
         self.assertEqual({r["session_id"] for r in self.accounts().values()},
                          {"s-new"})
@@ -1026,7 +1048,7 @@ class TestSwitchBindings(Base):
         over, so it can never answer the precondition."""
         self.fetched(completeness="partial")
         with self.assertRaises(apply.RebindRefused):
-            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+            apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual({r["session_id"] for r in self.accounts().values()},
                          {"s-old"})
 
@@ -1034,8 +1056,9 @@ class TestSwitchBindings(Base):
         """A resolved problem that keeps being reported teaches the operator to
         ignore the report."""
         self.fetched()
-        apply.record_binding_review(self.conn, self.aid, "REVIEW REQUIRED: x")
-        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old")
+        apply.record_binding_review(self.conn, self.aid, "REVIEW REQUIRED: x",
+                                    "")
+        apply.switch_bindings(self.conn, self.bindings(), "s-new", "s-old", incarnations=self.incs())
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM sync_state WHERE resource='account_binding'"
         ).fetchone()[0], 0)
@@ -1777,3 +1800,159 @@ class TestRuleApplicationInApplyPlan(Base):
         stats = apply.apply_plan(self.conn, "acc1", plan4)
         self.assertEqual(stats["auto_tagged"], 1)     # ≥1 non-workflow tag
         self.assertEqual(stats["needs_classification"], 0)
+
+
+class TestIncarnationFence(Base):
+    """Issue #8, the apply-layer primitives: every late write refuses when
+    the account's live incarnation is not the one the run captured."""
+
+    def seed(self, incarnation="life-1"):
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, incarnation) VALUES ('acc1',?)",
+            (incarnation,))
+
+    def test_record_coverage_refuses_a_dead_incarnation(self):
+        self.seed()
+        self.assertFalse(apply.record_coverage(
+            self.conn, "acc1", "2026-01-01", "2026-02-01", "s1",
+            incarnation="life-0"))
+        self.assertEqual(apply.merged_coverage(self.conn, "acc1"), [])
+        # and the live token still writes
+        self.assertTrue(apply.record_coverage(
+            self.conn, "acc1", "2026-01-01", "2026-02-01", "s1",
+            incarnation="life-1"))
+        self.assertEqual(apply.merged_coverage(self.conn, "acc1"),
+                         [("2026-01-01", "2026-02-01")])
+
+    def test_record_coverage_refuses_when_the_account_is_gone(self):
+        self.assertFalse(apply.record_coverage(
+            self.conn, "acc1", "2026-01-01", "2026-02-01", "s1",
+            incarnation="life-1"))
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM coverage").fetchone()[0], 0)
+
+    def test_a_refused_coverage_write_leaves_no_open_transaction(self):
+        """The guard path must ROLLBACK its own BEGIN IMMEDIATE: a
+        connection left mid-transaction turns the next caller's BEGIN into
+        an error and the refusal into a crash two calls later."""
+        self.assertFalse(apply.record_coverage(
+            self.conn, "acc1", "2026-01-01", "2026-02-01", "s1",
+            incarnation="x"))
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_record_binding_review_refuses_a_dead_incarnation(self):
+        self.seed()
+        apply.record_binding_review(self.conn, "acc1", "REVIEW: x", "life-0")
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sync_state").fetchone()[0], 0)
+        apply.record_binding_review(self.conn, "acc1", "REVIEW: x", "life-1")
+        self.assertEqual(self.conn.execute(
+            "SELECT completeness FROM sync_state WHERE account_id='acc1'"
+            " AND resource='account_binding'").fetchone()[0],
+            "review_required")
+
+    def test_upsert_returns_the_token_its_own_write_established(self):
+        secret = store.local_secret(self.conn)
+        aid, minted = apply.upsert_account(
+            self.conn, {"uid": "u1", "iban": IBAN, "currency": "EUR"},
+            "s1", secret)
+        row = self.conn.execute(
+            "SELECT incarnation FROM accounts WHERE account_id=?",
+            (aid,)).fetchone()
+        self.assertEqual(minted, row["incarnation"])
+        again, kept = apply.upsert_account(
+            self.conn, {"uid": "u1", "iban": IBAN, "currency": "EUR"},
+            "s1", secret)
+        self.assertEqual((again, kept), (aid, minted))
+
+    def test_an_upsert_update_racing_a_relink_refuses_and_writes_nothing(self):
+        """The narrowest interleave the upsert itself must survive: the
+        initial SELECT reads life A; a forget and relink put life B under
+        the same deterministic id before the autocommit UPDATE runs. The UPDATE is conditioned on A's token, so
+        it must hit zero rows, refuse, and leave B's binding untouched —
+        not stamp A's flow onto B."""
+        secret = store.local_secret(self.conn)
+        aid, _ = apply.upsert_account(
+            self.conn, {"uid": "u1", "iban": IBAN, "currency": "EUR"},
+            "s1", secret)
+        conn = self.conn
+
+        class RelinkBetweenSelectAndUpdate:
+            def execute(self, sql, params=()):
+                if sql.lstrip().startswith("UPDATE accounts SET uid="):
+                    conn.execute("DELETE FROM accounts WHERE account_id=?",
+                                 (aid,))
+                    conn.execute(
+                        "INSERT INTO accounts(account_id, uid, session_id,"
+                        " incarnation) VALUES (?,?,?,?)",
+                        (aid, "uid-B", "s-B", "life-B"))
+                return conn.execute(sql, params)
+
+        with self.assertRaises(apply.RebindRefused):
+            apply.upsert_account(
+                RelinkBetweenSelectAndUpdate(),
+                {"uid": "u1", "iban": IBAN, "currency": "EUR"}, "s1", secret)
+        got = self.conn.execute(
+            "SELECT uid, session_id, incarnation FROM accounts"
+            " WHERE account_id=?", (aid,)).fetchone()
+        self.assertEqual((got["uid"], got["session_id"], got["incarnation"]),
+                         ("uid-B", "s-B", "life-B"))
+        # and no durable review note landed for a life that cannot carry one
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sync_state WHERE resource="
+            "'account_binding'").fetchone()[0], 0)
+
+
+class TestSwitchBindingsErasureFence(TestSwitchBindings):
+    """Issue #8 on the switch itself. Inherits the renewal fixture; every
+    inherited happy-path test also re-runs against the new signature."""
+
+    def test_an_erased_account_raises_account_erased_not_a_generic_error(self):
+        self.fetched()
+        self.conn.execute("DELETE FROM accounts WHERE account_id=?",
+                          (self.aid,))
+        with self.assertRaises(apply.AccountErased) as cm:
+            apply.switch_bindings(self.conn, self.bindings(), "s-new",
+                                  "s-old", incarnations=self.incs())
+        self.assertEqual(cm.exception.account_id, self.aid)
+        # nothing switched, nothing promoted
+        self.assertEqual(self.accounts()[self.other]["session_id"], "s-old")
+        self.assertEqual(self.session("s-new")["status"], "REVIEW_REQUIRED")
+
+    def test_a_relinked_account_is_erased_for_the_switch_too(self):
+        """Same id, new life: existence alone would pass, the token check
+        must not."""
+        self.fetched()
+        self.conn.execute("UPDATE accounts SET incarnation='life-B'"
+                          " WHERE account_id=?", (self.aid,))
+        with self.assertRaises(apply.AccountErased):
+            apply.switch_bindings(self.conn, self.bindings(), "s-new",
+                                  "s-old", incarnations=self.incs())
+        self.assertEqual(self.accounts()[self.other]["session_id"], "s-old")
+
+    def test_the_in_transaction_revalidation_is_not_just_the_precheck(self):
+        """The precheck reads without the lock; the guard that counts runs
+        under BEGIN IMMEDIATE. An erasure landing between the two must still
+        roll the whole switch back."""
+        self.fetched()
+        conn, aid = self.conn, self.aid
+
+        class EraseAfterBegin:
+            def __init__(self):
+                self.armed = False
+
+            def execute(self, sql, params=()):
+                if sql == "BEGIN IMMEDIATE":
+                    self.armed = True
+                    cur = conn.execute(sql, params)
+                    conn.execute("DELETE FROM accounts WHERE account_id=?",
+                                 (aid,))
+                    return cur
+                return conn.execute(sql, params)
+
+        with self.assertRaises(apply.AccountErased):
+            apply.switch_bindings(EraseAfterBegin(), self.bindings(),
+                                  "s-new", "s-old",
+                                  incarnations=self.incs())
+        self.assertEqual(self.accounts()[self.other]["session_id"], "s-old")
+        self.assertEqual(self.session("s-new")["status"], "REVIEW_REQUIRED")

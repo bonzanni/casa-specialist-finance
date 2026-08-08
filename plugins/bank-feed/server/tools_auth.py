@@ -2357,9 +2357,22 @@ def _outstanding_note(status: str, aspsp: str, ref: str, mismatch=None,
             % (_safe(aspsp), _safe(status), ref))
 
 
+def _bound_accounts(c, session_id: str) -> dict:
+    """`{account_id: incarnation}` for every account bound to a session.
+
+    ONE statement, deliberately: `_renewal_precondition` validates the
+    renewal's exact account set against the keys and captures the issue-#8
+    life tokens from the values — the same read for both, so there is no
+    window in which the set was validated against one life and the tokens
+    read from another.
+    """
+    return {r[0]: r[1] for r in c.execute(
+        "SELECT account_id, incarnation FROM accounts WHERE session_id=?",
+        (session_id,))}
+
+
 def _bound_account_ids(c, session_id: str) -> set:
-    return {r[0] for r in c.execute(
-        "SELECT account_id FROM accounts WHERE session_id=?", (session_id,))}
+    return set(_bound_accounts(c, session_id))
 
 
 def renewal_target(c, aspsp: str, country: str, psu_type: str):
@@ -2746,7 +2759,8 @@ def _renewal_precondition(c, attempt: dict, returned_ids: set, *,
         return None
     if _consent_key(prior) != _consent_key(attempt):
         return None
-    bound = _bound_account_ids(c, prior["session_id"])
+    bound_map = _bound_accounts(c, prior["session_id"])
+    bound = set(bound_map)
     if bound != returned_ids:
         record = record_renewal_mismatch(
             c, session_id, prior=prior, attempt=attempt, bound=bound,
@@ -2754,6 +2768,13 @@ def _renewal_precondition(c, attempt: dict, returned_ids: set, *,
         _MISMATCHES.append({"state_hash": attempt.get("state_hash"),
                             "session_id": session_id, "record": record})
         return None
+    # The issue-#8 life tokens ride WITH the validation that captured them:
+    # the renewal's every later write (each backfill, and the switch) is
+    # conditioned on these exact values, so an account forgotten — or
+    # forgotten and re-linked — after this read can only make those writes
+    # refuse, never land the old life's pages under a new one.
+    prior = dict(prior)
+    prior["incarnations"] = bound_map
     return prior
 
 
@@ -2778,7 +2799,8 @@ def _bind_renewal(c, fenced, attempt, *, records, session_id, secret, prior):
         fenced.beat()
         result = flows.complete_renewal(
             c, fenced, old_session_id=prior["session_id"],
-            new_session_id=session_id, accounts=records, secret=secret)
+            new_session_id=session_id, accounts=records, secret=secret,
+            incarnations=prior.get("incarnations") or {})
     # `retired` is False when the fetch fell short, because the switch never
     # began — so the old consent is still live and still bound. The per-account
     # `sync_state` check is belt-and-braces on top: anything this cannot
@@ -2794,7 +2816,8 @@ def _bind_renewal(c, fenced, attempt, *, records, session_id, secret, prior):
         _INCOMPLETE.append({"state_hash": attempt.get("state_hash"),
                             "bank": attempt.get("aspsp_name") or "that bank",
                             "account_id": records[0]["account_id"],
-                            "session_id": session_id, "renewing": True})
+                            "session_id": session_id, "renewing": True,
+                            "erased": bool(result.get("erased_accounts"))})
     return complete, result
 
 
@@ -2812,8 +2835,17 @@ def _bind_first_link(c, fenced, attempt, *, records, session_id, secret, prior):
         # A first link binds immediately. `apply.RebindRefused` is NOT caught:
         # an exchange that translated apply's exception into a verdict of its
         # own would be reporting on itself again, which is what this protocol
-        # removed. On a first link it cannot fire.
-        apply.upsert_account(c, record, session_id, secret)
+        # removed. On a first link it fires only if the account changed
+        # identity UNDER the link (erased, or erased and re-linked, between
+        # the upsert's read and its fenced write) — and then failing the
+        # exchange is the honest outcome.
+        #
+        # The returned incarnation is the issue-#8 life token, established by
+        # the upsert's own read/write — never re-read afterwards, because a
+        # later SELECT can adopt a relinked life's token for pages this link
+        # is about to fetch under its own uid, and every guard downstream
+        # would then pass.
+        _aid, incarnation = apply.upsert_account(c, record, session_id, secret)
         # Deep backfill NOW: the window closes within minutes.
         # It preempts any in-flight read refresh and consults no cooldown — an
         # ordinary question must never starve this.
@@ -2823,7 +2855,7 @@ def _bind_first_link(c, fenced, attempt, *, records, session_id, secret, prior):
             # from (the renewal fetch is the other).
             result = flows.backfill(
                 fenced, c, dict(record, account_id=account_id), session_id,
-                observe=True)
+                observe=True, incarnation=incarnation)
         # The RESULT is read now rather than discarded. A capped run
         # leaves the ledger safe but loses the deep history the fresh-SCA
         # window was for, and that window does not reopen — so it must not be
@@ -2833,7 +2865,8 @@ def _bind_first_link(c, fenced, attempt, *, records, session_id, secret, prior):
             _INCOMPLETE.append({"state_hash": attempt.get("state_hash"),
                                 "bank": attempt.get("aspsp_name") or "that bank",
                                 "account_id": account_id,
-                                "session_id": session_id, "renewing": False})
+                                "session_id": session_id, "renewing": False,
+                                "erased": bool(result.get("erased"))})
     return complete, None
 
 
@@ -3172,11 +3205,30 @@ def collect_authorization(args: dict) -> str:
         detail = incomplete.get(outcome.state_hash) or {}
         if outcome.status != "partial":
             continue
+        bank_name = _safe(detail.get("bank") or "that bank")
+        if detail.get("erased"):
+            # The issue-#8 fence fired inside the authorization-time
+            # backfill: the account was erased locally while the fetch was
+            # in flight, so nothing landed — and the "marked partial /
+            # resume it" wording below would be false on both counts: there
+            # is no sync_state row left to be marked, and nothing to resume.
+            # A renewal that hit the fence switched nothing, so the old
+            # consent (if any) is still the live one.
+            lines.append(
+                "NOTHING STORED for %s: an account was erased locally while "
+                "this authorization's history fetch was in flight, so "
+                "nothing the fetch returned was kept%s. The consent at the "
+                "bank is untouched; if the erasure was yours, run link_bank "
+                "again if you want the account back, or unlink_bank to "
+                "withdraw the consent."
+                % (bank_name,
+                   " and nothing was switched — the existing consent is "
+                   "still the live one" if detail.get("renewing") else ""))
+            continue
         # A capped backfill spent the fresh-SCA window without getting the
         # history it was for, and the window does not reopen — so the
         # instruction arrives in the same breath as the collection rather than
         # being inferred later from a freshness label.
-        bank_name = _safe(detail.get("bank") or "that bank")
         lines.append(
             "INCOMPLETE HISTORY for %s: the consent is good but the "
             "transaction backfill did not finish, so the deep-history window "

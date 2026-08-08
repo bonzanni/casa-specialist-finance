@@ -282,7 +282,7 @@ class TestGate(DestructiveBase):
         self.session()
         self.account()
         self.tx()
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         tools_auth._PROTECTED_CACHE = set()
         for name, args in (("unlink_bank", {"consent_ref": self.ref()}),
                            ("purge", {"before_date": "2025-01-01"}),
@@ -396,7 +396,7 @@ class TestUnlink(DestructiveBase):
     def test_it_keeps_the_coverage_intervals(self):
         self.session()
         self.account()
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         call("unlink_bank", consent_ref=self.ref())
         self.assertEqual(self.coverage(), [("2020-01-01", "2026-01-01")])
 
@@ -746,19 +746,19 @@ class TestPurge(DestructiveBase):
         # [2020, 2026) is exactly what a deep backfill leaves behind — and the
         # withdrawn purge left it completely untouched.
         self.account()
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         call("purge", before_date="2024-01-01")
         self.assertEqual(self.coverage(), [("2024-01-01", "2026-01-01")])
 
     def test_an_interval_entirely_before_the_cutoff_is_dropped(self):
         self.account()
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2021-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2021-01-01", "s1", incarnation="")
         call("purge", before_date="2024-01-01")
         self.assertEqual(self.coverage(), [])
 
     def test_an_interval_entirely_after_the_cutoff_is_untouched(self):
         self.account()
-        apply.record_coverage(self.raw, "acc1", "2025-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2025-01-01", "2026-01-01", "s1", incarnation="")
         call("purge", before_date="2024-01-01")
         self.assertEqual(self.coverage(), [("2025-01-01", "2026-01-01")])
 
@@ -768,7 +768,7 @@ class TestPurge(DestructiveBase):
         # transactions". Coverage exists precisely to keep those apart.
         self.account()
         self.tx(ik="old", booking_date="2021-06-01")
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         self.assertEqual(apply.holes(self.raw, "acc1", "2020-01-01",
                                      "2024-01-01"), [])
         call("purge", before_date="2024-01-01")
@@ -781,9 +781,9 @@ class TestPurge(DestructiveBase):
         # still leave them believing the old intervals stand.
         self.account()
         self.tx(ik="old", booking_date="2021-06-01")
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         self.account("gone")
-        apply.record_coverage(self.raw, "gone", "2019-01-01", "2020-01-01", "s1")
+        apply.record_coverage(self.raw, "gone", "2019-01-01", "2020-01-01", "s1", incarnation="")
         out = call("purge", before_date="2024-01-01")
         self.assertIn("1 dropped and 1 trimmed", out)
         self.assertIn("NOT PROVEN", out)
@@ -843,7 +843,7 @@ class TestPurge(DestructiveBase):
     def test_a_failed_purge_reports_no_success_and_erases_nothing(self):
         self.account()
         self.tx(ik="old", booking_date="2021-06-01")
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         self.fail_at("DELETE FROM transactions")
         with self.assertRaises(Boom):
             call("purge", before_date="2024-01-01")
@@ -1133,7 +1133,7 @@ class TestForgetLocalAccount(DestructiveBase):
             self.synced(account_id, "balances",
                         last_success_at="2026-08-01T00:00:00Z")
             apply.record_coverage(self.raw, account_id, "2020-01-01",
-                                  "2026-01-01", "s1")
+                                  "2026-01-01", "s1", incarnation="")
             self.alloc(account_id, "ik-hash", 3)
 
         call("forget_local_account", account_id="drop")
@@ -1247,7 +1247,7 @@ class TestDeleteAll(DestructiveBase):
         self.raw.execute(
             "INSERT INTO sync_state(account_id, resource, last_success_at)"
             " VALUES ('acc1','balances','2026-08-01T00:00:00Z')")
-        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1")
+        apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         self.raw.execute(
             "INSERT INTO transaction_refs(row_id, provider_ref)"
             " VALUES ((SELECT row_id FROM transactions), 'ref-1')")
@@ -2220,3 +2220,4 @@ class TestRulesAtDeletionSites(DestructiveBase):
         out = call("forget_local_account", account_id="acc1")
         self.assertIn("rules are unaffected", out)
         self.assertEqual(self.count("tag_rules"), 1)
+
