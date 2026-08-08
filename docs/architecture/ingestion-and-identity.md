@@ -60,7 +60,7 @@ retired table; `capability()` looks only at the live one.
 Earning trust locally — what counts as an observation, how observations aggregate across
 accounts at one bank, what threshold is enough, how trust is demoted, and what happens
 to rows already ingested under it — is designed but not built. It is tracked as **issue
-#7** on this repository.
+#1** on this repository.
 
 ## Coverage: the difference between "nothing happened" and "we do not know"
 

@@ -1127,7 +1127,7 @@ class TestPluginManifest(unittest.TestCase):
         self.assertRegex(man["casa"]["setupTool"], SETUP_TOOL_RE.pattern)
 
     def test_the_setup_tool_declares_no_arguments_at_all(self):
-        # Issue #3 — casa's setup-tool contract. `plugin_setup_episodes
+        # Issue #7 — casa's setup-tool contract. `plugin_setup_episodes
         # ._instruction` (casa v0.148.0) dispatches the declared setupTool
         # itself, unprompted, with the instruction "Call it with no
         # arguments": there is no caller to supply any and no approval round

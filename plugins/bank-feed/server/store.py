@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS sync_state (
 -- absent row is untrusted, not stable. `provenance` records where the claim
 -- came from, so a trust claim can be audited and retired when it turns out to
 -- be wrong. No row ships: trust is per-installation and is earned by local
--- observation (issue #7), never inherited.
+-- observation (issue #1), never inherited.
 CREATE TABLE IF NOT EXISTS aspsp_capability (
   aspsp TEXT PRIMARY KEY NOT NULL,
   ref_stable INTEGER NOT NULL DEFAULT 0,

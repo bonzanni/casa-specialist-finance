@@ -3043,7 +3043,7 @@ class TestSetupCredentialRung(Base):
 
 
 class TestTheSetupToolIsArgumentFree(Base):
-    """Issue #3: casa dispatches `setup_bank_feed` itself, unprompted, with
+    """Issue #7: casa dispatches `setup_bank_feed` itself, unprompted, with
     the instruction "Call it with no arguments". So the operator's half of
     the credential dance lives on `bank_feed_signin`, and the setup tool
     DISCARDS anything it is handed — declaring no parameters would not on
@@ -3469,7 +3469,7 @@ class TestSetupApplicationRung(Base):
         self.assertEqual(self.admin.create_calls, [])
         self.assertIn("NO LONGER", out)
         # Nor on the operator's own tool: it forwards its three credential
-        # arguments and invents no gate key out of a fourth (issue #3).
+        # arguments and invents no gate key out of a fourth (issue #7).
         out = call("bank_feed_signin", accept_reregistration=True)
         self.assertEqual(self.admin.create_calls, [])
         self.assertIn("NO LONGER", out)

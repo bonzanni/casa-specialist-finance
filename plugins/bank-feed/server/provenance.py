@@ -19,7 +19,7 @@ import time
 #: to the windowed heuristic. Trust is a per-installation property -- whether
 #: THIS account's provider supplies references that are present and unique --
 #: so there is no defensible global default and none is shipped. Earning it
-#: from local observation is issue #7.
+#: from local observation is issue #1.
 DEFAULT_CAPABILITY = {"ref_stable": False, "ref_scope": "unknown", "observed_n": 0}
 
 _SCOPES = ("account", "unknown")

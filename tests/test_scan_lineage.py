@@ -125,10 +125,10 @@ class Categories(unittest.TestCase):
             self.assertTrue(sl.CATEGORIES["work_slice"].search(text), text)
 
     def test_a_public_issue_reference_is_not_a_hit_in_any_category(self):
-        # Issue references are public and stay; issue #7 is transferred to the
-        # public repository at publication. A gate that flagged them would
-        # train the executor to ignore it.
-        for text in ("issue #7", "ha-casa-app#419", "casa#401"):
+        # Issue references name something a reader of this repository can
+        # open, so they stay. A gate that flagged them would train the
+        # executor to ignore it.
+        for text in ("issue #1", "ha-casa-app#419", "casa#401"):
             for name, pattern in sl.CATEGORIES.items():
                 self.assertIsNone(pattern.search(text), (name, text))
 

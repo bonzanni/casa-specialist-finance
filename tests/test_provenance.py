@@ -221,7 +221,7 @@ class NothingIsTrustedUntilObserved(Base):
     default derived from any other installation asserts something about a
     stranger's bank that nobody measured there.
 
-    Until the observation mechanism lands (issue #7) the honest default is
+    Until the observation mechanism lands (issue #1) the honest default is
     untrusted, and matching falls back to the windowed heuristic.
     """
 
@@ -241,7 +241,7 @@ class NothingIsTrustedUntilObserved(Base):
         self.assertFalse(hasattr(provenance, "MEASURED_CAPABILITIES"))
 
     def test_set_capability_still_works_for_a_local_observation(self):
-        # The writer stays: issue #7 needs it, and an operator or a later
+        # The writer stays: issue #1 needs it, and an operator or a later
         # slice can still record what this installation observed.
         provenance.set_capability(self.conn, "Revolut", ref_stable=True,
                                   ref_scope="account", observed_n=120,

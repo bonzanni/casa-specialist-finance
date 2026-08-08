@@ -13,7 +13,7 @@ operator sender and the call would be denied outright, stranding every
 authorization.
 
 `setup_bank_feed` is ARGUMENT-FREE, and that is casa's contract rather than this
-module's taste (issue #3). `plugin_setup_episodes._instruction`
+module's taste (issue #7). `plugin_setup_episodes._instruction`
 dispatches it unprompted after the trigger consent settles and tells the running
 agent to "Call it with no arguments" — there is no caller to supply arguments and
 no approval round in which to choose them, so a schema that ADVERTISED parameters
@@ -1210,7 +1210,7 @@ def _credential_rung(c, lines, args):
 
     The dance is resumable across calls: sendOobCode now, then the
     operator runs bank_feed_signin with signin_link=<pasted URL> — the
-    argument-carrying sibling of the argument-free setup tool (issue #3);
+    argument-carrying sibling of the argument-free setup tool (issue #7);
     both reach this rung through `_reconcile`. State (email, send time)
     lives in the meta table, not memory."""
     fault = OPVAULT.status()
@@ -1463,7 +1463,7 @@ def _reconcile(args: dict) -> str:
     vault store, application registration, redirect PATCH.
 
     The shared body of the two tools below. `setup_bank_feed` calls it with
-    NO arguments (casa's setup-tool contract, issue #3); `bank_feed_signin`
+    NO arguments (casa's setup-tool contract, issue #7); `bank_feed_signin`
     calls it with the operator's credential-dance arguments. `args` reaches
     rung 3 and nowhere else — no rung here has ever accepted a redirect URI
     or an application id from a caller, and none may start.
@@ -1982,7 +1982,7 @@ def _reconcile(args: dict) -> str:
           "sign-in link — it says so and names bank_feed_signin.",
           {"type": "object", "properties": {}})
 def setup_bank_feed(args: dict) -> str:
-    """casa's setup tool, and therefore ARGUMENT-FREE (issue #3, module
+    """casa's setup tool, and therefore ARGUMENT-FREE (issue #7, module
     docstring). `plugin_setup_episodes` dispatches it with no arguments
     after the trigger consent settles, so `args` is DISCARDED rather than
     forwarded: an argument that arrives here arrived by invention, and
@@ -2012,7 +2012,7 @@ def setup_bank_feed(args: dict) -> str:
 def bank_feed_signin(args: dict) -> str:
     """The argument-carrying half of setup, split out so casa's setup tool
     can keep the argument-free contract its automatic dispatch assumes
-    (issue #3). Every argument here is the OPERATOR's own text, relayed:
+    (issue #7). Every argument here is the OPERATOR's own text, relayed:
     the account email, the sign-in URL they copied out of their mailbox,
     and a resend flag. It runs the whole ladder because the paste is a
     resume point, not a step — 'everything after that paste is automatic'

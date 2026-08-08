@@ -70,7 +70,7 @@ instead of real accounts.
   matching falls back to windowed nearest-date heuristics. This is deliberate: an
   earlier version shipped one household's measurements as every installation's
   defaults, which is worse. Earning that trust locally is designed and not built, and
-  is tracked as [issue #7](https://github.com/bonzanni/casa-specialist-finance/issues/7).
+  is tracked as [issue #1](https://github.com/bonzanni/casa-specialist-finance/issues/1).
   `docs/architecture/ingestion-and-identity.md` explains what this costs.
 - **"Paged to exhaustion" is not "we have everything."** The ledger records which date
   ranges it has actually observed, so it can distinguish "this range was read" from
