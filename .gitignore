@@ -1,0 +1,20 @@
+.superpowers/
+__pycache__/
+*.pyc
+.worktrees/
+tests/fixtures/_pub.pem
+tests/fixtures/_msg.bin
+tests/fixtures/_sig.bin
+.review-tmp/
+
+# Private working material. Tracked today; untracked at publication. Listing it
+# here is inert while the files are tracked -- git ignores nothing it already
+# tracks -- and becomes load-bearing the moment they leave the index, which is
+# the only point at which a re-add could happen by accident.
+docs/superpowers/
+
+# Developer-local, never published.
+venv/
+venv_test/
+.venv/
+.env

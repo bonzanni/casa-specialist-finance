@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# Refuse to publish what nobody has swept.
+#
+# A push is irreversible in the only sense that matters: once an object reaches a public
+# remote it stays fetchable by SHA, and deleting the branch afterwards changes nothing. So
+# this inspects EVERY commit being introduced, not the tip -- a push whose last commit is
+# innocuous would otherwise carry everything before it -- and it inspects the things that
+# are published alongside the commits and that no file-content check covers: the
+# destination branch name, the commit messages, and the author and committer identities.
+#
+# Casa's equivalent is an attestation-receipt verifier: a human records having read the
+# range, and this hook checks the receipt. That machinery is deliberately not ported (see
+# docs/doctrine/publishing.md, "What is not enforced"). What is left is mechanical, and
+# the doctrine document says plainly what that costs.
+#
+# There is NO override. `git push --no-verify` already skips every hook, so a second door
+# would add branches to this code and its tests while changing nothing about what is
+# possible.
+#
+# Installed by scripts/setup-dev.sh, which sets core.hooksPath. A fresh clone has no hooks
+# until someone runs it -- that is a property of git, and the README says so.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# The policy-file override exists so the sweep's own tests can drive it against a
+# throwaway policy. Honouring it HERE would mean an environment variable -- left over in
+# a shell from an afternoon of testing, or set deliberately -- silently decides what this
+# repository publishes. The hooks always use the committed policy.
+unset FINANCE_DENY_FILE
+
+# git passes the DESTINATION remote as $1. Coverage has to be relative to THAT remote: a
+# commit reachable from some other configured remote is not published at this destination.
+destination="${1:-origin}"
+sweep="scripts/deny-sweep.sh"
+scanner="scripts/run-gitleaks.sh"
+identifiers="scripts/scan_identifiers.py"
+
+for required in "$sweep" "$scanner"; do
+  if [ ! -x "$required" ]; then
+    echo "✋ pre-push: $required is missing or not executable, so the publication" >&2
+    echo "   checks could not run. Refusing the push rather than assuming it is clean." >&2
+    exit 1
+  fi
+done
+if [ ! -r "$identifiers" ]; then
+  echo "✋ pre-push: $identifiers is missing, so account data could not be checked." >&2
+  echo "   Refusing the push rather than assuming it is clean." >&2
+  exit 1
+fi
+
+# Account data is the asset this repository cannot recover from, and until now nothing
+# checked it at push time: the commit hook sees the index, and CI sees the objects only
+# AFTER they have reached the remote. A range imported from elsewhere, or committed with
+# --no-verify, reached the remote unexamined.
+#
+# Blobs are read in one pass and, only if that refuses, again one at a time so the
+# message can name the object. Fast when it passes, precise when it does not.
+# The declared exclusions, asked of the one implementation of the grammar rather than
+# parsed again here. The identifier scan reads object CONTENT and has no path to exclude
+# by, so the filtering has to happen before the blobs reach it -- otherwise every push
+# refuses on the working material the sweep already declares it does not read.
+# `<path> -- <reason>`; only the path is a comparison key here. Taking the whole line
+# matched nothing, which put every declared exclusion back in front of the identifier
+# scan -- caught by the suite and by the real push path, not by reading it.
+# Fetched per ref, in sweep_tree_of, against THAT ref -- an exact-file entry is valid
+# only if the revision being published contains the file.
+not_swept=""
+
+# NUL-delimited `<sha>\0<path>\0` pairs in, blob shas out. Whitespace in a pathname is
+# the reason this is not awk: `awk '{print $6}'` truncated `docs/file stolen` to
+# `docs/file`, which is a different, EXCLUDED path -- so an included account identifier
+# was dropped from the scan as if it were the exempt file. This has been
+# demonstrated against this code. A NUL-delimited reader cannot lose part of a name.
+drop_excluded() {                        # NUL pairs on stdin, blob shas on stdout
+  FINANCE_NOT_SWEPT="$not_swept" python3 -c '
+import os, sys
+
+excluded = [p for p in os.environ.get("FINANCE_NOT_SWEPT", "").split("\n") if p]
+tokens = sys.stdin.buffer.read().split(b"\0")
+seen = set()
+for i in range(0, len(tokens) - 1, 2):
+    sha, path = tokens[i].decode("utf-8", "surrogateescape"), \
+                tokens[i + 1].decode("utf-8", "surrogateescape")
+    if not sha or not path:
+        continue
+    if any(path.startswith(p) if p.endswith("/") else path == p for p in excluded):
+        continue
+    if sha not in seen:                  # dedupe AFTER excluding, never before
+        seen.add(sha)
+        print(sha)
+'
+}
+
+scan_blobs() {                           # $1=label; blob shas on stdin
+  local label="$1" blobs out
+  blobs="$(cat)"
+  [ -n "$blobs" ] || return 0
+  # `--blobs`, not `--stdin`: the scanner reads each blob as a document of its own.
+  # Joining them into one made a single binary blob -- an image, an allowlisted
+  # fixture -- undecodable, which correctly reports "nothing textual to find" and
+  # cleared every text blob beside it.
+  if out="$(printf '%s\n' "$blobs" | python3 "$identifiers" --blobs . 2>&1)"; then
+    return 0
+  fi
+  echo "✋ pre-push: a checksum-valid account identifier is in $label." >&2
+  printf '%s\n' "$out" | head -10 | sed 's/^/   /' >&2
+  return 1
+}
+
+is_zero() {                              # a deletion; also correct for a sha256 repository
+  case "${1//0/}" in "") return 0 ;; *) return 1 ;; esac
+}
+
+# Keyed by the revision being published, NOT run once for the checkout. `git push
+# payload:refs/heads/published` publishes a tree that HEAD may know nothing about, and
+# when the destination already has those objects there are no introduced commits either,
+# so scanning HEAD here checked a tree nobody was publishing.
+# The gates read their policy from the WORKING TREE -- the pattern file, the root
+# allowlist, the scanner config and the exception inventory. The tree being published is
+# a commit. When those differ, the answer given is not an answer about the artifact: an
+# uncommitted line added to the inventory while investigating something makes a published
+# ref carrying a private key scan clean, which has been demonstrated.
+#
+# Binding the policy to the revision instead was considered and is the deeper fix; it
+# would also mean the scripts could no longer be driven against a policy that is not in
+# the repository, which is how ~50 of their own tests work. Refusing the mismatch closes
+# the same hole, says plainly what is wrong, and leaves one obvious remedy.
+# EVERY input that decides an answer, including the programs themselves -- they are the
+# largest policy input there is. An uncommitted `run-gitleaks.sh` reduced to `exit 0`
+# published a committed private key while the hook reported success. The hooks are listed for the same reason.
+# scripts/identifier-exceptions.txt was missing from this list, and an uncommitted line
+# there cleared a checksum-valid account number out of a committed ref -- the asset this
+# whole phase exists for. .githooks/binary-allowlist.txt is listed although this tree has
+# none: if one is ever added it is a policy input from that moment, and a list that only
+# covers what exists today is a list that goes stale silently.
+POLICY_FILES=".githooks/deny-patterns.txt .githooks/root-allowlist.txt
+              .githooks/gitleaks-allow-sites.txt .githooks/binary-allowlist.txt
+              .gitleaks.toml scripts/identifier-exceptions.txt
+              scripts/deny-sweep.sh scripts/run-gitleaks.sh scripts/scan_identifiers.py
+              .githooks/pre-commit .githooks/pre-push"
+policy_matches_ref() {                   # $1=the revision being published
+  local rev="$1" file in_rev in_tree reported=0
+  for file in $POLICY_FILES; do
+    git cat-file -e "$rev:$file" 2>/dev/null && in_rev=1 || in_rev=0
+    [ -f "$file" ] && in_tree=1 || in_tree=0
+    # Absent from both is not a mismatch: a policy file this repository does not use is
+    # not a policy file, and refusing on it would refuse every push.
+    [ "$in_rev" -eq 0 ] && [ "$in_tree" -eq 0 ] && continue
+    if [ "$in_rev" -eq 1 ] && [ "$in_tree" -eq 1 ] \
+       && git show "$rev:$file" | cmp -s - "$file" 2>/dev/null; then
+      continue
+    fi
+    found="$in_rev"
+    if [ "$reported" -eq 0 ]; then
+      echo "✋ pre-push: the policy being applied is not the policy in the commit being" >&2
+      echo "   published. These differ between the working tree and $rev:" >&2
+      reported=1
+    fi
+    # One line per file, never a word-split list: a path with a space in it would
+    # otherwise be reported as several files, none of which exist.
+    if [ "$found" -eq 0 ]; then
+      printf '     %s (absent in the commit)\n' "$file" >&2
+    else
+      printf '     %s\n' "$file" >&2
+    fi
+  done
+  [ "$reported" -eq 0 ] && return 0
+  echo "   Every check here reads the working-tree copy, so the result would describe a" >&2
+  echo "   policy nobody is publishing. Commit the change, or restore the file." >&2
+  return 1
+}
+
+# A push publishes more than file contents, and each of these reached only some of the
+# checkers: tree-entry NAMES were used for path policy but never read as data, so an
+# account number written as a filename went out unexamined; and raw commit objects went
+# to the sweep and the identifier scan but never to the secret scanner, which examines
+# patch content only. They are gathered into one document and put through all three.
+metadata_doc() {                         # $1=directory to fill; reads shas on stdin
+  local target="$1" sha
+  mkdir -p "$target"
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    git cat-file commit "$sha" >> "$target/commit-objects.txt" 2>/dev/null || true
+  done
+  : >> "$target/commit-objects.txt"
+}
+
+swept_revs=""
+sweep_tree_of() {                        # $1=the revision being published
+  local rev="$1"
+  case " $swept_revs " in *" $rev "*) return 0 ;; esac
+  swept_revs="$swept_revs $rev"
+  echo "==> the tree that would be published ($rev)"
+  # The parity check first: when a policy input is missing or differs, that is the most
+  # useful thing to say, and every check after it would be describing the wrong policy.
+  policy_matches_ref "$rev"
+  if ! not_swept="$("$sweep" not-swept "$rev" 2>/dev/null | sed 's/ -- .*//')"; then
+    echo "✋ pre-push: the deny sweep refused the policy for $rev, so the declared" >&2
+    echo "   exclusions could not be read. Refusing rather than scanning with a list" >&2
+    echo "   nothing validated." >&2
+    return 1
+  fi
+  # A gitlink (mode 160000) publishes a commit id belonging to some other repository,
+  # which nothing here can read, plus a name in .gitmodules. This component has no
+  # submodules; one appearing is a change of kind, not a change of content.
+  if git ls-tree -r -t --format='%(objectmode) %(path)' "$rev" | grep -q '^160000 '; then
+    echo "✋ pre-push: $rev contains a submodule entry. It publishes a commit id from a" >&2
+    echo "   repository nothing here can read, and this component has no submodules." >&2
+    git ls-tree -r -t --format='%(objectmode) %(path)' "$rev" | grep '^160000 ' | sed 's/^/     /' >&2
+    return 1
+  fi
+
+  "$sweep" tree "$rev"
+  "$scanner" tree "$rev"
+  git ls-tree -r -z --format='%(objectname)%x00%(path)' "$rev" \
+    | drop_excluded | scan_blobs "that tree"
+
+  # The NAMES in that tree, as data -- including directory names, which `-r` alone omits.
+  # Every other check treats a path as a path.
+  meta="$(mktemp -d)"
+  git ls-tree -r -t --name-only "$rev" > "$meta/tree-entry-names.txt"
+  "$sweep" text < "$meta/tree-entry-names.txt"
+  python3 "$identifiers" --stdin . < "$meta/tree-entry-names.txt" > "$meta/out" || {
+    echo "✋ pre-push: a checksum-valid account identifier is in a FILENAME in $rev." >&2
+    sed 's/^/   /' "$meta/out" >&2
+    rm -rf "$meta"
+    return 1; }
+  "$scanner" dir "$meta" || { rm -rf "$meta"; return 1; }
+  rm -rf "$meta"
+}
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  # A deletion transfers no objects, but the ref NAME still goes to the server and lands
+  # in its event log. Sweep it, then skip the rest -- there is no tree and no commit.
+  if is_zero "$local_sha"; then
+    if ! printf '%s\n' "${remote_ref#refs/heads/}" | "$sweep" text; then
+      echo "✋ pre-push: the ref name being deleted is itself transmitted and logged," >&2
+      echo "   and it carries something the deny sweep refuses." >&2
+      exit 1
+    fi
+    continue
+  fi
+
+  # ONLY branch updates are publishable through this hook.
+  #
+  #   refs/tags/*   - a tag publishes its annotation, its tagger identity and its name,
+  #                   none of them a commit and none covered by any sweep here.
+  #   anything else - an arbitrary namespace such as refs/archive/* can carry an object
+  #                   that is already reachable, so it introduces no commits and would
+  #                   slip past the enumeration below entirely.
+  case "$remote_ref" in
+    refs/heads/*) ;;
+    *)
+      echo "✋ pre-push: refusing to publish $remote_ref -- only refs/heads/* is allowed." >&2
+      echo "   Tags and other namespaces publish annotations, identities and ref names" >&2
+      echo "   that nothing here sweeps." >&2
+      exit 1 ;;
+  esac
+
+  # The destination BRANCH NAME is published text in its own right, so it is checked
+  # BEFORE any commit enumeration: pushing already-published objects under a new name
+  # introduces no commits at all, and a check placed after "nothing new to publish" never
+  # runs for exactly that case.
+  dest_branch="${remote_ref#refs/heads/}"
+  if ! printf '%s\n' "$dest_branch" | "$sweep" text; then
+    echo "✋ pre-push: the destination branch name '$dest_branch' is itself published" >&2
+    echo "   text, and it carries something the deny sweep refuses." >&2
+    exit 1
+  fi
+
+  sweep_tree_of "$local_sha"
+
+  # The introduced set is expressed as REVISION ARGUMENTS, not as an `A..B` string. There
+  # is no single endpoint pair for "everything this destination does not already have",
+  # and synthesising one from the oldest introduced commit is wrong the moment the set is
+  # not a straight line.
+  if is_zero "$remote_sha"; then
+    # ASK THE DESTINATION what it has. `--not --remotes=<name>` reads local tracking refs,
+    # which describe this clone rather than the remote: repoint a remote at a fresh
+    # repository and a stale refs/remotes/... makes whole ancestries look published.
+    advertised="$(git ls-remote --heads "$destination" 2>/dev/null | cut -f1)" || advertised=""
+    if [ -n "$advertised" ]; then
+      # An advertised sha this clone does not have would make rev-list fail; falling back
+      # to the whole ancestry sweeps MORE, never less.
+      if git rev-list "$local_sha" --not $advertised >/dev/null 2>&1; then
+        revs=("$local_sha" "--not" $advertised)
+      else
+        revs=("$local_sha")
+      fi
+    else
+      # An empty or unreachable destination publishes the whole ancestry.
+      revs=("$local_sha")
+    fi
+  else
+    # Not `$remote_sha..$local_sha` alone: a commit already published on ANOTHER branch at
+    # this destination is not introduced by this push, and sweeping it again refuses a
+    # legitimate push for content that is already public. Subtract everything the
+    # destination advertises, with the destination branch tip included.
+    advertised="$(git ls-remote --heads "$destination" 2>/dev/null | cut -f1)" || advertised=""
+    if [ -n "$advertised" ] \
+       && git rev-list "$local_sha" --not "$remote_sha" $advertised >/dev/null 2>&1; then
+      revs=("$local_sha" "--not" "$remote_sha" $advertised)
+    else
+      revs=("$remote_sha..$local_sha")
+    fi
+  fi
+  commits="$(git rev-list "${revs[@]}")"
+  [ -n "$commits" ] || continue          # nothing new to publish at this destination
+
+  count="$(printf '%s\n' "$commits" | wc -l | tr -d ' ')"
+  echo "==> $count commit(s) introduced at $destination"
+
+  # EVERY introduced commit is swept, whether or not it changes a file. An empty commit
+  # still publishes its message, its author and its committer.
+  "$sweep" range "${revs[@]}"
+  "$sweep" messages "${revs[@]}"
+  # Identities are published metadata that no content rule sees: they live in the commit
+  # header, not in any diff.
+  git log --format='%an%n%ae%n%cn%n%ce' "${revs[@]}" | "$sweep" text
+  # And then the RAW commit objects, because the two lines above are renderings and a
+  # commit carries more than they show: `gpgsig`, `mergetag`, `encoding`, and any other
+  # header git will happily round-trip. Whatever is in the object is what is published,
+  # so the object is what gets swept -- and read by the identifier scan as well, which
+  # otherwise sees file blobs only and never a commit message.
+  printf '%s\n' "$commits" | while read -r commit; do
+    [ -n "$commit" ] || continue
+    git cat-file commit "$commit"
+  done | "$sweep" text
+  printf '%s\n' "$commits" | tr -d ' ' | scan_blobs "the introduced commit objects"
+  # ...and the same objects through the secret scanner, which `gitleaks git` never sees:
+  # it examines patch content, so a credential in a message or an extra header reached no
+  # secret scan at all.
+  meta="$(mktemp -d)"
+  printf '%s\n' "$commits" | metadata_doc "$meta"
+  git rev-list "${revs[@]}" | while read -r commit; do
+    git diff-tree -r --root --no-commit-id --name-only "$commit" 2>/dev/null
+  done | sort -u > "$meta/introduced-names.txt"
+  "$sweep" text < "$meta/introduced-names.txt"
+  python3 "$identifiers" --stdin . < "$meta/introduced-names.txt" > "$meta/out" || {
+    echo "✋ pre-push: a checksum-valid account identifier is in an introduced FILENAME." >&2
+    sed 's/^/   /' "$meta/out" >&2
+    rm -rf "$meta"
+    exit 1; }
+  "$scanner" dir "$meta" || { rm -rf "$meta"; exit 1; }
+  rm -rf "$meta"
+  "$scanner" range "${revs[*]}"
+  # Every blob those commits introduce, including ones the endpoint no longer has: a
+  # value added in one commit and removed in the next is published all the same.
+  #
+  # Enumerated per commit WITH paths, not with `git rev-list --objects`. That prints one
+  # pathname per deduplicated object, so when identical bytes exist at an excluded path
+  # and an included one, the excluded name can be the name it prints -- and the filter
+  # below then drops the only record of a blob that IS being published. Demonstrated
+  # against this code: the same account number at `aaa/a.md` and `zzz/account.md`,
+  # published with no refusal. Excluding by path first and deduplicating afterwards
+  # cannot do that.
+  # `T` is in the filter beside A, M and R. A symlink replaced by a regular file carrying
+  # an account number is a TYPE CHANGE, and `--diff-filter=AMR` omits its record
+  # entirely -- so the blob was published with nothing having read it.
+  git rev-list "${revs[@]}" | while read -r commit; do
+    git diff-tree -r -z -m --root --no-commit-id --diff-filter=AMRT \
+        --format= "$commit" -- 2>/dev/null \
+      | python3 -c '
+import sys
+# `--raw -z`: `:<srcmode> <dstmode> <srcsha> <dstsha> <status>\0<path>\0`, and a path is
+# NEVER quoted or split under -z. The metadata half is whitespace-delimited and safe.
+data = sys.stdin.buffer.read().split(b"\0")
+for i in range(0, len(data) - 1, 2):
+    meta = data[i].split()
+    if len(meta) >= 4 and data[i + 1]:
+        sys.stdout.buffer.write(meta[3] + b"\0" + data[i + 1] + b"\0")
+'
+  done | drop_excluded \
+    | git cat-file --batch-check='%(objectname) %(objecttype)' \
+    | awk '$2 == "blob" {print $1}' | scan_blobs "the introduced commits"
+done
+
+exit 0

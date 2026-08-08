@@ -1,0 +1,74 @@
+# Deny patterns for this repository. One extended-regex per line, POSIX ERE (grep -E).
+#
+# GENERIC PATTERNS ONLY. This file is public. An exact private literal written here is
+# published by the very commit that adds it -- escaping a dot conceals nothing. That
+# applies to path patterns too: a private artefact's filename describes the shape of a
+# private tree. There is no private supplement in this repository, and
+# docs/doctrine/publishing.md names that as a residual gap rather than pretending
+# otherwise.
+#
+# This file is excluded from the generic CONTENT sweep by path, since it necessarily
+# contains the patterns it defines -- but only its DECLARED RULE LINES are exempt. The
+# residue, comments included, is swept like any other file.
+#
+# [allow-content] entries are whole-match exemptions: an allow rule either IS the finding
+# or is irrelevant to it. Each names ONE value; a rule broad enough to whole-match an
+# arbitrary canary is refused by the sweep itself.
+#
+# Account numbers are NOT here. scripts/scan_identifiers.py owns them, with a checksum
+# test no regex can express, and it runs at commit time and in CI on its own.
+[not-swept]
+# `<path> -- <reason>`. An entry with no reason is refused. These are announced on every
+# run, because an exclusion nobody sees is an exclusion nobody checks. They are judgement,
+# not computation -- the same status docs/doctrine/publishing.md gives the other two
+# gates' exception lists.
+[paths]
+^\.claude/
+(^|/)\.review-tmp/
+# Working-material directories, un-prefixed and dot-prefixed. `(^|/)superpowers/` alone
+# would not match `.superpowers/`: the `.` sits where the rule requires a `/` or the start
+# of the path.
+(^|/)\.?superpowers/
+(^|/)[a-z0-9-]*(diagnosis|bug-review|audit-log|worklog)[a-z0-9-]*\.md$
+[content]
+\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b
+\b172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}\b
+\b192\.168\.[0-9]{1,3}\.[0-9]{1,3}\b
+\bf[cd][0-9a-f]{2}:[0-9a-f:]{4,}\b
+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}
+# Value-shaped, not identifier-shaped, and `$` excluded so that indirection through a
+# config lookup or a variable is not a hit. This repository's own source legitimately
+# names every one of these; what must never appear is an assigned LITERAL.
+#   `secret = os.environ["BANKFEED_WEBHOOK_SECRET"]`  -> fine, no literal
+#   `webhook_secret = "9f3c...."`                     -> hit
+(webhook|hmac|refresh)[_-]?(secret|key|token)[[:space:]]*[:=][[:space:]]*['"][^'"$]{20,}
+OP_SERVICE_ACCOUNT_TOKEN[[:space:]]*[:=][[:space:]]*['"]?[^'"$[:space:]]{16,}
+# There is deliberately no rule for the vault token's FILENAME. It is a convention, not a
+# secret, and scripts/scan_identifiers.py already refuses a file at that path. A content
+# rule for it would have matched only the two files whose job is to name the shape --
+# that scanner and its tests -- which is how a rule teaches people to route around it.
+[allow-content]
+# The forge's no-reply address that this project's published commits are authored
+# under. It is a routing alias the forge issues, not a mailbox, and it is already in
+# every published commit header by construction -- an allow entry is what keeps the
+# identity sweep from refusing every push.
+#
+# EXACT, not the whole no-reply domain: allowing the domain would strip it off any
+# address at it, leaving `123+someone@`, which then matches nothing -- an allow entry
+# that manufactures a bypass.
+3899230\+bonzanni@users\.noreply\.github\.com
+# The assistant co-author trailer that this project's commit messages carry. A public
+# no-reply address belonging to a service, published in every commit here already --
+# and without this entry the sweep refuses every push, since it reads commit messages.
+noreply@anthropic\.com
+# An SSH remote prefix, not an address.
+git@github\.com
+# The placeholder credential in the one test that asserts a URL carrying userinfo is
+# refused. The host has to be the real allowed host or the client would refuse it for a
+# different reason and the test would pass for the wrong one.
+pw@api\.enablebanking\.com
+# Documentation placeholder domains.
+[A-Za-z0-9._%+-]+@(example\.com|example\.org|domain\.com)
+# The sweep's own synthetic test fixtures. `.zzdomain` is not a real TLD, and the tests
+# drive their own policy file -- this entry only exempts them from THIS repository's sweep.
+[A-Za-z0-9._%+-]+@zztest\.zzdomain

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "bank-feed": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/bank_feed_server.py"],
+      "env": {
+        "CASA_BANKFEED_EB_PRIVATE_KEY": "${CASA_PLUGIN_BANKFEED_EB_PRIVATE_KEY}",
+        "CASA_BANKFEED_EB_APP_ID": "${CASA_PLUGIN_BANKFEED_EB_APP_ID}",
+        "CASA_BANKFEED_EB_CP_TOKEN": "${CASA_BANKFEED_EB_CP_TOKEN:-}",
+        "OP_SERVICE_ACCOUNT_TOKEN": "${OP_SERVICE_ACCOUNT_TOKEN}",
+        "BANKFEED_OP_VAULT": "${BANKFEED_OP_VAULT}",
+        "BANKFEED_EB_ENVIRONMENT": "${BANKFEED_EB_ENVIRONMENT:-}"
+      }
+    }
+  }
+}

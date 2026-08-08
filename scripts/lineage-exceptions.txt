@@ -1,0 +1,18 @@
+# Lineage-shaped sites that are permitted, one `path:line  # reason` per line,
+# plus `exclude-tree:<prefix>  # reason` for a subtree the scan does not cover.
+#
+# Keyed on the SITE, not on a phrase. A phrase-shaped exemption always loses:
+# a reworded site walks past it, and an unrelated new site that happens to
+# contain the phrase is exempted for free. Keying on (path, line) means an
+# exception cannot spread, and a line that moves needs its exception approved
+# again -- which is the correct direction to be wrong in.
+#
+# Every entry states why the site is not private lineage. "It reads fine" is
+# not a reason. If the reason is that it names a PUBLIC issue or a published
+# specification, say which.
+
+exclude-tree: scripts/scan_lineage.py  # the scan's own patterns and the examples in its docstring; it cannot be written without naming what it matches
+exclude-tree: scripts/lineage-exceptions.txt  # this file quotes the sites it exempts, so it matches itself by construction
+exclude-tree: tests/test_scan_lineage.py  # the scan's own tests, which must contain a specimen of every category to be worth anything
+
+plugins/bank-feed/server/store.py:330  # DATA, not prose: the v5 migration matches rows a removed seeder wrote, whose provenance strings begin with this literal. Rewording it stops the migration recognising them.

@@ -1,0 +1,19 @@
+# Root-level files that may exist in this repository, one path per line.
+#
+# An allowlist rather than a deny list, because the repository root is where a
+# stray artefact lands when nobody chose a directory for it -- a note, an
+# export, a scratch script. Naming what is allowed is a rule about shape;
+# naming what is not is a race against whatever gets created next.
+#
+# `scripts/deny-sweep.sh` refuses any root-level path not listed here. Adding a
+# line is a decision: the file will be published, and nothing else in the sweep
+# looks at what is in it.
+.gitignore
+.gitleaks.toml
+AGENTS.md
+CLAUDE.md
+LICENSE
+README.md
+config-schema.json
+manifest.json
+requirements-dev.txt

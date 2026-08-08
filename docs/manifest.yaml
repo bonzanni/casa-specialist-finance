@@ -1,0 +1,252 @@
+# Publication allowlist (git-tracked only). Verify: python3 -m scripts.verify_docs .
+#
+# Every file git tracks under docs/ appears here, and every entry here names a file
+# git tracks. Both directions are checked: an entry naming an untracked file verifies
+# clean locally and publishes nothing.
+
+- doc: manifest.yaml
+  kind: meta
+  summary: The publication allowlist for this corpus.
+
+- doc: coverage.yaml
+  kind: meta
+  summary: Code-derived coverage ledger — every enumerated surface maps to a document or an explicit exclusion.
+
+- doc: README.md
+  kind: index
+  summary: Routing map — what you are about to change, and what to read for it.
+
+- doc: llms.txt
+  kind: generated
+  summary: Flat index of the corpus, generated from this manifest.
+
+- doc: doctrine/invariants.md
+  kind: generated
+  summary: Every INV- id, its statement, and the file that defines it.
+
+- doc: doctrine/publishing.md
+  summary: The one rule that decides whether a fact may be written down in this repository.
+  when_changing: anything published — documents, comments, commit messages, or the gates that enforce them
+  covers:
+    - scripts/scan_identifiers.py
+    - scripts/scan_lineage.py
+    - scripts/verify_docs.py
+    - .githooks/pre-commit
+  tests:
+    - tests/test_scan_identifiers.py
+    - tests/test_scan_lineage.py
+    - tests/test_commit_guard.py
+    - tests/test_verify_docs.py
+  related: [contributing/doc-contract.md]
+  defines_invariants: [INV-PUB-001, INV-PUB-002, INV-PUB-003]
+  invariant_tests:
+    INV-PUB-001: [tests/test_scan_identifiers.py, tests/test_commit_guard.py]
+    INV-PUB-002: [tests/test_scan_lineage.py]
+    INV-PUB-003: [tests/test_verify_docs.py]
+
+- doc: architecture/overview.md
+  summary: The component's shape — two plugins, one server, one ledger — and which document owns what.
+  when_changing: the component layout, the plugin split, or how a tool call is dispatched
+  covers:
+    - manifest.json
+    - role/role.yaml
+    - plugins/bank-feed/server/bank_feed_server.py::handle
+    - plugins/bank-feed/server/tools_read.py::register
+  tests:
+    - tests/test_component.py
+    - tests/test_server_smoke.py
+  related: [architecture/bank-linking.md, architecture/ingestion-and-identity.md, architecture/annotations-and-rules.md, architecture/credentials.md]
+
+- doc: architecture/bank-linking.md
+  summary: Two approvals, a callback that never waits, and why backfill runs first.
+  when_changing: linking, authorization, renewal, the callback contract, or rate control
+  covers:
+    - plugins/bank-feed/server/flows.py::backfill
+    - plugins/bank-feed/server/flows.py::complete_renewal
+    - plugins/bank-feed/server/flows.py::verify_accounts
+    - plugins/bank-feed/server/callbacks.py::run_collection
+    - plugins/bank-feed/server/eb_ais.py
+    - plugins/bank-feed/server/httpx.py
+    - plugins/bank-feed/server/tools_refresh.py::_refresh_resource
+  tests:
+    - tests/test_flows.py
+    - tests/test_callbacks.py
+    - tests/test_eb.py
+    - tests/test_httpx.py
+    - tests/test_tools_refresh.py
+  related: [architecture/ingestion-and-identity.md, architecture/credentials.md]
+
+- doc: architecture/ingestion-and-identity.md
+  summary: How a provider page becomes a ledger row, what coverage proves, and the identity limitation.
+  when_changing: matching, occurrence allocation, coverage, the ledger schema, or a migration
+  covers:
+    - plugins/bank-feed/server/ingest.py::reconcile
+    - plugins/bank-feed/server/apply.py::apply_plan
+    - plugins/bank-feed/server/provenance.py::capability
+    - plugins/bank-feed/server/money.py
+    - plugins/bank-feed/server/store.py::open_db
+  tests:
+    - tests/test_ingest.py
+    - tests/test_apply.py
+    - tests/test_provenance.py
+    - tests/test_store.py
+    - tests/test_money.py
+  related: [architecture/bank-linking.md, architecture/annotations-and-rules.md]
+
+- doc: architecture/annotations-and-rules.md
+  summary: Tags, the append-only note journal, the deterministic rulebook, and the classifier split.
+  when_changing: tags, notes, note search, aggregation, the rule engine, or the classifier skill
+  covers:
+    - plugins/bank-feed/server/rules.py::canon_text
+    - plugins/bank-feed/server/rules.py::validate_rule
+    - plugins/bank-feed/server/rules.py::apply_to_rows
+    - plugins/bank-feed/server/tools_annotate.py
+    - plugins/bank-feed/server/tools_aggregate.py
+    - plugins/bank-feed/server/tools_rules.py
+    - plugins/tx-classifier/skills/classify-transactions/SKILL.md
+  tests:
+    - tests/test_rules.py
+    - tests/test_tools_annotate.py
+    - tests/test_tools_aggregate.py
+    - tests/test_tools_rules.py
+    - tests/test_tx_classifier.py
+  related: [architecture/ingestion-and-identity.md, reference/tool-surface.md]
+
+- doc: architecture/credentials.md
+  summary: Four credentials, two provider surfaces, one vault, and one mode authority.
+  when_changing: keys, tokens, the vault seam, signing, or mode selection
+  covers:
+    - plugins/bank-feed/server/fbauth.py::Minter
+    - plugins/bank-feed/server/eb_admin.py::from_env
+    - plugins/bank-feed/server/jwtsign.py
+    - plugins/bank-feed/server/opvault.py::upsert_field
+    - plugins/bank-feed/server/ebmode.py::mode
+  tests:
+    - tests/test_fbauth.py
+    - tests/test_eb.py
+    - tests/test_jwtsign.py
+    - tests/test_opvault.py
+    - tests/test_ebmode.py
+  related: [reference/enable-banking-credentials.md, reference/sandbox-mode.md, reference/configuration.md]
+
+- doc: reference/tool-surface.md
+  summary: Every MCP tool, which six are protected, and the three lists that must stay in step.
+  when_changing: adding, removing, renaming or protecting a tool, or changing the role allow-list
+  covers:
+    - plugins/bank-feed/.claude-plugin/plugin.json
+    - role/role.yaml
+    - plugins/bank-feed/server/tools_read.py
+    - plugins/bank-feed/server/tools_auth.py
+    - plugins/bank-feed/server/tools_destructive.py
+    - plugins/bank-feed/server/tools_refresh.py
+  tests:
+    - tests/test_component.py
+    - tests/test_tools_read.py
+    - tests/test_tools_destructive.py
+    - tests/test_server_smoke.py
+  related: [architecture/overview.md, reference/configuration.md]
+
+- doc: reference/configuration.md
+  summary: The one thing an installer chooses, every environment variable, and what is a secret.
+  when_changing: an environment variable, the config schema, the mcp manifest, or the vault contract
+  covers:
+    - config-schema.json
+    - plugins/bank-feed/.mcp.json
+    - plugins/bank-feed/server/opvault.py
+    - plugins/bank-feed/server/ebmode.py
+    - plugins/bank-feed/server/store.py
+  tests:
+    - tests/test_opvault.py
+    - tests/test_ebmode.py
+    - tests/test_component.py
+  related: [architecture/credentials.md, reference/sandbox-mode.md]
+
+- doc: reference/casa-compatibility.md
+  summary: The casa rules this component copies, the version range they came from, and the update rule.
+  when_changing: a constant copied out of casa, or the casa version this component targets
+  covers:
+    - tests/test_component.py
+    - plugins/bank-feed/server/callbacks.py
+  tests:
+    - tests/test_component.py
+  related: [architecture/bank-linking.md]
+
+- doc: reference/setup-flow.md
+  summary: How the plugin installs itself — the reconcile ladder, and the one human step.
+  when_changing: the setup tools, the reconcile ladder, or what setup provisions
+  covers:
+    - plugins/bank-feed/server/tools_auth.py::setup_bank_feed
+    - plugins/bank-feed/server/tools_auth.py::bank_feed_signin
+    - plugins/bank-feed/server/eb_admin.py::Admin
+    - plugins/bank-feed/server/opvault.py::upsert_field
+  tests:
+    - tests/test_tools_auth.py
+    - tests/test_opvault.py
+  related: [reference/enable-banking-credentials.md, reference/sandbox-mode.md]
+
+- doc: reference/enable-banking-credentials.md
+  summary: The break-glass path to a control-panel credential that does not expire.
+  when_changing: the Firebase sign-in exchange, the token cache, or the control-panel credential
+  covers:
+    - plugins/bank-feed/server/fbauth.py::send_signin_email
+    - plugins/bank-feed/server/fbauth.py::exchange_link
+    - plugins/bank-feed/server/fbauth.py::mint_id_token
+    - plugins/bank-feed/server/fbauth.py::Minter
+    - plugins/bank-feed/server/eb_admin.py::from_env
+  tests:
+    - tests/test_fbauth.py
+    - tests/test_eb.py
+  related: [reference/setup-flow.md]
+
+- doc: reference/sandbox-mode.md
+  summary: Choosing the disposable test world, and what changes when you are in it.
+  when_changing: mode selection, the sandbox banner, or anything keyed on the environment
+  covers:
+    - plugins/bank-feed/server/ebmode.py::mode
+    - plugins/bank-feed/server/ebmode.py::is_sandbox
+    - plugins/bank-feed/server/bank_feed_server.py::handle
+  tests:
+    - tests/test_sandbox_mode.py
+    - tests/test_ebmode.py
+  related: [reference/setup-flow.md]
+
+- doc: contributing/protecting-account-data.md
+  summary: The guard that keeps an account number out of this repository, and how to install it.
+  when_changing: the commit guard, the identifier scan, or its exception list
+  covers:
+    - .githooks/pre-commit
+    - scripts/scan_identifiers.py
+    - scripts/iban-registry.txt
+    - .github/workflows/no-account-data.yml
+  tests:
+    - tests/test_commit_guard.py
+  related: [doctrine/publishing.md, contributing/publication-guards.md]
+
+- doc: contributing/publication-guards.md
+  summary: What refuses a commit and a push, how to run each check by hand, and where an exception is declared.
+  when_changing: the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, or hook installation
+  covers:
+    - scripts/deny-sweep.sh
+    - scripts/run-gitleaks.sh
+    - scripts/setup-dev.sh
+    - .githooks/pre-push
+    - .githooks/deny-patterns.txt
+    - .githooks/gitleaks-allow-sites.txt
+    - .gitleaks.toml
+  tests:
+    - tests/test_deny_sweep.py
+    - tests/test_run_gitleaks.py
+    - tests/test_pre_push.py
+    - tests/test_setup_dev.py
+  related: [contributing/protecting-account-data.md, doctrine/publishing.md]
+
+- doc: contributing/doc-contract.md
+  summary: What this corpus promises, and which of those promises a machine checks.
+  when_changing: the documentation rules, the corpus verifier, or the coverage ledger
+  covers:
+    - scripts/verify_docs.py
+    - scripts/coverage_ledger.py
+  tests:
+    - tests/test_verify_docs.py
+    - tests/test_coverage_ledger.py
+  related: [doctrine/publishing.md]

@@ -1,0 +1,55 @@
+# The backstop the local hook cannot be.
+#
+# `.githooks/pre-commit` refuses a commit carrying account data, but it only
+# protects a clone where someone ran `git config core.hooksPath .githooks`,
+# and `git commit --no-verify` skips it. This runs on the server, on every
+# push and every pull request, where neither applies.
+name: no account data
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a value removed in the tip commit is still public if
+          # an earlier commit still holds it.
+          fetch-depth: 0
+
+      - name: Refuse an account number in the working tree
+        run: python3 scripts/scan_identifiers.py .
+
+      # NOTE: this step passes only in the PUBLIC repository, whose history
+      # begins at the scrubbed root commit. In the private predecessor it
+      # fails by design -- 92 blobs there carry real identifiers, in the
+      # pre-scrub commits and in the design documents that quote them
+      # deliberately. That failure is the reason a fresh repository is
+      # created rather than this one being rewritten.
+      - name: Refuse an account number anywhere in the history
+        # Every blob ever committed. Blobs are deduplicated by git, so this is
+        # far cheaper than walking every commit's tree, and it is the honest
+        # reading of "public forever": a value is public if it is reachable,
+        # not only if it is checked out.
+        run: |
+          set -u
+          fail=0
+          while read -r blob _; do
+            [ "$(git cat-file -t "$blob" 2>/dev/null)" = blob ] || continue
+            if ! out=$(git cat-file -p "$blob" \
+                       | python3 scripts/scan_identifiers.py --stdin . 2>&1); then
+              printf '%s\n  ^ reachable in blob %s\n' "$out" "$blob"
+              fail=1
+            fi
+          done <<< "$(git rev-list --objects --all | awk 'NF>1')"
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "An account number is reachable in this repository's history."
+            echo "Removing it from the tip does not remove it from the clone"
+            echo "anyone has already made. The history has to be rewritten, or"
+            echo "the repository replaced."
+          fi
+          exit $fail

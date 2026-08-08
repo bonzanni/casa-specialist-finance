@@ -1,0 +1,57 @@
+{
+  "name": "bank-feed",
+  "version": "0.3.2",
+  "description": "Read-only bank account information (PSD2 AIS via Enable Banking), the finance data tools, and local transaction annotations (tags, notes) with note search, batch annotation and spend-by-tag aggregation, and deterministic auto-tagging rules applied at ingest.",
+  "author": {"name": "Nicola Bonzanni"},
+  "casa": {
+    "callbacks": [{"name": "authorize"}],
+    "setupTool": "setup_bank_feed",
+    "setupProvides": ["CASA_PLUGIN_BANKFEED_EB_PRIVATE_KEY",
+                      "CASA_PLUGIN_BANKFEED_EB_APP_ID"],
+    "protectedTools": [
+      {"name": "unlink_bank", "summary": "Revokes the Enable Banking consent identified by {consent_ref}. Refresh stops for that bank's accounts until it is re-linked. Local history is not erased."},
+      {"name": "purge", "summary": "Permanently deletes every transaction booked before {before_date}, across all accounts, then reclaims the file space. This cannot be undone."},
+      {"name": "forget_local_account", "summary": "Erases account {account_id} locally: transactions, balances, coverage, sync state. Nothing is revoked -- this does NOT disconnect the bank. Cannot be undone."},
+      {"name": "delete_all_data", "summary": "Erases the ENTIRE local finance ledger for every linked account: every transaction, balance, session and sync record. The most destructive of these actions. Cannot be undone."},
+      {"name": "label_account", "summary": "Changes account {account_id}'s label, category or included status. Excluding it removes the account from every balance and transaction total shown until it is re-included."},
+      {"name": "accept_app_reregistration", "summary": "Authorizes setup_bank_feed to REGISTER A REPLACEMENT Enable Banking application because the previously bound one vanished from the control panel. Every bank must be re-linked afterwards."}
+    ],
+    "provides_tools": [
+      "mcp__plugin_bank-feed_bank-feed__list_accounts",
+      "mcp__plugin_bank-feed_bank-feed__get_balances",
+      "mcp__plugin_bank-feed_bank-feed__balance_total",
+      "mcp__plugin_bank-feed_bank-feed__list_transactions",
+      "mcp__plugin_bank-feed_bank-feed__get_transaction",
+      "mcp__plugin_bank-feed_bank-feed__list_tags",
+
+      "mcp__plugin_bank-feed_bank-feed__tag_transaction",
+      "mcp__plugin_bank-feed_bank-feed__untag_transaction",
+      "mcp__plugin_bank-feed_bank-feed__add_note",
+      "mcp__plugin_bank-feed_bank-feed__rename_tag",
+      "mcp__plugin_bank-feed_bank-feed__delete_tag",
+      "mcp__plugin_bank-feed_bank-feed__spend_by_tag",
+      "mcp__plugin_bank-feed_bank-feed__add_rule",
+      "mcp__plugin_bank-feed_bank-feed__replace_rule",
+      "mcp__plugin_bank-feed_bank-feed__list_rules",
+      "mcp__plugin_bank-feed_bank-feed__remove_rule",
+      "mcp__plugin_bank-feed_bank-feed__apply_rules",
+
+      "mcp__plugin_bank-feed_bank-feed__setup_bank_feed",
+      "mcp__plugin_bank-feed_bank-feed__bank_feed_signin",
+      "mcp__plugin_bank-feed_bank-feed__list_banks",
+      "mcp__plugin_bank-feed_bank-feed__link_bank",
+      "mcp__plugin_bank-feed_bank-feed__collect_authorization",
+      "mcp__plugin_bank-feed_bank-feed__consent_status",
+      "mcp__plugin_bank-feed_bank-feed__accept_app_reregistration",
+
+      "mcp__plugin_bank-feed_bank-feed__sync",
+      "mcp__plugin_bank-feed_bank-feed__label_account",
+      "mcp__plugin_bank-feed_bank-feed__export_history",
+
+      "mcp__plugin_bank-feed_bank-feed__unlink_bank",
+      "mcp__plugin_bank-feed_bank-feed__purge",
+      "mcp__plugin_bank-feed_bank-feed__forget_local_account",
+      "mcp__plugin_bank-feed_bank-feed__delete_all_data"
+    ]
+  }
+}

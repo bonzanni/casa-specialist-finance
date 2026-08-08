@@ -1,0 +1,28 @@
+{
+  "aspsps": [
+    {
+      "name": "Revolut",
+      "country": "NL",
+      "psu_types": ["personal", "business"],
+      "auth_methods": [{"name": "redirect", "title": "Redirect"}],
+      "maximum_consent_validity": 15552000,
+      "beta": false
+    },
+    {
+      "name": "ABN AMRO",
+      "country": "NL",
+      "psu_types": ["personal"],
+      "auth_methods": [{"name": "redirect", "title": "Redirect"}],
+      "maximum_consent_validity": 15552000,
+      "beta": false
+    },
+    {
+      "name": "Rabobank",
+      "country": "NL",
+      "psu_types": ["personal", "business"],
+      "auth_methods": [{"name": "redirect", "title": "Redirect"}],
+      "maximum_consent_validity": 15552000,
+      "beta": false
+    }
+  ]
+}

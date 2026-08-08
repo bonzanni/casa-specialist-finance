@@ -1,0 +1,31 @@
+# casa-specialist-finance — the casa household finance specialist
+
+Canonical current-state documentation for anyone, human or agent, working on this
+repository. Code is the source of truth; these files are a map.
+
+## Architecture
+
+- [architecture/annotations-and-rules.md](architecture/annotations-and-rules.md): Tags, the append-only note journal, the deterministic rulebook, and the classifier split.
+- [architecture/bank-linking.md](architecture/bank-linking.md): Two approvals, a callback that never waits, and why backfill runs first.
+- [architecture/credentials.md](architecture/credentials.md): Four credentials, two provider surfaces, one vault, and one mode authority.
+- [architecture/ingestion-and-identity.md](architecture/ingestion-and-identity.md): How a provider page becomes a ledger row, what coverage proves, and the identity limitation.
+- [architecture/overview.md](architecture/overview.md): The component's shape — two plugins, one server, one ledger — and which document owns what.
+
+## Reference
+
+- [reference/casa-compatibility.md](reference/casa-compatibility.md): The casa rules this component copies, the version range they came from, and the update rule.
+- [reference/configuration.md](reference/configuration.md): The one thing an installer chooses, every environment variable, and what is a secret.
+- [reference/enable-banking-credentials.md](reference/enable-banking-credentials.md): The break-glass path to a control-panel credential that does not expire.
+- [reference/sandbox-mode.md](reference/sandbox-mode.md): Choosing the disposable test world, and what changes when you are in it.
+- [reference/setup-flow.md](reference/setup-flow.md): How the plugin installs itself — the reconcile ladder, and the one human step.
+- [reference/tool-surface.md](reference/tool-surface.md): Every MCP tool, which six are protected, and the three lists that must stay in step.
+
+## Doctrine
+
+- [doctrine/publishing.md](doctrine/publishing.md): The one rule that decides whether a fact may be written down in this repository.
+
+## Contributing
+
+- [contributing/doc-contract.md](contributing/doc-contract.md): What this corpus promises, and which of those promises a machine checks.
+- [contributing/protecting-account-data.md](contributing/protecting-account-data.md): The guard that keeps an account number out of this repository, and how to install it.
+- [contributing/publication-guards.md](contributing/publication-guards.md): What refuses a commit and a push, how to run each check by hand, and where an exception is declared.

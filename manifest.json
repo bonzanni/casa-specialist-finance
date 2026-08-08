@@ -1,0 +1,35 @@
+{
+  "api_version": "casa.specialist-component/v1",
+  "component_id": "casa/finance",
+  "version": "0.3.2",
+  "default_persona": {
+    "ref": "casa/alex@0.1.0",
+    "checksum": "sha256:5567536c118d74e0d1bfe45aaa19dd6398ad7977eb2831ec73d55ddddbc43bce"
+  },
+  "dependencies": [
+    {
+      "kind": "persona",
+      "identifier": "casa/alex@0.1.0",
+      "digest": "sha256:5567536c118d74e0d1bfe45aaa19dd6398ad7977eb2831ec73d55ddddbc43bce"
+    },
+    {
+      "kind": "plugin/implementation",
+      "identifier": "bank-feed",
+      "digest": "sha256:ce226a981afc2b1d232a94f525262d89d90c8b94ffb5d3d1db2de499a71525da",
+      "source": {
+        "type": "bundled",
+        "path": "plugins/bank-feed"
+      }
+    },
+    {
+      "kind": "plugin/implementation",
+      "identifier": "tx-classifier",
+      "digest": "sha256:35d5cd5b69726c29224175f121d28f909eb1dc4fb07cdb14502760747a5ea898",
+      "source": {
+        "type": "bundled",
+        "path": "plugins/tx-classifier"
+      }
+    }
+  ],
+  "checksum": "sha256:125d465239fbc9c20c4d1ad556dd4c7d2a6ed5107a8f4c2b74550c89024ac68f"
+}

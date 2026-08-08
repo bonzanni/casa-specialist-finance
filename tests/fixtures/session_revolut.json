@@ -1,0 +1,21 @@
+{
+  "session_id": "11111111-2222-4333-8444-555555555555",
+  "status": "AUTHORIZED",
+  "accounts": [
+    {
+      "uid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      "identification_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "account_id": {"iban": "NL00REVO0000000001"},
+      "all_account_ids": [
+        {"identification": "NL00REVO0000000001", "scheme_name": "IBAN"}
+      ],
+      "currency": "EUR",
+      "name": "N. Voorbeeld",
+      "product": "Business EUR",
+      "usage": "ORGA",
+      "cash_account_type": "CACC"
+    }
+  ],
+  "aspsp": {"name": "Revolut", "country": "NL"},
+  "access": {"valid_until": "2027-01-29T12:00:00+00:00"}
+}

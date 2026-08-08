@@ -1,0 +1,76 @@
+#!/bin/sh
+# Refuse a commit that would put account data into a public repository.
+#
+# Installed with:
+#
+#     git config core.hooksPath .githooks
+#
+# This checks the STAGED content, not the working tree: the two differ
+# whenever something is staged with `git add -p` or edited afterwards, and it
+# is the staged bytes that become the commit.
+#
+# It FAILS CLOSED. If python is missing or the scan itself errors, the commit
+# is refused rather than allowed -- a guard that waves things through when it
+# breaks is worse than no guard, because it is trusted.
+#
+# `git commit --no-verify` skips this, as it skips every hook. That is
+# deliberate and unavoidable; the CI workflow in .github/workflows is the
+# backstop that a local flag cannot reach.
+set -e
+
+# The policy-file override exists for the sweep's own tests. Honouring it here would let
+# an environment variable left over in a shell decide what this repository publishes.
+unset FINANCE_DENY_FILE
+
+root=$(git rev-parse --show-toplevel)
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found, so the account-data scan could not"
+    echo "run. Refusing the commit rather than assuming it is clean."
+    exit 1
+fi
+
+if ! python3 "$root/scripts/scan_identifiers.py" --staged "$root"; then
+    exit 1
+fi
+
+# The identifier scan runs first because account data is the asset: it is the
+# refusal a contributor meets most often, and its message is the one worth
+# reading. The deny sweep covers the rest -- addresses, assigned token
+# literals, private paths, root-level strays, unscannable binaries, and the
+# scanner allow-marker.
+#
+# Refused explicitly when absent, rather than skipped. An `if [ -f ]` guard
+# that runs the sweep only when it exists is a guard that disables itself the
+# moment somebody deletes it, which is precisely the commit it should refuse.
+if [ ! -x "$root/scripts/deny-sweep.sh" ]; then
+    echo "pre-commit: scripts/deny-sweep.sh is missing or not executable, so"
+    echo "the deny sweep could not run. Refusing the commit rather than"
+    echo "assuming it is clean."
+    exit 1
+fi
+
+# The scan reads the INDEX and the policy reads the WORKING TREE, so a result can
+# describe neither: a staged identifier passed because only the working tree declared
+# its exception. Refuse the mismatch, the same way the push hook does for a ref.
+for policy in .githooks/deny-patterns.txt .githooks/root-allowlist.txt \
+              .githooks/gitleaks-allow-sites.txt .githooks/binary-allowlist.txt \
+              .gitleaks.toml scripts/identifier-exceptions.txt \
+              scripts/deny-sweep.sh scripts/scan_identifiers.py; do
+    in_index=0; in_tree=0
+    git cat-file -e ":$policy" 2>/dev/null && in_index=1
+    [ -f "$root/$policy" ] && in_tree=1
+    [ "$in_index" -eq 0 ] && [ "$in_tree" -eq 0 ] && continue
+    if [ "$in_index" -eq 1 ] && [ "$in_tree" -eq 1 ] \
+       && git show ":$policy" | cmp -s - "$root/$policy" 2>/dev/null; then
+        continue
+    fi
+    echo "pre-commit: $policy differs between the index and the working tree."
+    echo "The scan reads the index and the policy reads the working tree, so the"
+    echo "result would describe neither. Stage the change, or restore the file."
+    exit 1
+done
+
+if ! "$root/scripts/deny-sweep.sh" staged; then
+    exit 1
+fi

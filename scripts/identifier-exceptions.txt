@@ -1,0 +1,24 @@
+# Checksum-valid identifiers permitted in the tracked tree.
+#
+# One value per line. Every entry MUST carry a citation naming the PUBLIC
+# source it comes from -- a specification, a vendor document, a published
+# test vector. "It looks like an example" is not a citation: revision 2 of
+# the release design asserted exactly that about a value nothing on disk
+# substantiated, which is the failure INV-PUB-003 names.
+#
+# A value with no citable public source does not belong here. Replace it
+# with a checksum-invalid synthetic instead (NL00... by convention).
+
+# Files the scan cannot read as UTF-8 text, recorded as `unscannable:<path>`
+# with the reason each carries no identifier. An undecodable file is otherwise
+# reported: a file nobody could read is an unanswered question, not a pass.
+# (None at present.)
+
+# Tracked subtrees the scan does not cover, as `exclude-tree:<prefix>`. There
+# is no exclusion anywhere else: this file is the only place one can be
+# declared, and every run prints what was excluded and how many tracked files
+# that was. An earlier version skipped the design directory silently, and that
+# directory holds dozens of checksum-valid identifiers -- so the gate reported
+# clean while tracked files carried real account numbers.
+exclude-tree:manifest.json  # Generated. Contains only paths, identifiers and SHA-256 digests, recomputed by tests/test_component.py's own functions -- no prose and no place an account number could be written. Digests are high-entropy hex, so each recompute has a fresh chance of containing a checksum-valid substring at some country's registered length; one duly did.
+exclude-tree:persona/manifest.json  # Generated, same shape and same reason.

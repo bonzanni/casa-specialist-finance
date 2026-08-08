@@ -1,0 +1,34 @@
+{
+  "transactions": [
+    {
+      "entry_reference": "20260731-0000000001",
+      "booking_date": "2026-07-31",
+      "value_date": "2026-07-31",
+      "transaction_amount": {"currency": "EUR", "amount": "12.34"},
+      "credit_debit_indicator": "DBIT",
+      "status": "BOOK",
+      "creditor": {"name": "Voorbeeld Supermarkt"},
+      "remittance_information": ["Voorbeeld Supermarkt Amsterdam"]
+    },
+    {
+      "booking_date": "2026-07-30",
+      "value_date": "2026-07-30",
+      "transaction_amount": {"currency": "EUR", "amount": "4.05"},
+      "credit_debit_indicator": "DBIT",
+      "status": "BOOK",
+      "creditor": {"name": "Voorbeeld Bakkerij"},
+      "remittance_information": ["BEA, Betaalpas Voorbeeld Bakkerij"]
+    },
+    {
+      "entry_reference": "20260701-0000000002",
+      "booking_date": "2026-07-01",
+      "value_date": "2026-07-01",
+      "transaction_amount": {"currency": "EUR", "amount": "2500.00"},
+      "credit_debit_indicator": "CRDT",
+      "status": "BOOK",
+      "debtor": {"name": "Voorbeeld Werkgever BV"},
+      "remittance_information": ["Salaris juli"]
+    }
+  ],
+  "continuation_key": "page-2-of-2"
+}

@@ -1,0 +1,43 @@
+# Accepted secret-scanner findings. One line per finding group:
+#
+#     <repo-relative path> <rule-id> <count>
+#
+# Checked by scripts/run-gitleaks.sh, which fails in BOTH directions: a finding no line
+# declares, and a line no finding matches. The count is pinned so this file cannot quietly
+# grow -- a second finding of the same rule in the same file is a refusal, and a fix that
+# removes a finding leaves a stale line that fails loudly instead of silently covering
+# whatever appears there next. (The count is exact for the tree scan; in a history scan a
+# finding recurs once per commit that touches its file, so the line is a membership test
+# there. scripts/run-gitleaks.sh says so where it applies the difference.)
+#
+# This file is public. It records WHY a shape is accepted, never a value. A finding with
+# no defensible reason is fixed, not listed here.
+#
+# Reproduce the list this file describes:
+#
+#     scripts/run-gitleaks.sh tree
+
+# Enable Banking's Firebase Web API key. Public by design: it identifies the vendor's
+# project and ships in their own control panel's JavaScript. Load-bearing at
+# plugins/bank-feed/server/fbauth.py, where it addresses the vendor's identity-toolkit
+# endpoints, and quoted in the two documents that walk an operator through sign-in. It is
+# not a secret and grants nothing on its own; the refresh token used with it is the
+# credential, and that lives in the vault.
+plugins/bank-feed/server/fbauth.py gcp-api-key 1
+docs/reference/enable-banking-credentials.md gcp-api-key 4
+docs/reference/setup-flow.md gcp-api-key 1
+
+# Throwaway RSA private keys, generated solely as signing inputs for the test suite. They
+# protect nothing, have never been used against any provider, and are regenerable with the
+# command in tests/fixtures/README-fixtures.md. A .pem file cannot carry a comment, so
+# there is no site-level annotation to write; this is the declaration.
+tests/fixtures/test_rsa_2048.pem private-key 1
+tests/fixtures/test_rsa_2048_b.pem private-key 1
+
+# PEM-SHAPED test inputs, not keys. Each is a fixture whose value is its SHAPE: a
+# truncated body that a fingerprint helper must still parse, malformed bodies the strict
+# parser must reject, and armor strings with deliberate line endings. Replacing the armor
+# would delete what the fixture is for.
+tests/_toolbase.py private-key 1
+tests/test_jwtsign.py private-key 3
+tests/test_provenance.py private-key 2

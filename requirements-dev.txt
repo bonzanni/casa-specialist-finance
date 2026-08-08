@@ -1,0 +1,6 @@
+# Development and CI dependencies. NOT installed into the plugin runtime:
+# `plugins/` is Python 3.11 standard library only, so that casa's install-time
+# provisioning stays a no-op and the committed tree is byte-identical to the
+# installed artifact. Everything listed here is used by `scripts/` and
+# `tests/`, both of which run outside every hashed plugin tree.
+PyYAML==6.0.3

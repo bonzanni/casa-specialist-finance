@@ -1,0 +1,21 @@
+# gitleaks configuration for this repository.
+#
+# NO PATH IS ALLOWLISTED. Exempting a tracked file from the scanner turns it into an
+# unreviewed channel: a credential placed there would pass every automated layer, and a
+# path exemption is exactly where a real key would be put. Accepted findings are declared
+# instead in .githooks/gitleaks-allow-sites.txt -- path, rule and count -- which
+# scripts/run-gitleaks.sh subtracts and which fails in both directions: a finding nobody
+# declared, and a declaration nothing matches.
+#
+# There is deliberately NO baseline file either. Stored verbatim it carries the findings
+# and trips the scan itself; stored redacted it suppresses nothing.
+#
+# The inline allow-marker is not a channel here either. gitleaks honours it natively, so
+# scripts/deny-sweep.sh refuses the marker wherever it appears -- it silences this scanner
+# with no record of what it silenced.
+#
+# The global allowlist table is [[allowlists]] (plural) -- verified against gitleaks
+# 8.28.0, which rejects the singular form with
+#   "1 error(s) decoding: * 'AllowList' expected a map, got 'slice'"
+[extend]
+useDefault = true

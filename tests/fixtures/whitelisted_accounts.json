@@ -1,0 +1,23 @@
+[
+  {
+    "aspsp": {"name": "Revolut", "country": "NL"},
+    "created": "2026-01-15T09:30:00+00:00",
+    "identification_hash": "9ce38b5ba58758ef3bd6ee969b916d94bedc09dd6fe455283a053afc6652abe79ce38b5ba58758ef3bd6ee969b916d94bedc09dd6fe455283a053afc6652abe79ce38",
+    "linker": "resident",
+    "title": "IBAN NL00REVO0000000001"
+  },
+  {
+    "aspsp": {"name": "ABN AMRO", "country": "NL"},
+    "created": "2026-01-15T09:31:00+00:00",
+    "identification_hash": "24696a00cf81464643b216b06319421089eb74a93eeae5fe514c5a980f72e44224696a00cf81464643b216b06319421089eb74a93eeae5fe514c5a980f72e44224696",
+    "linker": "resident",
+    "title": "IBAN NL00ABNA0000000002"
+  },
+  {
+    "aspsp": {"name": "Rabobank", "country": "NL"},
+    "created": "2026-01-15T09:32:00+00:00",
+    "identification_hash": "98853c9acc6ff62f62ec494a63842e129d5ec87f375f82e13952cdd9e54ba06498853c9acc6ff62f62ec494a63842e129d5ec87f375f82e13952cdd9e54ba06498853",
+    "linker": "resident",
+    "title": "IBAN NL73RABO0123456789"
+  }
+]
