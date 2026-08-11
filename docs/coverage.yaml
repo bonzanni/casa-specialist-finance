@@ -100,6 +100,8 @@
   doc: reference/tool-surface.md
 - item: tool:remove_rule
   doc: reference/tool-surface.md
+- item: tool:rename_account
+  doc: reference/tool-surface.md
 - item: tool:rename_tag
   doc: reference/tool-surface.md
 - item: tool:replace_rule
@@ -187,6 +189,8 @@
 - item: role:mcp__plugin_bank-feed_bank-feed__purge
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__remove_rule
+  doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__rename_account
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__rename_tag
   doc: reference/tool-surface.md

@@ -2,7 +2,7 @@
 
 > Code is the source of truth. This file is a map; when it and the code disagree, the code wins.
 
-Thirty-one MCP tools, all served by `bank-feed`. `tx-classifier` adds none — it is a
+Thirty-two MCP tools, all served by `bank-feed`. `tx-classifier` adds none — it is a
 skill and calls these.
 
 Regenerate the list this table describes with:
@@ -59,6 +59,7 @@ alone is enough:
 | `rename_tag` / `delete_tag` | Vocabulary edits: every row carrying the tag, superseded history included. |
 | `add_rule` / `replace_rule` / `remove_rule` | Maintain the rulebook. Replace is the only edit — there is no partial rule update. |
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
+| `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
 | `export_history` | Write the whole local ledger to a file under the plugin's data directory. |
 
@@ -98,7 +99,9 @@ a model-supplied boolean is inference satisfying itself.
 
 `label_account` is protected despite not deleting anything: silently excluding an
 account changes every number the specialist reports afterwards, which is
-indistinguishable from data loss to whoever reads the answer.
+indistinguishable from data loss to whoever reads the answer. The reversible half is
+split out: a label is display-only, so `rename_account` edits it without a grant, and
+any change touching `category` or `included` still goes through this gate.
 
 The in-process check is a tripwire, not the boundary — a tool that finds itself
 undeclared refuses, so removing a declaration disables the tool rather than ungating it.

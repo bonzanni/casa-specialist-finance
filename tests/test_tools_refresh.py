@@ -226,6 +226,128 @@ class TestLabelAccount(Base):
         out = call("label_account", account_id="acc1")
         self.assertIn("at least one", out)
 
+    def test_a_category_only_change_still_requires_the_declaration(self):
+        # The issue-#13 split moves LABEL edits off the gate. The other two
+        # halves must not move with it: `category` is what
+        # `_included_accounts` filters scoped totals on, so a category change
+        # that slipped the gate would silently rescope money-relevant
+        # answers. Asserted per argument shape, not only for `included` — a
+        # future "ungate category too" edit must fail here, not pass quietly.
+        self.account()
+        tools_auth._PROTECTED_CACHE = set()       # simulate a lost declaration
+        out = call("label_account", account_id="acc1", category="company")
+        self.assertIn("not declared", out.lower())
+        self.assertEqual(
+            self.raw.execute("SELECT category FROM accounts").fetchone()[0],
+            "personal")
+
+    def test_a_mixed_label_and_category_change_still_requires_the_declaration(self):
+        # A mixed mutation rides the gated tool: bundling a label with a
+        # category change must not buy the category change a free pass.
+        self.account()
+        tools_auth._PROTECTED_CACHE = set()
+        out = call("label_account", account_id="acc1",
+                   label="Huishouden", category="company")
+        self.assertIn("not declared", out.lower())
+        row = self.raw.execute(
+            "SELECT label, category FROM accounts").fetchone()
+        self.assertEqual(tuple(row), (None, "personal"))
+
+
+class TestRenameAccount(Base):
+    """The ungated half of the issue-#13 split.
+
+    The gate itself is casa's PreToolUse hook keyed on
+    `casa.protectedTools`; what this process can assert is the whole of the
+    plugin's side of the contract: the tool is NOT declared protected (so
+    casa demands nothing), it carries no in-process tripwire (so it works
+    with no declarations at all), and it has no path — schema or body — to
+    the two columns the gate exists for.
+    """
+
+    def test_rename_account_is_registered_and_advertised(self):
+        self.assertIn("rename_account", bank_feed_server.TOOLS)
+        manifest = json.loads(
+            (pathlib.Path(tools_refresh.__file__).parents[1]
+             / ".claude-plugin/plugin.json").read_text("utf-8"))
+        self.assertIn("mcp__plugin_bank-feed_bank-feed__rename_account",
+                      manifest["casa"]["provides_tools"])
+
+    def test_rename_account_is_deliberately_not_protected(self):
+        # The split's whole point: a label-only edit costs no operator
+        # approval. Not declared to casa, not in the in-process set either.
+        self.assertNotIn("rename_account", declared_protected())
+        self.assertNotIn("rename_account", tools_auth.PROTECTED)
+
+    def test_rename_account_writes_without_any_declaration_at_all(self):
+        # The mirror of label_account's lost-declaration test: rename_account
+        # consults no declaration, so an empty protected set — the state in
+        # which every gated tool refuses — leaves a rename working. If
+        # someone later wires `_require_declared` into it, this fails and
+        # forces that choice into the open.
+        self.account()
+        tools_auth._PROTECTED_CACHE = set()
+        out = call("rename_account", account_id="acc1", label="Huishouden")
+        self.assertIn("Updated", out)
+        self.assertEqual(
+            self.raw.execute("SELECT label FROM accounts").fetchone()[0],
+            "Huishouden")
+
+    def test_rename_account_cannot_reach_category_or_included(self):
+        # The schema is advertised to the model, not enforced by anything in
+        # this process — so the body, not the schema, is what has to hold the
+        # line. Smuggle both gated arguments in; the row must keep them.
+        self.account()
+        call("rename_account", account_id="acc1", label="Huishouden",
+             category="company", included=False)
+        row = self.raw.execute(
+            "SELECT label, category, included FROM accounts").fetchone()
+        self.assertEqual(tuple(row), ("Huishouden", "personal", 1))
+
+    def test_rename_accounts_schema_spells_no_gated_column(self):
+        # The advertised half of the same line: a schema that OFFERS
+        # `category` invites the model to pass it and be silently ignored,
+        # which reads as a landed change. Exactly the ungated arguments.
+        schema = bank_feed_server.TOOLS["rename_account"]["schema"]
+        self.assertEqual(set(schema["properties"]), {"account_id", "label"})
+
+    def test_a_renamed_label_cannot_forge_a_line_of_output(self):
+        # The second writer of the ONE unfenced provider-adjacent column
+        # inherits the first writer's obligation verbatim; same MARKER, same
+        # assertions as label_account's.
+        self.account()
+        call("rename_account", account_id="acc1", label=MARKER)
+        stored = self.raw.execute("SELECT label FROM accounts").fetchone()[0]
+        self.assertNotIn("\n", stored)
+        self.assertNotIn(tools_read.UNTRUSTED_CLOSE, stored)
+        out = call("list_accounts")
+        self.assertFalse(any(ln.startswith("Coverage: FORGED")
+                             for ln in out.splitlines()))
+
+    def test_rename_account_never_emits_the_gate_note(self):
+        # GATE_NOTE claims an operator confirmation happened. On an ungated
+        # tool that sentence would be false the moment it printed.
+        self.account()
+        out = call("rename_account", account_id="acc1", label="Huishouden")
+        self.assertNotIn(tools_auth.GATE_NOTE, out)
+
+    def test_rename_account_reports_the_stored_label_not_the_argument(self):
+        self.account()
+        out = call("rename_account", account_id="acc1", label="Huishouden")
+        stored = self.raw.execute("SELECT label FROM accounts").fetchone()[0]
+        self.assertIn(stored, out)
+
+    def test_a_missing_label_is_said_rather_than_silently_succeeding(self):
+        self.account()
+        out = call("rename_account", account_id="acc1")
+        self.assertIn("pass label", out)
+        self.assertIsNone(
+            self.raw.execute("SELECT label FROM accounts").fetchone()[0])
+
+    def test_an_unknown_account_is_said(self):
+        out = call("rename_account", account_id="nope", label="x")
+        self.assertIn("No account", out)
+
 
 class TestExport(Base):
     def test_export_history_writes_csv_under_plugin_data(self):

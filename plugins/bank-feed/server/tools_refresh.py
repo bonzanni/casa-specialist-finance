@@ -21,12 +21,18 @@ reads as ours. It is also the module that WRITES `balances.reference_date` and
 lives in `tools_read` — that column had a reader before it had a writer. And it
 writes `accounts.label`,
 the one provider-adjacent column `tools_read` renders UNFENCED on the stated
-grounds that it is the operator's own text: that stays true only if this
-writer keeps it true, so a label is neutralised on the way in.
+grounds that it is the operator's own text: that stays true only if every
+writer keeps it true — there are two, `label_account` and `rename_account` —
+so a label is neutralised on the way in at both.
 
 `label_account` is a PROTECTED tool. It is not destructive, but included=false
 removes an account from every balance and every total, and the only thing that
-would make the model call it is text it read.
+would make the model call it is text it read. `rename_account` is its
+deliberately UNGATED complement (issue #13): a label is display-only on every
+read surface and a wrong one is one more rename away from fixed, so the
+reversible half costs no operator approval — while `category` and `included`,
+the two columns `tools_read._included_accounts` filters money-relevant answers
+on, can only change through the gated tool.
 """
 from __future__ import annotations
 
@@ -620,7 +626,8 @@ def _fetch_resource(c, account_id: str, resource: str, account: dict,
 @register("label_account",
           "Set an account's friendly name, personal/company category, and "
           "whether it is included in answers. Protected: casa demands an "
-          "operator grant.",
+          "operator grant. For a label-only edit prefer rename_account, "
+          "which needs no grant.",
           {"type": "object",
            "properties": {"account_id": {"type": "string"},
                           "label": {"type": "string"},
@@ -684,6 +691,47 @@ def label_account(args: dict) -> str:
                      "total.")
     lines.append(GATE_NOTE)
     return "\n".join(lines)
+
+
+@register("rename_account",
+          "Set an account's friendly display label. Display-only and "
+          "reversible: changes no category, no include flag and no total. "
+          "Category or included changes go through label_account, which "
+          "casa gates behind an operator grant.",
+          {"type": "object",
+           "properties": {"account_id": {"type": "string"},
+                          "label": {"type": "string"}},
+           "required": ["account_id", "label"]})
+def rename_account(args: dict) -> str:
+    # DELIBERATELY ungated (issue #13), so there is no `_require_declared`
+    # tripwire and no GATE_NOTE here: a label is display-only on every read
+    # surface — `tools_read._included_accounts` filters scoped answers on
+    # `category` and `included`, never on `label` — and a wrong label is one
+    # more rename away from fixed. The money-relevant halves stay on
+    # `label_account`, which stays declared in casa.protectedTools. This
+    # tool's schema spells neither `category` nor `included`, and the body
+    # reads nothing but `label`; the schema is advertised, not enforced, so
+    # the narrow UPDATE below is what actually holds that line.
+    c = _conn()
+    account_id = str(args.get("account_id") or "")
+    if args.get("label") is None:
+        return "Nothing to change: pass label."
+    # The same writer rule as label_account: `tools_read._label` renders this
+    # column UNFENCED on the stated grounds that it is the operator's own
+    # text, and that exemption stays honest only if EVERY writer neutralises
+    # on the way in — this is the second writer.
+    cur = c.execute("UPDATE accounts SET label=? WHERE account_id=?",
+                    (tools_read._neutralized(args["label"]), account_id))
+    if not cur.rowcount:
+        return "No account with that account_id. Run list_accounts."
+    # Reported from the STORED row, not from the argument, same as
+    # label_account: what the operator needs to know is what the ledger now
+    # holds.
+    stored = c.execute("SELECT label FROM accounts WHERE account_id=?",
+                       (account_id,)).fetchone()[0]
+    return ("Updated %s: label is now \"%s\". Labels are display-only; "
+            "category and included status are unchanged."
+            % (tools_read._neutralized(account_id), stored))
 
 
 def _account_line(name: str, resource: str, tail: str) -> str:
