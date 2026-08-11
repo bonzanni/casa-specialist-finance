@@ -624,10 +624,11 @@ def _fetch_resource(c, account_id: str, resource: str, account: dict,
 # --------------------------------------------------------------------------
 
 @register("label_account",
-          "Set an account's friendly name, personal/company category, and "
-          "whether it is included in answers. Protected: casa demands an "
-          "operator grant. For a label-only edit prefer rename_account, "
-          "which needs no grant.",
+          "For label-only changes use rename_account (no approval needed); "
+          "this tool is for category and included changes. Sets an account's "
+          "personal/company category, whether it is included in answers, "
+          "and optionally its friendly name alongside those. Protected: "
+          "casa demands an operator grant.",
           {"type": "object",
            "properties": {"account_id": {"type": "string"},
                           "label": {"type": "string"},
@@ -694,10 +695,11 @@ def label_account(args: dict) -> str:
 
 
 @register("rename_account",
-          "Set an account's friendly display label. Display-only and "
-          "reversible: changes no category, no include flag and no total. "
-          "Category or included changes go through label_account, which "
-          "casa gates behind an operator grant.",
+          "Rename an account: the tool for ANY label-only change — a rename, "
+          "a relabel, a friendlier display name — with no approval needed. "
+          "Display-only and reversible: changes no category, no include flag "
+          "and no total. Category or included changes go through "
+          "label_account, which casa gates behind an operator grant.",
           {"type": "object",
            "properties": {"account_id": {"type": "string"},
                           "label": {"type": "string"}},

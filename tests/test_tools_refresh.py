@@ -348,6 +348,28 @@ class TestRenameAccount(Base):
         out = call("rename_account", account_id="nope", label="x")
         self.assertIn("No account", out)
 
+    def test_label_accounts_description_routes_label_only_asks_away_first(self):
+        # Issue #17: the split only pays off if a natural "rename this
+        # account" ask reaches the ungated tool without the operator naming
+        # it. Tool descriptions are the one steering surface every consumer
+        # inherits — an agent that never runs the skill still reads them — so
+        # the redirect must OPEN label_account's description, not trail it.
+        desc = bank_feed_server.TOOLS["label_account"]["description"]
+        self.assertTrue(
+            desc.startswith("For label-only changes use rename_account"),
+            desc)
+        self.assertIn("no approval needed", desc)
+
+    def test_rename_accounts_description_claims_the_label_only_use_case(self):
+        # The other half of the same routing fix: rename_account has to CLAIM
+        # renames, not merely exist, and say the no-approval part out loud.
+        desc = bank_feed_server.TOOLS["rename_account"]["description"]
+        self.assertIn("Rename an account", desc)
+        self.assertIn("label-only", desc)
+        self.assertIn("no approval needed", desc)
+        # The boundary stays stated: gated changes are named as elsewhere.
+        self.assertIn("label_account", desc)
+
 
 class TestExport(Base):
     def test_export_history_writes_csv_under_plugin_data(self):
