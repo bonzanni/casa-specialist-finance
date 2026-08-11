@@ -57,19 +57,24 @@ The design respects that instead of fighting it:
    deliver a code that signs into *the same address it was sent to*; you cannot
    have someone else's link delivered to your mailbox. Worst case is an email
    you can ignore.
-2. **You copy the link out of your own mail client, without opening it** — this
-   is the human-in-the-loop step, and it is the one that must stay manual. Do
+2. **You copy the link out of your own mail client, without opening it** — the
+   human-in-the-loop step, manual by default. Do
    **not** click it. The code is assumed single-use, so a browser visit spends
    it and hands nothing back — and the cost of being wrong about that is one
    wasted email, against a stranded setup if it is right. Copy the URL, or the
-   `oobCode` out of it.
+   `oobCode` out of it. (On a casa install with consented mailbox access, the
+   operator may explicitly delegate this one read per send — the bank-accounts
+   skill's ferry protocol, issue #11; the fallback is this manual step,
+   unchanged.)
 3. **The plugin exchanges the code and stores the token** — safe to automate.
 
-> **Do not rely on an AI assistant reading the link out of your inbox.** Mail
-> connectors defang authentication links in transit — observed live: the
-> `oobCode` came through with its leading characters dropped and `=` rewritten
-> to `~`, i.e. deliberately broken. Copy the intact URL, unopened,
-> from your own mail client.
+> **Do not relay the link through a mail connector.** Connectors defang
+> authentication links in transit — observed live: the `oobCode` came through
+> with its leading characters dropped and `=` rewritten to `~`, i.e.
+> deliberately broken. Copy the intact URL, unopened, from your own mail
+> client — or, on an install where you have explicitly delegated the ferry
+> (issue #11), let the specialist read that one mail directly; a mangled code
+> there is final and falls back to this manual copy.
 
 ## Step 1 — trigger the email
 

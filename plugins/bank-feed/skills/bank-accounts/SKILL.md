@@ -1,6 +1,6 @@
 ---
 name: bank-accounts
-description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, and how to annotate transactions with tags and notes.
+description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the opt-in mailbox ferry for the sign-in email, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, and how to annotate transactions with tags and notes.
 ---
 
 # Bank accounts — methodology
@@ -234,7 +234,47 @@ code), and never relay it through a mail connector (connectors defang the
 code in transit). Pass exactly the pasted text as `signin_link`; that call
 runs the rest of setup itself, so there is nothing to re-run afterwards.
 
-Never read that email on the operator's behalf. If a Gmail-capable path
-exists and the operator explicitly offers it, treat any mangled code as
-final and fall back to asking for the copy/paste — do not retry mailbox
-reads. Never echo tokens, codes, or key material into the conversation.
+Never read that email on the operator's behalf — with ONE exception, the
+delegated ferry below. Never echo tokens, codes, mail bodies, or key
+material into the conversation.
+
+### The delegated mailbox ferry (opt-in, per send)
+
+On an install where the operator has already consented to mailbox access
+(a Gmail-capable tool is available to you), the operator may delegate the
+one copy/paste step: reading the sign-in email and passing its link on,
+instead of doing it by hand. Every rule here is load-bearing; without a
+delegation the default is exactly the manual flow above.
+
+- **Consent is explicit, operator-originated, and per email send.** Only
+  an operator statement in this conversation like "use my mailbox for the
+  sign-in" delegates the ferry, and it covers AT MOST ONE sign-in email:
+  the one whose send this run itself triggered after the delegation. A
+  resend — `resend: true`, whatever the reason — NEVER inherits consent;
+  ask again. Never infer consent from the mailbox tool merely existing,
+  and never carry it across conversations.
+- **State the trade-off before using it**, in one sentence: reading the
+  sign-in mail automatically removes the human hand from the issuance of
+  a durable credential; the operator can revoke it afterwards by signing
+  out all sessions in the Enable Banking control panel.
+- **Match strictly, and refuse ambiguity — never guess.** A candidate
+  mail must be: delivered to the account email named to
+  `bank_feed_signin`; received AFTER the send this run triggered; the
+  provider's own sign-in mail — subject "Sign in to Enable Banking", with
+  a sender address in the provider's own domains (enablebanking.com, or
+  its Firebase sender), never a mail that merely displays the provider's
+  name over a foreign address or that the mailbox flags as
+  unauthenticated. If ZERO candidates arrive in a short wait, or MORE
+  THAN ONE matches, or anything is in doubt: fall back to the manual
+  copy/paste instructions and do not search again.
+- **One body fetch, one attempt.** Retrieve at most one mail body per
+  delegation. Extract the full sign-in URL and pass it EXACTLY as
+  `signin_link` — copied, never clicked, never trimmed. A mangled code, a
+  redemption failure, or no match consumes the delegation: fall back to
+  the manual instructions, and do not retry mailbox reads.
+- **Report what was read.** After the attempt, tell the operator which
+  mail was used, by its received time. If they had another sign-in link
+  in flight for the same account, that is how they learn it may now be
+  spent — a delayed earlier mail can be the one candidate in the window,
+  and redeeming it is contained (same account, same credential custody)
+  but worth naming.

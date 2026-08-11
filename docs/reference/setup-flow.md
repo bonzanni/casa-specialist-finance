@@ -21,14 +21,22 @@ missing.
 
 ## The principle
 
-The plugin forges and stores everything it can. The irreducible human step in
-**credential acquisition** is copying the intact sign-in URL out of the mailbox
-and pasting it back — a copy/paste, not a click: mail connectors defang the
-link in transit, and clicking it in a browser consumes the single-use code
-without handing the plugin anything. It is irreducible because "software
-triggers a sign-in email *and* reads the mailbox for the code" is an
-account-takeover primitive that the safety layers correctly refuse — so the
-human ferries the link, and software does everything on either side.
+The plugin forges and stores everything it can. The human step in
+**credential acquisition** is ferrying the intact sign-in URL out of the
+mailbox and passing it back — a copy/paste, not a click: mail connectors
+defang the link in transit, and clicking it in a browser consumes the
+single-use code without handing the plugin anything. "Software triggers a
+sign-in email *and* reads the mailbox for the code" is, unconsented, an
+account-takeover primitive — so BY DEFAULT the human ferries the link, and
+software does everything on either side. The one exception is the
+**delegated mailbox ferry** (issue #11): on an install where the operator
+has already consented to mailbox access, an explicit per-send operator
+request ("use my mailbox for the sign-in") may delegate that single read —
+scoped to the provider's own sign-in mail for the configured account email,
+one body fetch, exactly one candidate or fall back to manual. The protocol,
+with every rule, lives in the bank-accounts skill; no code reads a mailbox
+in either case, and the server-side ladder is byte-identical with or
+without the delegation.
 
 **That is NOT the only human touch in the install.** "Exactly one human touch"
 would be false. The full install keeps: approving the callback consent DM, the
@@ -77,10 +85,12 @@ Phase 0 is what makes setup idempotent: a second run is a no-op.
 ### Phase 1 — acquire the durable credential
 
 - **Account email**: from 1Password, else ask once.
-- **The copy/paste, and nothing else.** There is one path, and no automatic
-  mailbox branch exists — see "the principle" above for why, and the
-  bank-accounts skill, which instructs the specialist never to read that email
-  on the operator's behalf even where it could.
+- **The copy/paste, or its delegated stand-in.** The default path is the
+  manual ferry, and no CODE mailbox branch exists — see "the principle"
+  above, and the bank-accounts skill, which instructs the specialist never
+  to read that email on the operator's behalf except under the skill's own
+  delegated-ferry protocol: an explicit, per-send operator request, a
+  strictly matched single read, and this same manual flow as the fallback.
   1. plugin calls `sendOobCode`, at most one email per 15 minutes unless the
      operator asks for a resend.
   2. plugin prints step-by-step instructions naming `bank_feed_signin`.
@@ -163,12 +173,17 @@ them fails closed.
    password auth; `EMAIL_SIGNIN` is the enabled method (verified). An
    email+password recipe is simply wrong for this provider.
 
-2. **Do not let software read the link from a mailbox.** "Trigger a sign-in email
-   *and* read the mailbox for the code" is an account-takeover primitive
-   regardless of who consented, and mail connectors defang the link in transit
-   anyway — they rewrite characters inside the code, so what arrives is not what
-   was sent. Both point the same way: the human ferries the link. The skill says
-   so, and there is no code that could do otherwise.
+2. **Software reading the link from a mailbox is takeover-shaped, so it is
+   opt-in per send, never a default.** "Trigger a sign-in email *and* read the
+   mailbox for the code" is, unconsented, an account-takeover primitive; and
+   mail connectors defang the link in transit — they rewrite characters inside
+   the code, so what arrives through a connector is not what was sent. The
+   default therefore remains the human ferry. What issue #11 changed
+   (2026-08-11): the operator may explicitly delegate the read, per send,
+   under the skill's ferry protocol — a defanged code is still final there,
+   falling back to the manual paste. There is still no code that reads a
+   mailbox; the boundary lives in the skill because the mailbox capability
+   lives with the platform's model, not this server.
 
 3. **Autonomous key generation needs no host tooling.** 1Password generates the
    keypair (`op item create --category ssh --ssh-generate-key rsa,4096`),
