@@ -35,6 +35,21 @@ should read.
 | Vault items | `EnableBanking Key` / `EnableBanking` | `EnableBanking Key Sandbox` / `EnableBanking Sandbox` |
 | Ledger | `bank_feed.sqlite` | `bank_feed.sandbox.sqlite` |
 | API hosts | same (`api.enablebanking.com` / `enablebanking.com`) | same |
+| `link_bank` | two taps: whitelist (Control Panel), then bank SCA | ONE tap: the bank approval only |
+
+**The whitelist gate does not exist in sandbox** (issue #10). Account
+whitelisting is the provider's activation mechanism for production
+applications, and the Control-Panel `link_accounts` call behind tap 1
+initiates an authentication session under the Control Panel's OWN
+application — the `appId` in the form only names which app's whitelist
+gains the account, and the session was measured routing to the real
+bank's LIVE login. Sandbox applications activate automatically, so in
+sandbox `link_bank` goes straight to the app-JWT authorization session,
+whose identity carries the SANDBOX environment, and the exchange verifies
+the returned set without a whitelist comparison
+(`flows.verify_accounts`, `whitelist_gated=False`): the zero-accounts and
+multi-currency refusals still apply in both worlds, because neither
+derives from the whitelist.
 
 The names and hosts in that table are what the code uses; whether the provider
 treats a sandbox application differently from a production one — activation in

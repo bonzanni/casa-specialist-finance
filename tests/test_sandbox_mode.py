@@ -253,6 +253,35 @@ class TestWorldGuardLinkBank(SandboxBase):
         out = call("link_bank", aspsp="Rabobank", psu_type="personal")
         self.assertNotIn("Linking has NOT been started", out)
 
+    def test_sandbox_link_bank_never_runs_the_whitelist_tap(self):
+        # Issue #10, the boundary itself: in sandbox the whitelist gate does
+        # not exist. Even for a bank with NO whitelist entry — the input that
+        # sent production down tap 1 — there is no whitelist read and no
+        # Control-Panel link_accounts session (the CP-initiated session was
+        # measured routing to the real bank's LIVE login); the one URL
+        # returned is the app-JWT authorization, whose identity carries the
+        # SANDBOX environment.
+        self.sandbox_world()
+        self.admin._whitelisted = False
+        out = call("link_bank", aspsp="Rabobank", psu_type="personal")
+        self.assertEqual(self.admin.whitelisted_calls, [])
+        self.assertEqual(self.admin.link_calls, [])
+        self.assertEqual(len(self.ais.auths), 1)
+        self.assertIn("one tap", out)
+        self.assertNotIn("tap 1", out)
+        self.assertNotIn("enablebanking.com/whitelist", out)
+
+    def test_production_link_bank_still_runs_the_whitelist_tap(self):
+        # The mirror pin: outside sandbox, an unwhitelisted bank still gets
+        # tap 1 — the CP link_accounts URL — and no authorization is minted.
+        self.admin._whitelisted = False
+        out = call("link_bank", aspsp="Rabobank", psu_type="personal")
+        self.assertEqual(self.admin.whitelisted_calls, ["app-1"])
+        self.assertEqual(self.admin.link_calls,
+                         [("app-1", "Rabobank", "NL", "personal")])
+        self.assertEqual(self.ais.auths, [])
+        self.assertIn("tap 1 of 2", out)
+
     def test_production_link_bank_verifies_and_proceeds(self):
         # Production verifies too — FakeAdmin's default record IS production's
         # own app, so the guard passes and tap 1 proceeds.
@@ -310,10 +339,29 @@ class TestWorldGuardExchange(SandboxBase):
             "SELECT count(*) FROM accounts").fetchone()[0], 0)
 
     def test_the_exchange_proceeds_in_the_right_world(self):
+        # Issue #10: sandbox has no whitelist gate, so the exchange neither
+        # reads the whitelist nor compares against it — an EMPTY whitelist
+        # (the sandbox steady state, since tap 1 never runs there) must not
+        # refuse the link. The world guard still ran — via the AIS view at
+        # _ais(), whose verdict the exchange's own _assert_world re-uses.
         self.sandbox_world()
+        self.admin._whitelisted = False
         out = self.collect()
-        self.assertEqual(self.admin.whitelisted_calls, ["app-1"])
+        self.assertEqual(self.admin.whitelisted_calls, [])
+        self.assertEqual(self.ais.app_calls, 1)
         self.assertIn("account", out)
+        self.assertEqual(self.raw.execute(
+            "SELECT count(*) FROM accounts").fetchone()[0], 1)
+
+    def test_production_exchange_still_reads_and_enforces_the_whitelist(self):
+        # The mirror pin: outside sandbox the whitelist comparison is
+        # unchanged — an empty whitelist refuses, nothing is bound, and the
+        # noted consent is quarantined for review.
+        self.admin._whitelisted = False
+        self.collect()
+        self.assertEqual(self.admin.whitelisted_calls, ["app-1"])
+        self.assertEqual(self.raw.execute(
+            "SELECT count(*) FROM accounts").fetchone()[0], 0)
 
 
 class TestDispatcher(SandboxBase):

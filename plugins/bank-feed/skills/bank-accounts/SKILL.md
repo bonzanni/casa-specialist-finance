@@ -89,6 +89,12 @@ Tell
 the operator this shape before they tap, so a page that doesn't "come back"
 after the first tap isn't mistaken for a failure.
 
+In sandbox mode (the responses carry a `[SANDBOX]` banner) there is no
+whitelist step at all: linking is the single bank-approval tap, against the
+provider's sandbox with its published test credentials. `link_bank`'s own
+output says which shape applies — relay that shape, and never promise a
+whitelist tap the sandbox world does not have.
+
 ## 6. Hand off the renewal reminder
 
 You cannot schedule anything — `triggers.yaml` and `reminders.yaml` are both

@@ -35,7 +35,9 @@ would be false. The full install keeps: approving the callback consent DM, the
 credential copy/paste above, supplying the account email once (the sign-in email
 is recorded to the vault on first use, so it is asked for only when no
 `username` field is stored yet), **two approvals per bank** (whitelist tap, then
-bank SCA), labelling each discovered account once, and a bank re-approval at or
+bank SCA — production only: the sandbox world has no whitelist tap, see
+[`reference/sandbox-mode.md`](sandbox-mode.md)), labelling each discovered
+account once, and a bank re-approval at or
 before the consent's expiry, forever — the plugin requests 179 days, but what it
 records and acts on is the `valid_until` the provider actually returned, which
 may be shorter or missing. None of those is plumbing.

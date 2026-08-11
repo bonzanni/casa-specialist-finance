@@ -208,6 +208,43 @@ class TestVerifyAccounts(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertIn(IBAN_A, v.message)
 
+    def test_ungated_accepts_the_returned_set_with_an_empty_whitelist(self):
+        """`whitelist_gated=False` is the sandbox shape (issue #10): tap 1
+        never runs there, so the whitelist is empty by construction and the
+        returned set IS the approved set — nothing is "missing" and nothing
+        is "unexpected"."""
+        v = flows.verify_accounts(session_accounts=[acct(IBAN_R)],
+                                  whitelisted=[], intended=[],
+                                  aspsp="Revolut", country="NL",
+                                  whitelist_gated=False)
+        self.assertTrue(v.ok, v.message)
+        self.assertIn(IBAN_R, v.message)
+
+    def test_ungated_zero_accounts_still_refuses_without_blaming_a_whitelist(self):
+        """The zero-usable-accounts refusal is a fact about the returned
+        session, not about the whitelist — it survives ungated, but its
+        remedy must not send the operator to a whitelist that does not
+        exist in that world."""
+        v = flows.verify_accounts(session_accounts=[], whitelisted=[],
+                                  intended=[], aspsp="Revolut", country="NL",
+                                  whitelist_gated=False)
+        self.assertFalse(v.ok)
+        self.assertNotIn("run the link step", v.message.lower())
+        self.assertIn("psu type", v.message.lower())
+
+    def test_ungated_still_refuses_a_multi_currency_variant(self):
+        """The multi-currency check derives from the LEDGER's identity
+        (account_id hashes iban+currency), not from the whitelist, so it is
+        enforced in both worlds."""
+        eur = acct(IBAN_R)
+        usd = dict(acct(IBAN_R), currency="USD")
+        v = flows.verify_accounts(session_accounts=[eur, usd],
+                                  whitelisted=[], intended=[],
+                                  aspsp="Revolut", country="NL",
+                                  whitelist_gated=False)
+        self.assertFalse(v.ok)
+        self.assertIn("currency", v.message.lower())
+
     def test_iban_is_parsed_from_the_whitelist_title(self):
         self.assertEqual(flows._iban_of({"title": f"IBAN {IBAN_R}"}), IBAN_R)
         self.assertEqual(flows._iban_of({"title": "no identifier here"}), "")

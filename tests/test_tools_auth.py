@@ -550,10 +550,11 @@ class TestCollect(Base):
         seen = {}
         real = flows.verify_accounts
 
-        def spy(session_accounts, whitelisted, intended, *, aspsp, country):
+        def spy(session_accounts, whitelisted, intended, *, aspsp, country,
+                whitelist_gated=True):
             seen.update(aspsp=aspsp, country=country)
             return real(session_accounts, whitelisted, intended, aspsp=aspsp,
-                        country=country)
+                        country=country, whitelist_gated=whitelist_gated)
         self.addCleanup(setattr, flows, "verify_accounts", real)
         flows.verify_accounts = spy
         self.collect()

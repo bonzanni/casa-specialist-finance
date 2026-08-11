@@ -214,7 +214,8 @@ def _account_currency(account: dict) -> str:
 
 
 def verify_accounts(session_accounts: list, whitelisted: list,
-                    intended: list, *, aspsp: str, country: str) -> Verdict:
+                    intended: list, *, aspsp: str, country: str,
+                    whitelist_gated: bool = True) -> Verdict:
     """Compare what came back against the whitelist AND the operator's intent.
 
     `aspsp` and `country` name the bank THIS authorization was for, and they
@@ -247,11 +248,22 @@ def verify_accounts(session_accounts: list, whitelisted: list,
     nothing approved, and a plain IBAN-set comparison cannot see it — both
     pairs collapse onto the one IBAN already sitting in `want`. Detected here
     directly, against the pair, rather than trusted to the IBAN-only sets.
+
+    **`whitelist_gated=False` is the SANDBOX world's shape** (issue #10):
+    sandbox applications have no whitelist gate at all — `link_bank` never
+    runs the whitelist tap there — so there is no per-account approval to
+    compare the returned set against, and the returned set IS the approved
+    set (`want = got`). What survives ungated is exactly the checks that do
+    not derive from the whitelist: zero usable accounts still refuses, and
+    the multi-currency ledger-identity check still refuses, because both are
+    facts about the returned session and the ledger's own keying, not about
+    the production activation mechanism.
     """
     got = {i for i in (_account_iban(a) for a in session_accounts) if i}
     listed = {i for i in (_iban_of(w) for w in _for_bank(whitelisted, aspsp,
                                                         country)) if i}
-    want = {i.strip().upper() for i in intended if i} or listed
+    want = (({i.strip().upper() for i in intended if i} or listed)
+            if whitelist_gated else got)
     missing = sorted(want - got)
     unexpected = sorted(got - want)
 
@@ -266,6 +278,13 @@ def verify_accounts(session_accounts: list, whitelisted: list,
         for currency in sorted(currencies))
 
     if not got:
+        if not whitelist_gated:
+            return Verdict(False,
+                "The bank authorized the consent but returned no usable "
+                "accounts. This application has no whitelist to fix: a wrong "
+                "PSU type (personal vs business), a closed account, or a "
+                "test bank whose accounts carry no IBAN all look identical "
+                "from here. Try the other psu_type, or another bank.")
         return Verdict(False,
             "The bank authorized the consent but returned no usable accounts. "
             "The usual cause is that the account is not on the application's "

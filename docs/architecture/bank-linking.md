@@ -13,6 +13,15 @@ same kind of thing.
    with strong customer authentication. This one *does* come back, through casa's
    authorization-callback contract.
 
+**Both approvals exist only in production.** In sandbox mode the whitelist
+step does not exist at all — whitelisting is the provider's activation
+mechanism for production applications (sandbox ones activate automatically),
+and the Control-Panel call behind it initiates a session under the Control
+Panel's own application, which routes to the real bank's live login
+(issue #10). So a sandbox `link_bank` is single-tap: straight to the API
+authorization, and `verify_accounts()` runs with `whitelist_gated=False` —
+see `reference/sandbox-mode.md`.
+
 `flows.py` orchestrates both, and between them it **waits for nothing**. There is no
 sleep loop and no poll: a specialist has no turn to sleep in. The continuation is the
 operator calling `link_bank` again, which re-reads the whitelist and goes straight to

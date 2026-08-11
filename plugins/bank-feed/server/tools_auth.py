@@ -2557,38 +2557,54 @@ def link_bank(args: dict) -> str:
                 "re-pasting a fresh one is the usual fix. Then run "
                 "link_bank again." % (type(exc).__name__, ADMIN_TOKEN_VAR))
 
-    # Tap 1 of 2 — the whitelist, if this bank is not on it yet.
-    try:
-        missing = flows.needs_whitelist(_admin(), app_id, aspsp, country)
-    except Exception as exc:                     # noqa: BLE001
-        # STOP. Carrying on would mint a consent, which spends a real bank
-        # approval — SCA taps and a minutes-wide deep-history window — on a
-        # session that will very likely return zero accounts because the ASPSP
-        # was never whitelisted. Paying the cost and not gaining the
-        # information is the worst available outcome.
-        return "\n".join([
-            "Cannot check the whitelist for %s (%s), so linking has NOT been "
-            "started. Nothing has been started, nothing was minted, and no "
-            "bank approval was spent." % (_safe(aspsp), type(exc).__name__),
-            "Why this stops rather than continuing: whitelisting is what makes "
-            "the bank return accounts at all. Authorizing without it costs you "
-            "the SCA taps and the few-minutes-wide deep-history window, and "
-            "very likely returns nothing.",
-            "Remedy: check %s — it is the Enable Banking control-panel token, "
-            "it expires after about an hour, and re-pasting a fresh one is the "
-            "usual fix. Then run link_bank again." % ADMIN_TOKEN_VAR,
-        ])
-    if missing:
-        url = (_admin().link_accounts(app_id, aspsp, country, psu_type) or {}
-               ).get("url") or ""
-        return ("Linking %s takes two taps. This is tap 1 of 2 — the account "
-                "whitelist.\n%s\n"
-                "That link ends on an Enable Banking page: nothing comes back "
-                "to our callback, so completion is confirmed by re-reading the "
-                "whitelist, never assumed. When you have finished it, call "
-                "link_bank again for tap 2 (the bank's own approval).\n"
-                "The turn ends here — nothing is waiting on you."
-                % (_safe(aspsp), _safe_url(url)))
+    # Tap 1 of 2 — the whitelist, if this bank is not on it yet. PRODUCTION
+    # ONLY (issue #10): account whitelisting is the provider's activation
+    # mechanism for production applications, and `link_accounts` is a
+    # Control-Panel operation whose authentication session is initiated by
+    # the Control Panel's OWN application — the `appId` in the form only
+    # names which app's whitelist gains the account, it does not govern
+    # which world the session routes to, and the session was measured
+    # landing on the real bank's live login. Sandbox applications activate
+    # automatically, so in sandbox the gate is doubly wrong: it routes to
+    # the real world, for a step the sandbox world does not require. The
+    # gate therefore does not exist in sandbox at all — no whitelist read,
+    # no CP session, straight to the app-JWT authorization below, whose
+    # identity carries the SANDBOX environment.
+    if not ebmode.is_sandbox():
+        try:
+            missing = flows.needs_whitelist(_admin(), app_id, aspsp, country)
+        except Exception as exc:                     # noqa: BLE001
+            # STOP. Carrying on would mint a consent, which spends a real bank
+            # approval — SCA taps and a minutes-wide deep-history window — on a
+            # session that will very likely return zero accounts because the
+            # ASPSP was never whitelisted. Paying the cost and not gaining the
+            # information is the worst available outcome.
+            return "\n".join([
+                "Cannot check the whitelist for %s (%s), so linking has NOT "
+                "been started. Nothing has been started, nothing was minted, "
+                "and no bank approval was spent."
+                % (_safe(aspsp), type(exc).__name__),
+                "Why this stops rather than continuing: whitelisting is what "
+                "makes the bank return accounts at all. Authorizing without "
+                "it costs you the SCA taps and the few-minutes-wide "
+                "deep-history window, and very likely returns nothing.",
+                "Remedy: check %s — it is the Enable Banking control-panel "
+                "token, it expires after about an hour, and re-pasting a "
+                "fresh one is the usual fix. Then run link_bank again."
+                % ADMIN_TOKEN_VAR,
+            ])
+        if missing:
+            url = (_admin().link_accounts(app_id, aspsp, country, psu_type)
+                   or {}).get("url") or ""
+            return ("Linking %s takes two taps. This is tap 1 of 2 — the "
+                    "account whitelist.\n%s\n"
+                    "That link ends on an Enable Banking page: nothing comes "
+                    "back to our callback, so completion is confirmed by "
+                    "re-reading the whitelist, never assumed. When you have "
+                    "finished it, call link_bank again for tap 2 (the bank's "
+                    "own approval).\n"
+                    "The turn ends here — nothing is waiting on you."
+                    % (_safe(aspsp), _safe_url(url)))
 
     # A bank that already holds a live consent is being RENEWED,
     # not linked for the first time. The distinction is not cosmetic — it
@@ -2644,8 +2660,10 @@ def link_bank(args: dict) -> str:
                         "%d days left on it" % value)
         return "\n".join(preface + [
             "Renewing %s (%s, %s). %s, and this replaces it — it is the same "
-            "two-tap approval as the original link." % (
-                _safe(aspsp), _safe(country), _safe(psu_type), standing),
+            "%s as the original link." % (
+                _safe(aspsp), _safe(country), _safe(psu_type), standing,
+                "single-tap approval" if ebmode.is_sandbox()
+                else "two-tap approval"),
             "Your labels, categories, include flags, coverage and full "
             "transaction history all carry forward untouched: they key on an "
             "account id derived from the IBAN and currency, which does not "
@@ -2676,11 +2694,22 @@ def link_bank(args: dict) -> str:
             "redirect lands, casa dispatches a fresh turn on its own durable "
             "schedule, and that turn should call collect_authorization.",
         ])
+    if ebmode.is_sandbox():
+        opening = (
+            "Linking %s (%s, %s) takes one tap in sandbox mode: there is no "
+            "whitelist step here — sandbox applications activate "
+            "automatically — so this is the bank approval itself, against "
+            "the provider's sandbox with its published test credentials."
+            % (_safe(aspsp), _safe(country), _safe(psu_type)))
+    else:
+        opening = (
+            "Linking %s (%s, %s) takes two taps. Tap 1 — the account "
+            "whitelist, which ends on an Enable Banking page with nothing "
+            "coming back to our callback — is already satisfied. This is "
+            "tap 2 of 2, the bank's own approval."
+            % (_safe(aspsp), _safe(country), _safe(psu_type)))
     return "\n".join(preface + [
-        "Linking %s (%s, %s) takes two taps. Tap 1 — the account whitelist, "
-        "which ends on an Enable Banking page with nothing coming back to our "
-        "callback — is already satisfied. This is tap 2 of 2, the bank's own "
-        "approval." % (_safe(aspsp), _safe(country), _safe(psu_type)),
+        opening,
         _SHALLOW_WARNING,
         _safe_url(url),
         "Tap it within 30 minutes — the pending authorization expires 1800 s "
@@ -2994,7 +3023,12 @@ def _exchange(code: str, attempt: dict) -> None:
         # lands in the same unable-to-verify-is-not-verified return below,
         # leaving the consent quarantined rather than bound.
         _assert_world(app_id, admin=admin)
-        listed = admin.whitelisted(app_id)
+        # SANDBOX has no whitelist gate (issue #10): link_bank never runs
+        # tap 1 there, so there are no entries to read and nothing for the
+        # verification below to compare against. The read is skipped rather
+        # than tolerated-empty, so the mode carries through this call site
+        # the same way it carries through link_bank's.
+        listed = [] if ebmode.is_sandbox() else admin.whitelisted(app_id)
     except Exception:                            # noqa: BLE001
         # Unable to verify is NOT verified: return without declaring, and the
         # noted consent is quarantined for the operator to see and revoke.
@@ -3013,7 +3047,8 @@ def _exchange(code: str, attempt: dict) -> None:
     # bank, not a list of IBANs, so the whitelist entries for that bank ARE the
     # intent.
     verdict = flows.verify_accounts(accounts, listed, [], aspsp=bank,
-                                    country=country)
+                                    country=country,
+                                    whitelist_gated=not ebmode.is_sandbox())
     if not verdict.ok:
         return
 
