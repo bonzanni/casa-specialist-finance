@@ -2067,26 +2067,103 @@ def accept_app_reregistration(args: dict) -> str:
             % (_safe(recorded), GATE_NOTE))
 
 
+def _catalogue_name(name) -> str:
+    """The comparable form of a catalogue bank name, or '' if incomparable.
+
+    The comparison collapses internal whitespace and case the same way
+    `_bank_key` does, because the provider echoes names with whatever spacing
+    it likes. A non-ASCII name compares as NOTHING, deliberately:
+    `casefold()` folds Unicode lookalikes — "Mock AſPSP" with a long s
+    casefolds to "mock aspsp" — so a forged provider row could otherwise
+    inherit the NOT-LINKABLE warning while naming a bank this plugin never
+    measured. The names this function exists to recognise ("Mock ASPSP",
+    "Rabobank") are ASCII; anything else is simply never matched.
+    """
+    s = str(name or "")
+    if not s.isascii():
+        return ""
+    return " ".join(s.split()).casefold()
+
+
+#: Banks MEASURED to link end-to-end in the provider sandbox — the live
+#: observation is recorded in tests/e2e (Rabobank, 2026-08-04). The dry-run
+#: steer names an alternative from THIS set only: presence in the returned
+#: catalogue is not evidence of linkability — an unmeasured no-IBAN bank
+#: would otherwise be endorsed purely by name proximity. Extend it only with
+#: a bank whose link was actually observed to land an account.
+MEASURED_LINKABLE = frozenset({"rabobank"})
+
+
+def _unlinkable_note(name, catalogue_names) -> str:
+    """The per-bank linkability note for a catalogue row, or ''.
+
+    Issue #14, second landing. The first fix put the Mock-ASPSP steer in the
+    bank-accounts skill, and the re-test showed why that is not enough: an
+    agent that relays the catalogue without running the skill inherits none of
+    it, and the resident got "Mock ASPSP — good for a dry run" again. Guidance
+    that must reach every consumer has to travel in the tool OUTPUT, next to
+    the row it is about.
+
+    The fact itself is measured, not assumed: Mock ASPSP returns
+    `account_id = {}` with no IBAN (tests/e2e/README.md records the live
+    observation), while the ledger keys every account on HMAC(IBAN, currency)
+    — so a Mock ASPSP link cannot land an account and ends in the no-IBAN
+    refusal, never a dry run.
+
+    Matched by normalised NAME, unconditionally rather than only in sandbox
+    mode: the catalogue name is the one handle the row carries, and a
+    production catalogue has no bank named "Mock ASPSP", so the match is
+    inert there.
+
+    The steer clause is derived from MEASUREMENT, never from catalogue
+    presence — the absent-Rabobank case and the unmeasured-neighbour case
+    are the same defect in the same mechanism, so the mechanism is cut: an
+    alternative is named only when a `MEASURED_LINKABLE` bank is present in
+    the returned catalogue. Every other shape — Mock-only, or Mock beside
+    banks nobody has measured — gets the bare warning with no named
+    alternative, because this plugin has no evidence to offer one.
+    """
+    if _catalogue_name(name) != "mock aspsp":
+        return ""
+    note = (" — NOT LINKABLE: returns no IBAN, and the ledger keys every "
+            "account on HMAC(IBAN, currency), so a link here cannot land "
+            "an account.")
+    measured = sorted(n for n in set(catalogue_names)
+                      if n in MEASURED_LINKABLE)
+    if measured:
+        return note + (" For a dry run use %s from this list instead — "
+                       "measured to link in the provider sandbox."
+                       % ", ".join(n.title() for n in measured))
+    return note
+
+
 @register("list_banks",
           "List the banks (ASPSPs) available in a country, with their PSU types "
-          "and consent ceiling.",
+          "and consent ceiling. Rows that cannot be linked (Mock ASPSP: no "
+          "IBAN) are flagged; a dry-run alternative is named only when a "
+          "verified-linkable bank is present in the catalogue.",
           {"type": "object",
            "properties": {"country": {"type": "string", "default": "NL"}}})
 def list_banks(args: dict) -> str:
     country = str(args.get("country") or "NL").upper()
     banks = _ais().aspsps(country)
+    catalogue_names = [_catalogue_name(b.get("name")) for b in banks]
     lines = ["Banks available in %s (%d)." % (_safe(country), len(banks))]
     for bank in banks:
         ceiling = bank.get("maximum_consent_validity")
         ceiling_days = int(ceiling) // 86400 if ceiling else None
         # Every field here is the PROVIDER's catalogue text, so every field is
         # neutralised: the row format is line-oriented and a name carrying a
-        # newline would forge a bank that does not exist.
-        lines.append("  %s — psu_types: %s; consent ceiling %s" % (
+        # newline would forge a bank that does not exist. The linkability note
+        # is OUR text, appended after neutralisation and keyed on the
+        # normalised name (issue #14: guidance that must reach an agent that
+        # never runs the skill has to ride in the tool output itself).
+        lines.append("  %s — psu_types: %s; consent ceiling %s%s" % (
             _safe(bank.get("name")),
             ", ".join(_safe(p) for p in (bank.get("psu_types") or []))
             or "unknown",
-            ("%d days" % ceiling_days) if ceiling_days else "unknown"))
+            ("%d days" % ceiling_days) if ceiling_days else "unknown",
+            _unlinkable_note(bank.get("name"), catalogue_names)))
     lines.append("This plugin always requests %d days of validity — the ceiling "
                  "check is strict, so exactly 180 days is rejected."
                  % CONSENT_DAYS)

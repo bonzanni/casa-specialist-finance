@@ -720,6 +720,93 @@ class TestBanksAndSetup(Base):
         self.assertIn("business", out)
         self.assertIn("179", out)
 
+    def test_list_banks_flags_mock_aspsp_as_not_linkable_in_its_own_row(self):
+        # Issue #14, second landing: the skill-level steer did not reach an
+        # agent that relays the catalogue without running the skill, so the
+        # note has to ride in the tool OUTPUT, on the row it is about. The
+        # fact is the measured one: Mock ASPSP returns no IBAN and the ledger
+        # keys accounts on HMAC(IBAN, currency).
+        self.ais.aspsps = lambda country: [
+            {"name": "Mock ASPSP", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000},
+            {"name": "Rabobank", "country": country,
+             "psu_types": ["personal", "business"],
+             "maximum_consent_validity": 15552000}]
+        out = call("list_banks", country="NL")
+        mock_row = next(line for line in out.splitlines()
+                        if "Mock ASPSP" in line)
+        self.assertIn("NOT LINKABLE", mock_row)
+        self.assertIn("no IBAN", mock_row)
+        self.assertIn("HMAC(IBAN, currency)", mock_row)
+        # Rabobank is measured linkable AND present, so the steer names it
+        # in the same row.
+        self.assertIn("Rabobank", mock_row)
+        self.assertIn("measured to link", mock_row)
+
+    def test_the_linkability_note_stays_off_linkable_rows(self):
+        # The catalogue with no Mock ASPSP — the production shape — carries
+        # no note anywhere: an unconditional warning stops being read.
+        out = call("list_banks", country="NL")
+        self.assertNotIn("NOT LINKABLE", out)
+        rabo_row = next(line for line in out.splitlines()
+                        if line.strip().startswith("Rabobank"))
+        self.assertNotIn("cannot land an account", rabo_row)
+
+    def test_a_mock_only_catalogue_names_no_absent_alternative(self):
+        # "Rabobank ... from this list" on a catalogue that holds only Mock
+        # ASPSP would assert an unmeasured fact. The bare warning carries no
+        # named alternative at all.
+        self.ais.aspsps = lambda country: [
+            {"name": "Mock ASPSP", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000}]
+        out = call("list_banks", country="NL")
+        self.assertIn("NOT LINKABLE", out)
+        self.assertNotIn("Rabobank", out)
+        self.assertNotIn("from this list", out)
+
+    def test_an_unmeasured_neighbour_is_never_endorsed_as_the_alternative(self):
+        # Catalogue presence is NOT evidence of linkability. A non-Mock row
+        # nobody has measured (ING here) earns no steer of any kind; the Mock
+        # row gets the bare warning only, because the plugin has no evidence
+        # to offer an alternative.
+        self.ais.aspsps = lambda country: [
+            {"name": "Mock ASPSP", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000},
+            {"name": "ING", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000}]
+        out = call("list_banks", country="NL")
+        mock_row = next(line for line in out.splitlines()
+                        if "Mock ASPSP" in line)
+        self.assertIn("NOT LINKABLE", mock_row)
+        self.assertNotIn("from this list", out)
+        self.assertNotIn("Rabobank", out)
+        self.assertNotIn("measured to link", out)
+
+    def test_only_the_measured_linkable_set_can_ever_be_named(self):
+        # The allowlist is the single source of the named alternative, and
+        # today it holds exactly the one bank tests/e2e measured.
+        self.assertEqual(tools_auth.MEASURED_LINKABLE, frozenset({"rabobank"}))
+
+    def test_a_unicode_lookalike_name_never_gets_the_warning(self):
+        # "Mock AſPSP" (long s) casefolds to "mock aspsp", so an unguarded
+        # match would stamp NOT LINKABLE — a measured claim — onto a bank
+        # this plugin never measured. Non-ASCII names match nothing.
+        self.ais.aspsps = lambda country: [
+            {"name": "Mock AſPSP", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000}]
+        out = call("list_banks", country="NL")
+        self.assertNotIn("NOT LINKABLE", out)
+
+    def test_the_mock_match_survives_provider_case_and_spacing(self):
+        # The provider echoes names with whatever case and internal spacing
+        # it likes; `_bank_key` already normalises for that reason, and the
+        # linkability match normalises the same way.
+        self.ais.aspsps = lambda country: [
+            {"name": "  mock   ASPSP ", "country": country,
+             "psu_types": ["personal"], "maximum_consent_validity": 15552000}]
+        out = call("list_banks", country="NL")
+        self.assertIn("NOT LINKABLE", out)
+
     def test_setup_bank_feed_reports_not_configured_without_an_index_entry(self):
         self.cb.discover = lambda plugin_root: None
         out = call("setup_bank_feed")
