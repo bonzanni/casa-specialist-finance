@@ -625,11 +625,18 @@ def list_accounts(args: dict) -> str:
         # store keeps another. `_clip` alone does not neutralise, so this
         # was a live escape. `_neutralized` closes it without a
         # visible fence, matching a masked IBAN's normally-clean look.
+        #
+        # `label` is the OPERATOR's own text, set only by the protected
+        # `label_account` tool (see `_label`), so it is clipped, not fenced.
+        # It must appear here: this listing is the read surface a user
+        # re-checks to confirm a label_account write landed (#12).
+        label = a.get("label")
         lines.append(
-            "  %s  %s  %s  %s  category=%s  included=%s" % (
+            "  %s  %s  %s  %s  %scategory=%s  included=%s" % (
                 a["account_id"], _untrusted(a.get("name")),
                 _neutralized(a.get("iban_masked")),
                 _untrusted(a.get("currency")) if a.get("currency") else "?",
+                "label=%s  " % _clip(label) if label else "",
                 a.get("category") or "unlabelled",
                 "yes" if a.get("included") else "no"))
     lines.append("account_id is a keyed HMAC of IBAN+currency and is the "

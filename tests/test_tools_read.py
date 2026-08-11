@@ -500,6 +500,19 @@ class TestAccounts(Base):
         self.assertIn("Holding BV", out)
         self.assertNotIn("Privé", out)
 
+    def test_written_label_is_visible_on_re_list(self):
+        # The verify-by-re-list loop (#12): a label written by label_account
+        # must show up in list_accounts, the canonical read surface.
+        self.account("a")
+        self.account("b")
+        self.conn.execute(
+            "UPDATE accounts SET label='Household' WHERE account_id='a'")
+        out = call("list_accounts")
+        line_a = next(l for l in out.splitlines() if l.lstrip().startswith("a "))
+        line_b = next(l for l in out.splitlines() if l.lstrip().startswith("b "))
+        self.assertIn("label=Household", line_a)
+        self.assertNotIn("label=", line_b)
+
 
 class TestAnnotationsInListing(Base):
     """list_transactions must make rows ADDRESSABLE (#row_id handles) and
