@@ -1,6 +1,6 @@
 ---
 name: bank-accounts
-description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the opt-in mailbox ferry for the sign-in email, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, and how to annotate transactions with tags and notes.
+description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the sandbox dry-run bank choice, the opt-in mailbox ferry for the sign-in email, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, and how to annotate transactions with tags and notes.
 ---
 
 # Bank accounts — methodology
@@ -94,6 +94,16 @@ whitelist step at all: linking is the single bank-approval tap, against the
 provider's sandbox with its published test credentials. `link_bank`'s own
 output says which shape applies — relay that shape, and never promise a
 whitelist tap the sandbox world does not have.
+
+When steering a sandbox dry run through the catalogue, recommend a real
+bank's sandbox ASPSP — Rabobank is a known-good choice — and never
+recommend Mock ASPSP. Mock ASPSP is not linkable: the provider returns its
+accounts without an IBAN, and the ledger keys every account on the pair
+(IBAN, currency), so a Mock ASPSP link ends in a refusal instead of a
+linked account. Recommending it hands the operator a dead-end link attempt
+as their first experience. If the bank you did pick also comes back
+without an IBAN, the same refusal appears — that is the signal to try
+another bank, not a plugin fault.
 
 ## 6. Hand off the renewal reminder
 
