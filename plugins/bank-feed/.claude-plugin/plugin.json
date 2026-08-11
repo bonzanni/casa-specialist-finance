@@ -46,6 +46,7 @@
 
       "mcp__plugin_bank-feed_bank-feed__sync",
       "mcp__plugin_bank-feed_bank-feed__label_account",
+      "mcp__plugin_bank-feed_bank-feed__rename_account",
       "mcp__plugin_bank-feed_bank-feed__export_history",
 
       "mcp__plugin_bank-feed_bank-feed__unlink_bank",
