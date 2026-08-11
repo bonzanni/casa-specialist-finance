@@ -44,10 +44,18 @@ because they are different halves of the contract and either can rot alone.
 |---|---|---|
 | `BANKFEED_OP_VAULT` | the installer — **the one choice** | the vault seam refuses; nothing can be read or forged |
 | `OP_SERVICE_ACCOUNT_TOKEN` | the operator's environment | the vault command-line tool cannot authenticate |
-| `CASA_BANKFEED_EB_PRIVATE_KEY` | provisioned by setup, via casa | no signing key; the data API cannot be called |
-| `CASA_BANKFEED_EB_APP_ID` | provisioned by setup, via casa | no application identity to sign as |
+| `CASA_BANKFEED_EB_PRIVATE_KEY` | forged by setup; wired by casa's configurator on setup's instruction | no signing key; the data API cannot be called |
+| `CASA_BANKFEED_EB_APP_ID` | discovered by setup; wired by casa's configurator on setup's instruction | no application identity to sign as |
 | `CASA_BANKFEED_EB_CP_TOKEN` | the operator, break-glass only | the normal path: the stored refresh token is used instead |
 | `BANKFEED_EB_ENVIRONMENT` | the installer, only to ask for sandbox | production, which is the default |
+
+**"Wired by casa's configurator" is a two-actor handoff, not a provisioning promise.**
+Setup forges the key and discovers the app id, then *names the references it needs
+wired* — writing `plugin-env.conf` is casa's configurator's job, and no
+`set_plugin_env_reference` call exists in this plugin's source. Until that wiring lands
+and the server restarts with it, casa reports the two declared credentials
+`unprovisioned`: that is the designed handoff mid-flight, not a setup step that claimed
+success and failed to deliver. `setup-flow.md` states the contract.
 
 **An empty `BANKFEED_OP_VAULT` is the same as an unset one.** Both are absent, and the
 seam refuses rather than guessing a name — a wrong vault name is not a failure anyone
