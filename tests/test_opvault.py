@@ -151,6 +151,21 @@ class TestErrors(Base):
             opvault.read(opvault.REF_REFRESH_TOKEN)
         self.assertTrue(ctx.exception.not_found)
 
+    def test_op_read_missing_field_wording_is_also_not_found(self):
+        # `op read` reports a missing field on an existing item with its OWN
+        # wording — "does not have a field", not `op item edit`'s "isn't a
+        # field" (verified against op CLI 2.34.0). The credential rung's
+        # pre-check reads with `op read`, so missing this wording classifies
+        # the definitive absence as a transient fault and the sign-in dance
+        # never starts (issue #9).
+        self.runner(Proc(returncode=1, stderr=(
+            "[ERROR] could not read secret 'op://ExampleVault/Enable "
+            "Banking/refresh token': item 'Enable Banking' does not have "
+            "a field 'refresh token'\n")))
+        with self.assertRaises(opvault.OpError) as ctx:
+            opvault.read(opvault.REF_REFRESH_TOKEN)
+        self.assertTrue(ctx.exception.not_found)
+
     def test_a_timeout_or_auth_failure_is_NOT_not_found(self):
         for stderr in ("[ERROR] error initializing client: timed out\n",
                        "[ERROR] 401: authentication required\n",

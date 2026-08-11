@@ -84,11 +84,15 @@ _TIMEOUT_S = 60
 # raises with not_found=False, because "absent" mis-read from a transient
 # failure is what forges a duplicate key item over the real one. BOTH
 # granularities are absence: a missing ITEM ("isn't an item") and a missing
-# FIELD on an existing item ('"refresh token" isn't a field') — the latter is
-# exactly what a fresh credential item looks like before the first store, and
-# treating it as a fault would mean the sign-in dance never starts.
+# FIELD on an existing item — the latter is exactly what a fresh credential
+# item looks like before the first store, and treating it as a fault would
+# mean the sign-in dance never starts. The field wording differs per
+# subcommand: `op item edit` says '"refresh token" isn't a field', while
+# `op read` says "item '…' does not have a field '…'" (op CLI 2.34.0) —
+# both must match.
 _NOT_FOUND_RX = re.compile(
-    r"isn't an item|isn't a field|no item[s]? (?:found|matched)",
+    r"isn't an item|isn't a field|does not have a field"
+    r"|no item[s]? (?:found|matched)",
     re.IGNORECASE)
 
 
