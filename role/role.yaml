@@ -12,7 +12,7 @@ tools:
   max_turns: 10
   skills: all
   voice_guard: none
-mcp_servers: [n8n-workflows, casa-framework]
+mcp_servers: [casa-framework]
 channels: []
 memory: {token_budget: 4000, read_strategy: per_turn}
 session: {strategy: ephemeral, idle_timeout_seconds: 0}
