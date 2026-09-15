@@ -93,6 +93,36 @@ shaped as it is:
 derived from the gate's own tuple rather than written out twice, so the copy
 under the gate is the only copy.
 
+## The result contract
+
+casa v0.290.0 introduced the plugin result contract: `casa.resultContract` in the
+plugin manifest declares, for every non-setup MCP tool, whether its result may
+reach the model as it is (`safe`) or carries a live capability — a sign-in
+link, a one-time code, a token — that the tool must deposit with casa during
+the call and return only as a reference (`capability`). casa validates the
+shape at install and update (`version` exactly 1; `tools` exhaustive over the
+plugin's non-setup tools; a malformed declaration refuses the install), refuses
+a call to any non-setup tool of a plugin without the declaration, and refuses a
+call to any tool the declaration omits. The setup tool is exempt.
+
+bank-feed declares all thirty-one non-setup tools `safe`, and no escrow
+handshake is implemented, because no bank-feed tool returns a credential that
+another bank-feed tool could redeem. One entry is provisional: `link_bank`
+returns the bank's consent URL for the operator to open, and casa renders no
+escrow reference to an operator, so a `capability` entry would leave the
+operator with nothing to tap and make linking impossible. It is declared
+`safe` on the same footing as casa's own exemption of the setup tool's consent
+link, and the classification is recorded as an operator decision owed on this
+repository's issue #21. `bank_feed_signin` is not provisional: it consumes a
+sign-in link the operator pasted and returns statuses and the redirect URI,
+never a live link.
+
+`tests/test_server_smoke.py` holds the declaration to the live `tools/list` of a
+launched server. Nothing here is copied from casa as a constant, so the table
+above is unchanged; the component's stated floor stays casa >= v0.155.0, and
+under casa v0.290.0 or later the declaration is what makes any tool but
+`setup_bank_feed` run at all.
+
 ## How this stays true
 
 The table is **machine-read**, not decorative. `tests/test_component.py` parses

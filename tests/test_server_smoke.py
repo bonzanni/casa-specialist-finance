@@ -133,6 +133,61 @@ class TestManifestToolsMatchLiveRegistry(unittest.TestCase):
 
 
 class TestPluginManifest(unittest.TestCase):
+    def test_result_contract_is_exhaustive_over_the_live_registry(self):
+        """casa >= 0.290.0 refuses, before it runs, every non-setup tool of a
+        plugin that has not declared `casa.resultContract`, and every tool
+        absent from that declaration -- the refusal is delivered to the model
+        as text, so from this process's point of view the tool simply never
+        runs. The declaration is held to the LIVE tools/list of the launched
+        server, not to provides_tools: both must equal it, but a tool
+        registered and advertised yet left out of the contract is exactly the
+        silent failure this test exists to catch. Shape rules mirror
+        `plugin_store.manifest_result_contract`: `version` exactly 1, no
+        member but `version` and `tools`, the setup tool absent (it is exempt
+        and casa admits it only as safe), and -- for this plugin -- every
+        entry `{"result": "safe"}`, because no tool returns a live credential
+        that a same-plugin tool could redeem. link_bank returns the bank's
+        consent URL for the operator to tap; casa has no operator-facing
+        rendering of an escrow reference, so `capability` would make linking
+        impossible. Its `safe` entry is provisional until the operator
+        decides on issue #21; this test pins the declaration, not that
+        decision."""
+        manifest = json.loads(PLUGIN_JSON.read_text())
+        contract = manifest["casa"]["resultContract"]
+        self.assertEqual(sorted(contract), ["tools", "version"],
+                         "casa refuses any member other than version/tools")
+        self.assertEqual(contract["version"], 1)
+        proc = subprocess.Popen([sys.executable, str(SERVER)], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, cwd=str(SERVER_DIR))
+        try:
+            self._rpc(proc, {"jsonrpc": "2.0", "id": 1,
+                             "method": "initialize", "params": {}})
+            out = self._rpc(proc, {"jsonrpc": "2.0", "id": 2,
+                                   "method": "tools/list", "params": {}})
+            served = {t["name"] for t in out["result"]["tools"]}
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=5)
+        setup = manifest["casa"]["setupTool"]
+        self.assertIn(setup, served)
+        self.assertEqual(
+            set(contract["tools"]), served - {setup},
+            "casa.resultContract.tools must be exactly the live tools/list "
+            "minus the setup tool: a served tool missing here is refused by "
+            "casa before it runs, a declared tool nothing serves is a lie")
+        self.assertEqual(len(contract["tools"]), 31)
+        for name, entry in contract["tools"].items():
+            self.assertEqual(entry, {"result": "safe"}, name)
+        protected = {p if isinstance(p, str) else p["name"]
+                     for p in manifest["casa"]["protectedTools"]}
+        self.assertLessEqual(protected, set(contract["tools"]),
+                             "a protected tool is still a contracted tool")
+
+    def _rpc(self, proc, payload):
+        proc.stdin.write(json.dumps(payload) + "\n")
+        proc.stdin.flush()
+        return json.loads(proc.stdout.readline())
+
     def test_protected_tools_are_exactly_the_six_protected_tools(self):
         manifest = json.loads(PLUGIN_JSON.read_text())
         protected = manifest["casa"]["protectedTools"]

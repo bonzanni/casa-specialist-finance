@@ -11,9 +11,9 @@ Regenerate the list this table describes with:
 python3 scripts/coverage_ledger.py enumerate . | grep -E '^(tool|protected|role):'
 ```
 
-## Three lists that must stay in step
+## Four lists that must stay in step
 
-A tool is only usable if it appears in all three of:
+A tool is only usable if it appears in all four of:
 
 1. **The server's own `tools/list` answer** — what it actually serves. Every tool below
    gets there through a `@register(...)` decorator in a `tools_*.py` module, but that is
@@ -22,9 +22,20 @@ A tool is only usable if it appears in all three of:
 2. **`provides_tools`** in `plugins/bank-feed/.claude-plugin/plugin.json` — what the
    plugin advertises to casa.
 3. **`tools.allowed`** in `role/role.yaml` — what the specialist is permitted to call.
+4. **`casa.resultContract.tools`** in the same plugin manifest — the plugin's declaration,
+   required by casa v0.290.0 and later, of what each tool's result carries. A non-setup
+   tool absent from it is refused by casa **before it runs**; a plugin with no
+   declaration at all has every tool but its setup tool refused. Every bank-feed entry is
+   `{"result": "safe"}`: no tool returns a credential that another bank-feed tool could
+   redeem through casa's escrow. `link_bank` is the one entry that is provisional. It
+   returns the bank's consent URL for the operator to tap, casa renders no escrow
+   reference to an operator, and a `capability` entry would therefore make linking
+   impossible — so it is declared safe, as the setup tool's own consent link is exempt
+   by casa's design, and the classification is recorded as an owed operator decision on
+   issue #21 of this repository.
 
 A tool missing from the third is unreachable; a name in the third that nothing registers
-reads as authoritative and grants nothing. Two checks keep them in step, and neither
+reads as authoritative and grants nothing. Three checks keep them in step, and none
 alone is enough:
 
 - `tests/test_component.py` matches the manifest against the role, **both directions** —
@@ -34,6 +45,11 @@ alone is enough:
   and reads the protected declarations and the role allow-list, so a tool added without
   a document is a failing gate — and no way of registering one can hide from it, because
   the answer comes from the same process casa talks to.
+- `tests/test_server_smoke.py` holds the result contract to the live `tools/list` of a
+  launched server: exactly the served tools minus the setup tool, `version` 1, no other
+  member, every entry safe. A tool registered and advertised but left out of the
+  contract is the one failure casa reports only as a refusal to the model, which is why
+  it is checked here.
 
 ## Reading
 

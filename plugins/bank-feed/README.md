@@ -28,6 +28,12 @@ the mode is a plain word.
 `casa.setupProvides` declaration, and defaulted references being shippable in
 a bundled plugin tree.
 
+Under **casa v0.290.0 or later** the manifest's `casa.resultContract` is what
+lets any tool but `setup_bank_feed` run at all: casa refuses a call to a
+non-setup tool the declaration omits, before it runs. Every bank-feed tool is
+declared `safe`; `docs/reference/casa-compatibility.md` says why, and which
+one entry is provisional.
+
 Every entry has a KEY and a reference. The **key** is what this server reads
 out of `os.environ`. The **reference** is the name casa resolves out of
 `plugin-env.conf` — the name `set_plugin_env_reference` writes and
