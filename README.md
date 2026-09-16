@@ -54,7 +54,9 @@ with them, before `link_bank` has an application id to work with. Setup names th
 references it needs wired rather than reporting success.
 
 Then link a bank with `link_bank`. That takes two approvals: the account is added
-to your Enable Banking application, and then you authorize it at your bank.
+to your Enable Banking application, and then you authorize it at your bank. Each
+link arrives from casa itself, in your chat with the assistant, never in a task
+topic; this needs casa v0.318.0 or later.
 
 `docs/reference/setup-flow.md` walks the whole thing; `docs/reference/configuration.md`
 is the one configuration choice and every environment variable;

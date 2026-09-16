@@ -25,14 +25,14 @@ A tool is only usable if it appears in all four of:
 4. **`casa.resultContract.tools`** in the same plugin manifest — the plugin's declaration,
    required by casa v0.290.0 and later, of what each tool's result carries. A non-setup
    tool absent from it is refused by casa **before it runs**; a plugin with no
-   declaration at all has every tool but its setup tool refused. Every bank-feed entry is
-   `{"result": "safe"}`: no tool returns a credential that another bank-feed tool could
-   redeem through casa's escrow. `link_bank` is the one entry that is provisional. It
-   returns the bank's consent URL for the operator to tap, casa renders no escrow
-   reference to an operator, and a `capability` entry would therefore make linking
-   impossible — so it is declared safe, as the setup tool's own consent link is exempt
-   by casa's design, and the classification is recorded as an owed operator decision on
-   issue #21 of this repository.
+   declaration at all has every tool but its setup tool refused. Every bank-feed entry but
+   one is `{"result": "safe"}`: no tool returns a credential that another bank-feed tool
+   could redeem through casa's escrow. `link_bank` is a `capability` that `delivers` its
+   one slot, `approval_link`, as an `operator_link` (casa v0.318.0 and later): the link
+   the operator must open is handed to casa, which posts it in their chat, and the result
+   carries only casa's reference. `register(..., capability=True)` marks the same tool in
+   the registry, and the dispatcher then reports anything but its JSON object as a tool
+   error. `reference/casa-compatibility.md` has the protocol.
 
 A tool missing from the third is unreachable; a name in the third that nothing registers
 reads as authoritative and grants nothing. Three checks keep them in step, and none
@@ -85,7 +85,7 @@ alone is enough:
 |---|---|
 | `setup_bank_feed` | The reconcile ladder: callback routing, signing key, control-panel credential, application registration, redirect URI. **Argument-free** by casa's setup-tool contract. |
 | `bank_feed_signin` | The one human step: the account email, the pasted sign-in link, or a request for a fresh one. Then the same ladder. |
-| `link_bank` | Start a bank authorization; returns the URL to tap. Call it again after whitelisting to continue. |
+| `link_bank` | Start a bank authorization. The link to open (the whitelist page, then the bank's approval) is handed to casa, which posts it in the operator's chat; the result carries casa's reference, never the URL. Call it again after whitelisting to continue. |
 | `collect_authorization` | Collect and exchange an authorization result casa has published. |
 
 `collect_authorization` is deliberately **never protected**: casa's nudge turns have no

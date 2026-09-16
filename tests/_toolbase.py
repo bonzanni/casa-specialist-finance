@@ -102,8 +102,42 @@ FROZEN_NOW = float(int(time.time()))
 SESSION_VALID_UNTIL = "2026-12-01T00:00:00Z"
 
 
+class Delivered(str):
+    """A capability tool's successful result, as the assertions read it: the
+    string IS the result's prose (`text`), and `.result` is the whole object
+    the tool returned. A refusal stays a plain `str`, so a test can tell the
+    two apart with `assertIsInstance`."""
+
+    def __new__(cls, result: dict):
+        obj = super().__new__(cls, result.get("text") or "")
+        obj.result = result
+        return obj
+
+
 def call(name, **args):
-    return bank_feed_server.TOOLS[name]["fn"](args)
+    out = bank_feed_server.TOOLS[name]["fn"](args)
+    return Delivered(out) if isinstance(out, dict) else out
+
+
+class FakeBroker:
+    """casa's deposit route, as `tools_auth.DEPOSIT_LINK` reaches it.
+
+    Records every deposit and answers with a reference shaped as casa mints
+    one. `refuse` makes the next deposits fail with that code, exactly as
+    `casa_broker.deposit_link` raises it.
+    """
+
+    def __init__(self):
+        self.deposits = []            # (slot, value, label, caption)
+        self.refuse = None
+
+    def deposit(self, slot, value, *, label, caption):
+        if self.refuse is not None:
+            import casa_broker
+            raise casa_broker.DepositFailed(self.refuse)
+        self.deposits.append((slot, value, label, caption))
+        return "casa-cap-" + hashlib.sha256(
+            ("%d" % len(self.deposits)).encode()).hexdigest()[:32]
 
 
 def iso_at(epoch):
@@ -694,6 +728,7 @@ class Base(unittest.TestCase):
                                 FakeVault.REF_EMAIL: "op@example.com",
                                 FakeVault.REF_PRIVATE_KEY: TEST_KEY_PEM})
         self.fb = FakeFB()
+        self.broker = FakeBroker()
         # The in-memory continuation primes eb_admin's singleton; a
         # primed minter leaking between tests would silently change which
         # credential rung every later test exercises.
@@ -708,7 +743,8 @@ class Base(unittest.TestCase):
                 (tools_auth, "_now_s", lambda: FROZEN_NOW),
                 (tools_auth, "_PROTECTED_CACHE", tools_auth._PROTECTED_CACHE),
                 (tools_auth, "OPVAULT", self.vault),
-                (tools_auth, "FB", self.fb)):
+                (tools_auth, "FB", self.fb),
+                (tools_auth, "DEPOSIT_LINK", self.broker.deposit)):
             self.addCleanup(setattr, module, attr, getattr(module, attr))
             setattr(module, attr, value)
 

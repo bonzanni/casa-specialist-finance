@@ -190,6 +190,13 @@ REQUIRED_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 ANY_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-[^{}]*)?\}")
 
 
+# The result_broker values `plugins/bank-feed/server/casa_broker.py` copies to
+# deposit a delivered link live in the plugin, which needs them at runtime. They
+# are registered from there (each with its `#: casa contract:` line in that
+# file), so this file restates none of them.
+sys.path.insert(0, str(PLUGIN_DIR / "server"))
+import casa_broker  # noqa: E402
+
 # The registry the two guard tests in TestCasaConstantCopies work from.
 # Keyed by (casa module file, module-level name).
 CASA_COPIES = {
@@ -206,6 +213,12 @@ CASA_COPIES = {
     ("plugin_env_extractor.py", "_ANY_VAR_PATTERN"): ANY_REF_RE.pattern,
     ("plugin_callbacks.py", "MAX_EFFECTIVE_LEN"): MAX_EFFECTIVE_LEN,
     ("specialist_install.py", "_MCP_JSON_VAR_RE"): MCP_JSON_VAR_RE.pattern,
+    ("result_broker.py", "ENV_CLIENT"): casa_broker.ENV_CLIENT,
+    ("result_broker.py", "ENV_SOCKET"): casa_broker.ENV_SOCKET,
+    ("result_broker.py", "_REF_RE"): casa_broker.REFERENCE_RE.pattern,
+    ("result_broker.py", "MAX_LABEL_CHARS"): casa_broker.MAX_LABEL_CHARS,
+    ("result_broker.py", "MAX_CAPTION_CHARS"): casa_broker.MAX_CAPTION_CHARS,
+    ("result_broker.py", "_DOMAINISH_RE"): casa_broker.DOMAINISH_RE.pattern,
 }
 
 # role.yaml is scanned under a DIFFERENT rule from markdown, and the
@@ -1515,6 +1528,25 @@ class TestSkill(unittest.TestCase):
                       section)
         self.assertIn("redirects to casa's callback", section)
 
+    def test_the_link_is_casas_to_deliver_and_the_receipt_is_the_only_claim(self):
+        # ha-casa-app#1015: casa posts the link in the chat the operator asked
+        # from and replaces the result with a receipt. The specialist must
+        # neither write a URL nor claim delivery on the tool's own text, which
+        # is delivery-neutral by design.
+        flat = self._section(5)           # already whitespace-flattened
+        self.assertIn("You never hold a bank link, and you never send one.",
+                      flat)
+        self.assertIn("never in a task topic", flat)
+        self.assertIn("`casa_delivery` with `status` equal to `delivered`", flat)
+        self.assertIn("Say that the link is in their chat only when you hold "
+                      "that receipt.", flat)
+        self.assertIn("means the link is unconfirmed", flat)
+        self.assertIn("never claim you sent it", flat)
+        # Before the two-tap description: the delivery rule governs how the
+        # shape is told, so it is read first.
+        self.assertLess(flat.index("You never hold a bank link"),
+                        flat.index("linking a bank takes two taps in this order"))
+
     def test_asks_the_resident_to_set_the_21_day_reminder(self):
         # `valid_until` + "21 days" + `set_reminder` + /cannot (schedule|set)/
         # are four topic words, and a step rewritten to merely MENTION all four
@@ -1682,7 +1714,8 @@ class CasaCompatibilityContract(unittest.TestCase):
         # The contract is discoverable from the constant, not only the other
         # way round. Without this, a reader at the constant has no way to know
         # it is a copy of anything.
-        source = pathlib.Path(__file__).read_text("utf-8")
+        source = (pathlib.Path(__file__).read_text("utf-8")
+                  + pathlib.Path(casa_broker.__file__).read_text("utf-8"))
         self.assertEqual(
             len(re.findall(r"(?m)^#: casa contract: ", source)),
             len(CASA_COPIES),

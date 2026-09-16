@@ -167,8 +167,11 @@
   covers:
     - tests/test_component.py
     - plugins/bank-feed/server/callbacks.py
+    - plugins/bank-feed/server/casa_broker.py
   tests:
     - tests/test_component.py
+    - tests/test_casa_broker.py
+    - tests/test_server_smoke.py
   related: [architecture/bank-linking.md]
 
 - doc: reference/setup-flow.md

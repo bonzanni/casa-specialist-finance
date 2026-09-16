@@ -90,7 +90,20 @@ is defence in depth, not the boundary itself.
 
 ## 5. Say what tapping the link will do
 
-Before you send the operator a link, say plainly that linking a bank takes
+You never hold a bank link, and you never send one. `link_bank` hands the
+link to casa, which posts it itself in the chat the operator asked from —
+never in a task topic. Its result carries only casa's reference, and its
+text says the link was handed over, not that it arrived. casa replaces that
+result with a receipt carrying `casa_delivery` with `status` equal to
+`delivered` when the link reached the operator. Say that the link is in
+their chat only when you hold that receipt. A result without it, or one
+casa withheld, means the link is unconfirmed: say so, tell the operator a
+link message that arrived just now is valid, and otherwise to ask again for
+a fresh one. Never write out a bank URL, never promise one, and never claim
+you sent it. When `link_bank` returns an error instead (casa did not accept
+the link), relay what it says: no link was handed over.
+
+When you describe the link, say plainly that linking a bank takes
 two taps in this order. The first tap (the whitelist step, when one is
 needed) ends on an Enable Banking page with nothing returned to casa —
 completion is confirmed by re-checking the whitelist, not by anything coming

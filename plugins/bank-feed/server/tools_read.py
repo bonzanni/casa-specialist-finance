@@ -127,18 +127,30 @@ def conn() -> sqlite3.Connection:
     return CONN
 
 
-def register(name: str, description: str, schema: dict | None = None):
+def register(name: str, description: str, schema: dict | None = None, *,
+             capability: bool = False, error_text_types: tuple = ()):
     """Decorator; fills `bank_feed_server.TOOLS` as an import side effect.
 
     `bank_feed_server.main()` aliases itself into `sys.modules["bank_feed_server"]`
     before importing the tool modules, so the dict mutated here is the
     same dict `handle()` reads.
+
+    `capability=True` marks a tool declared `capability` in the manifest's
+    `casa.resultContract`: it succeeds only by returning a dict (the JSON
+    object carrying casa's reference), and `handle()` reports anything else it
+    returns or raises as a tool error. An exception such a tool raises is
+    rendered with its message only when its type is in `error_text_types`
+    (types whose messages the plugin builds from its own literals, never from
+    the bytes of the response that carries the link); any other exception is
+    rendered by its class name alone.
     """
     def deco(fn):
         bank_feed_server.TOOLS[name] = {
             "description": description,
             "schema": schema or {"type": "object", "properties": {}},
             "fn": fn,
+            "capability": capability,
+            "error_text_types": tuple(error_text_types),
         }
         return fn
     return deco

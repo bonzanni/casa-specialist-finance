@@ -13,8 +13,9 @@
 # MAJOR.MINOR.PATCH in manifest.json, and nothing else: no GitHub Release, no
 # notes, no text read from the tree. The commit must be on main, and both `ci`
 # and `no account data` must have concluded success on it as push runs of this
-# repository. Branch rulesets keep the same key from creating, updating or
-# deleting any branch, so it is tag-only.
+# repository. Branch rulesets keep the same key off every branch: it cannot
+# create one, `main` changes only through a pull request whose `check` and `scan`
+# passed, and no branch can be force-pushed or deleted. Its only write is a tag.
 #
 # The boundary this rests on, stated plainly: every workflow on main is code
 # that passed the push gate, and any workflow on main that declared this
