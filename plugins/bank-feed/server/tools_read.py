@@ -175,14 +175,20 @@ def _neutralize(text: str) -> str:
     This runs BEFORE `_clip`, so the clip marker always lands inside the
     fence and the length limit applies to what will actually render.
     """
-    text = text.replace(UNTRUSTED_OPEN, "[fence-open removed]")
-    text = text.replace(UNTRUSTED_CLOSE, "[fence-close removed]")
     # EVERY line break, not just CR and LF: a reader that splits lines the way
     # `str.splitlines` does also breaks on VT, FF, FS, GS, RS, NEL and the
     # Unicode line and paragraph separators, and any one of them forges a line
     # exactly as a newline does. Using `splitlines` itself as the mechanism
     # means the set cannot drift from the reader it defends against.
-    return " ".join(text.splitlines())
+    #
+    # FIRST, before the delimiters are removed. Flattening turns a break back
+    # into a space, and both delimiters contain spaces, so a delimiter written
+    # with a break in place of one of its spaces survives a removal that runs
+    # first and is rebuilt by the flattening that follows it.
+    text = " ".join(text.splitlines())
+    text = text.replace(UNTRUSTED_OPEN, "[fence-open removed]")
+    text = text.replace(UNTRUSTED_CLOSE, "[fence-close removed]")
+    return text
 
 
 def _neutralized(text) -> str:

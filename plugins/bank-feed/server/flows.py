@@ -639,6 +639,21 @@ def _is_iso_date(value) -> bool:
     return True
 
 
+def _shallow(proved_from, proved_to):
+    """`backfill`'s shallow test as a TOTAL function: True or False where the
+    bounds parse, None where a bound is not a real date. The same subtraction
+    and threshold `backfill` applies after the commit, so the two agree on
+    every input both can answer."""
+    if proved_from is None:
+        return False
+    try:
+        span = (dt.date.fromisoformat(proved_to)
+                - dt.date.fromisoformat(proved_from)).days
+    except (TypeError, ValueError):
+        return None
+    return span < SHALLOW_SPAN_DAYS
+
+
 def request_floor(today=None) -> str:
     """The oldest date a full-history fetch made on `today` asks for -- the
     same subtraction `backfill` makes, from the same clock. It advances daily."""
@@ -901,19 +916,14 @@ def backfill(ais, conn, account: dict, session_id: str,
     proved_from = _proven_lower_bound(fetched, requested_from)
     proved_to = None if proved_from is None else end
 
-    span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
-                                          - dt.date.fromisoformat(proved_from)).days
-    # "Under 180 days" and "nothing at all" are DIFFERENT findings and must not
-    # share one signal. An account that proved nothing has not missed a window
-    # -- there is no window to miss -- and treating it as shallow durably tells
-    # the operator to re-link a bank that has nothing to re-link: doing that to
-    # a genuinely dormant account reproduces the same nothing, and nothing
-    # would ever clear the note again. Only a NONZERO but short proven span is
-    # "shallow".
-    shallow = proved_from is not None and span < SHALLOW_SPAN_DAYS
-    # Computed HERE, before the apply transaction, because the history floor
-    # is recorded inside that transaction and must not record a shallow answer
-    # (see `_evidence_and_revalidate`).
+    # The history floor is recorded INSIDE the apply transaction below and must
+    # not record a shallow answer, so it needs `shallow` before the plan lands.
+    # It asks a TOTAL version of the question: `shallow` itself is still
+    # computed after the commit, exactly where it always was, because its date
+    # parse raises on a malformed coverage bound and moving that raise ahead of
+    # the commit would discard rows the run has always kept. A bound that does
+    # not parse answers None here, and None records nothing.
+    record_floor = observe and _shallow(proved_from, proved_to) is False
     #
     # The oldest row the provider actually RETURNED, unclamped. Not
     # `proved_from`: that is floored at `requested_from` for coverage, and a
@@ -923,14 +933,14 @@ def backfill(ais, conn, account: dict, session_id: str,
     # And it must BE a date. `proved_from` is clamped to the request, so a
     # booking_date older than the request never reaches a date parser on the
     # coverage path, and an unreferenced row never reaches the one in
-    # reference measurement -- a malformed value can arrive here intact. The
-    # answered floor is a claim about a date, so a run that returned any
-    # non-date records no answer at all rather than a floor built on text a
-    # renderer would have to defend against.
-    returned = [r["booking_date"] for r in fetched if r.get("booking_date")]
-    answered_from = (min(returned)
-                     if returned and all(_is_iso_date(d) for d in returned)
-                     else None)
+    # reference measurement -- a malformed value can arrive here intact. Only
+    # exact ISO dates count; a row whose date cannot be read is not "older"
+    # than anything, and it is never stored as a floor. The run's valid dates
+    # still count: discarding them would keep a NEWER floor from an earlier
+    # run and advise against a renewal that returns these older rows.
+    dated = [r["booking_date"] for r in fetched
+             if _is_iso_date(r.get("booking_date"))]
+    answered_from = min(dated) if dated else None
 
     # A response never licenses a tombstone interval BY ITSELF, and the licence
     # is withheld UNCONDITIONALLY. `TOMBSTONE_LICENSED_ASPSPS` above records
@@ -980,7 +990,7 @@ def backfill(ais, conn, account: dict, session_id: str,
             raise apply.AccountErased(
                 "account %s was erased while this run was fetching; nothing "
                 "from the fetch may land" % aid, aid)
-        if observe and not shallow:
+        if record_floor:
             # THE HISTORY FLOOR (issue #23): how far back this full-history
             # fetch asked and the oldest row it returned, folded into two
             # independent running minima. Inside this transaction, after the
@@ -1034,6 +1044,16 @@ def backfill(ais, conn, account: dict, session_id: str,
         # rollback already unwound rows, evidence and allocations together.
         return _erased(pages)
 
+    span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
+                                          - dt.date.fromisoformat(proved_from)).days
+    # "Under 180 days" and "nothing at all" are DIFFERENT findings and must not
+    # share one signal. An account that proved nothing has not missed a window
+    # -- there is no window to miss -- and treating it as shallow durably tells
+    # the operator to re-link a bank that has nothing to re-link: doing that to
+    # a genuinely dormant account reproduces the same nothing, and nothing
+    # would ever clear the note again. Only a NONZERO but short proven span is
+    # "shallow".
+    shallow = proved_from is not None and span < SHALLOW_SPAN_DAYS
     if proved_from is not None:
         # AFTER the rows are durably committed: coverage attests to the ledger,
         # never to what an HTTP call returned.
