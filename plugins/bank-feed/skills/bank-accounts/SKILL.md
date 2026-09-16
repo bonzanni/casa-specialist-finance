@@ -39,6 +39,17 @@ shape, even if you believe nothing is outstanding.
   report would be a false one. `collect_authorization` says
   `INCOMPLETE HISTORY` when this happens, and the reads that follow carry
   `completeness=partial`.
+- When someone asks for a renewal or a re-link **to get older history**,
+  read `list_accounts` first. A `fetched_back_to` date, with the date it was
+  `asked from` beside it, means earlier full-history fetches already asked the
+  bank for that older history and got nothing older than `fetched_back_to`;
+  a renewal is not expected to change that, so say so rather than offering
+  one for that purpose. It is a prediction, not a certainty — a bank can
+  start serving more — and it does not apply when the tools reported the
+  last link as `INCOMPLETE HISTORY` or as having missed its deep-history
+  window, where a renewal or re-link is still the remedy they name. A
+  `Coverage:` line words each gap span by what a renewal can do about it;
+  relay that sentence as printed.
 - A read tool may say `inline refresh FAILED` beside a figure. That figure is
   the cached one and its stated age is real; the refresh that would have
   replaced it did not happen. Say both halves. If the named failure is

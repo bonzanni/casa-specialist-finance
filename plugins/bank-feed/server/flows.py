@@ -602,6 +602,115 @@ def _proven_lower_bound(fetched: list, requested_from: str) -> str | None:
     return max(requested_from, min(dates)) if dates else None
 
 
+#: What a renewal can do about a span of history, as `renewal_reach` tags it.
+#: Three names rather than a boolean because the tools word each differently
+#: and only one of them is a certainty.
+#:
+#: BEYOND_REQUEST  before `request_floor()`: no link or renewal made today
+#:                 REQUESTS it. Certain, from the constant -- but whether a bank
+#:                 returns older rows anyway is not, so nothing may say "cannot".
+#: NOT_RETURNED    at or after the floor and before the oldest row any recorded
+#:                 full-history fetch returned: requested before, answered with
+#:                 nothing. A prediction about the next answer, worded as one.
+#: REQUESTABLE     everything else: a renewal requests it and may return it.
+BEYOND_REQUEST = "beyond_request"
+NOT_RETURNED = "not_returned"
+REQUESTABLE = "requestable"
+
+
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _is_iso_date(value) -> bool:
+    """True only for an exact `YYYY-MM-DD` string naming a real calendar day.
+
+    Two checks, each for what the other lets through. `date.fromisoformat`
+    alone accepts `20170101` and `2017-W01-1`, which name real days but sort
+    wrongly against ISO dates as TEXT, and the floors are compared as text.
+    The pattern alone accepts `2017-02-30`. A date-shaped prefix followed by
+    anything -- a line separator and forged text -- fails both, so that case
+    does not depend on `fullmatch` over `match`."""
+    if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
+        return False
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _shallow(proved_from, proved_to):
+    """`backfill`'s shallow test as a TOTAL function: True or False where the
+    bounds parse, None where a bound is not a real date. The same subtraction
+    and threshold `backfill` applies after the commit, so the two agree on
+    every input both can answer."""
+    if proved_from is None:
+        return False
+    try:
+        span = (dt.date.fromisoformat(proved_to)
+                - dt.date.fromisoformat(proved_from)).days
+    except (TypeError, ValueError):
+        return None
+    return span < SHALLOW_SPAN_DAYS
+
+
+def request_floor(today=None) -> str:
+    """The oldest date a full-history fetch made on `today` asks for -- the
+    same subtraction `backfill` makes, from the same clock. It advances daily."""
+    return ((today or _today())
+            - dt.timedelta(days=BACKFILL_FLOOR_DAYS)).isoformat()
+
+
+def history_floor(conn, account_id: str):
+    """`(requested_from, answered_from)` when both are recorded, else None.
+
+    A recorded request with no recorded answer is None: every fetch that asked
+    came back empty, and "asked and got nothing" is dormant-or-truncated, the
+    same indistinguishable pair that records no coverage. Nothing downstream
+    may treat it as evidence about older history.
+    """
+    row = conn.execute(
+        "SELECT history_requested_from, history_answered_from FROM accounts"
+        " WHERE account_id=?", (account_id,)).fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None
+    return str(row[0]), str(row[1])
+
+
+def renewal_reach(conn, account_id: str, start: str, end: str,
+                  today=None) -> list:
+    """Split `[start, end)` into contiguous `(seg_start, seg_end, kind)`
+    segments by what a renewal made on `today` could do about each.
+
+    Half-open like `coverage`; an empty range has no segments, and adjacent
+    segments never share a kind. The cuts are the request floor and, when
+    recorded, the answered floor.
+    """
+    floor = request_floor(today)
+    recorded = history_floor(conn, account_id)
+    cuts = {floor}
+    if recorded is not None:
+        cuts.add(recorded[1])
+    out, cursor = [], start
+    for cut in sorted(c for c in cuts if start < c < end) + [end]:
+        if cursor < cut:
+            if cursor < floor:
+                kind = BEYOND_REQUEST
+            elif recorded is not None and cursor < recorded[1]:
+                kind = NOT_RETURNED
+            else:
+                kind = REQUESTABLE
+            if out and out[-1][2] == kind:
+                # A cut that does not change the kind (an answered floor
+                # older than today's request floor) must not split a segment:
+                # each segment is one line of prose to the operator.
+                out[-1] = (out[-1][0], cut, kind)
+            else:
+                out.append((cursor, cut, kind))
+            cursor = cut
+    return out
+
+
 def backfill(ais, conn, account: dict, session_id: str,
              floor_days: int = BACKFILL_FLOOR_DAYS,
              observe: bool = False, *, incarnation) -> dict:
@@ -807,6 +916,32 @@ def backfill(ais, conn, account: dict, session_id: str,
     proved_from = _proven_lower_bound(fetched, requested_from)
     proved_to = None if proved_from is None else end
 
+    # The history floor is recorded INSIDE the apply transaction below and must
+    # not record a shallow answer, so it needs `shallow` before the plan lands.
+    # It asks a TOTAL version of the question: `shallow` itself is still
+    # computed after the commit, exactly where it always was, because its date
+    # parse raises on a malformed coverage bound and moving that raise ahead of
+    # the commit would discard rows the run has always kept. A bound that does
+    # not parse answers None here, and None records nothing.
+    record_floor = observe and _shallow(proved_from, proved_to) is False
+    #
+    # The oldest row the provider actually RETURNED, unclamped. Not
+    # `proved_from`: that is floored at `requested_from` for coverage, and a
+    # history floor built on it would claim no row older than the request came
+    # back when one did.
+    #
+    # And it must BE a date. `proved_from` is clamped to the request, so a
+    # booking_date older than the request never reaches a date parser on the
+    # coverage path, and an unreferenced row never reaches the one in
+    # reference measurement -- a malformed value can arrive here intact. Only
+    # exact ISO dates count; a row whose date cannot be read is not "older"
+    # than anything, and it is never stored as a floor. The run's valid dates
+    # still count: discarding them would keep a NEWER floor from an earlier
+    # run and advise against a renewal that returns these older rows.
+    dated = [r["booking_date"] for r in fetched
+             if _is_iso_date(r.get("booking_date"))]
+    answered_from = min(dated) if dated else None
+
     # A response never licenses a tombstone interval BY ITSELF, and the licence
     # is withheld UNCONDITIONALLY. `TOMBSTONE_LICENSED_ASPSPS` above records
     # that no ASPSP has the measured capability which would justify one — but
@@ -855,6 +990,28 @@ def backfill(ais, conn, account: dict, session_id: str,
             raise apply.AccountErased(
                 "account %s was erased while this run was fetching; nothing "
                 "from the fetch may land" % aid, aid)
+        if record_floor:
+            # THE HISTORY FLOOR (issue #23): how far back this full-history
+            # fetch asked and the oldest row it returned, folded into two
+            # independent running minima. Inside this transaction, after the
+            # fence, so it lands with the run's rows or not at all.
+            #
+            # Gated on the LABEL, not on `floor_days`: a routine refresh can
+            # ask for exactly BACKFILL_FLOOR_DAYS with no fresh SCA behind it,
+            # and what the tools say about a renewal rests on what a renewal-
+            # shaped fetch was answered. Not on a shallow answer either: that
+            # is the missed-window signature whose remedy IS a re-link, and
+            # recording it would let the tools advise against that re-link.
+            # An empty answer records the request and leaves the answer alone.
+            c.execute(
+                "UPDATE accounts SET history_requested_from ="
+                " MIN(COALESCE(history_requested_from, ?), ?),"
+                " history_answered_from = CASE WHEN ? IS NULL"
+                " THEN history_answered_from"
+                " ELSE MIN(COALESCE(history_answered_from, ?), ?) END"
+                " WHERE account_id=? AND incarnation=?",
+                (requested_from, requested_from, answered_from, answered_from,
+                 answered_from, aid, incarnation))
         if observe:
             # The labelled deep run files its observation whatever it saw --
             # a zero-row dormant account included: "measured, and nothing"
@@ -897,7 +1054,6 @@ def backfill(ais, conn, account: dict, session_id: str,
     # would ever clear the note again. Only a NONZERO but short proven span is
     # "shallow".
     shallow = proved_from is not None and span < SHALLOW_SPAN_DAYS
-
     if proved_from is not None:
         # AFTER the rows are durably committed: coverage attests to the ledger,
         # never to what an HTTP call returned.

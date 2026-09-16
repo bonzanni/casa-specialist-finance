@@ -113,6 +113,27 @@ observation, that leaves rule 1 inert.
 rows and left the interval asserting they had been observed would report the deleted
 years as quiet ones.
 
+### What a renewal can reach
+
+Coverage records what was observed. It does not record what was **asked for**, and the
+difference is what decides whether a renewal can help with a gap. Every full-history
+fetch asks for `BACKFILL_FLOOR_DAYS` counted back from the day it runs, so that request
+floor advances daily. A bank may answer with much less: some serve eighteen months.
+
+So each account carries two running minima, written inside a labelled full-history
+fetch's own apply transaction: `history_requested_from`, how far back those fetches
+asked, and `history_answered_from`, the oldest booking date any of them returned. The
+second is the raw date, not the coverage bound, which is clamped to the request. Shallow,
+capped, failed and unlabelled runs record nothing; an empty answer records only the
+request. Both are statements about what the provider answered, so `purge` leaves them
+alone, and erasing the account row erases them.
+
+`flows.renewal_reach` splits a gap into three kinds of span. Before today's request floor
+no renewal **requests** it. Between that floor and the oldest recorded answer, earlier
+fetches asked and got nothing, so a renewal is **not expected** to fill it unless the bank
+now serves more. Only the rest is worth a renewal, and even there it **may** close the gap.
+Nothing says a renewal "cannot": a bank can return rows older than it was asked for.
+
 ## Applying a plan
 
 Three rules govern `apply_plan()`:
@@ -133,7 +154,7 @@ never a binary float. Sums are per currency and are never converted.
 
 ## The schema
 
-SQLite, forward-only migrations, currently version 6. `open_db()` applies migrations,
+SQLite, forward-only migrations, currently version 7. `open_db()` applies migrations,
 checks the file modes, and refuses a pre-existing symlink at the database or sidecar
 paths — those checks are part of opening the database rather than something applied
 afterwards. They detect an existing symlink; they are not symlink-race safe, and the
@@ -143,7 +164,7 @@ code says so where it matters.
 |---|---|
 | `meta` | schema version, restore fingerprint, install marker |
 | `sessions` | provider sessions and their generation |
-| `accounts` | the durable account records, their labels and inclusion |
+| `accounts` | the durable account records, their labels and inclusion, and how far back full-history fetches reached |
 | `balances` | the latest balances per account |
 | `transactions` | the ledger itself, with identity key, occurrence and match evidence |
 | `transaction_refs` | provider references seen for a row |

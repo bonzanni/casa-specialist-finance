@@ -22,7 +22,7 @@ from pathlib import Path
 
 import ebmode
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _PROD_DB_FILENAME = "bank_feed.sqlite"
 _SANDBOX_DB_FILENAME = "bank_feed.sandbox.sqlite"
@@ -89,13 +89,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- account (the ABA shape). apply.upsert_account mints a random token at
 -- INSERT; the v6 migration backfills existing rows. Evidence writes require
 -- the incarnation captured at run start, not mere account existence.
+-- `history_requested_from` / `history_answered_from` (v7) are what full-history
+-- fetches ASKED the bank for and the oldest row they RETURNED, as two
+-- independent running minima; NULL is "not recorded" and every reader says
+-- nothing about it. They state the provider's past answers, never what the
+-- ledger holds now, so `purge` leaves them alone and erasing the account row
+-- erases them. Written only by `flows.backfill`, inside the run's own
+-- transaction; read through `flows.history_floor`.
 CREATE TABLE IF NOT EXISTS accounts (
   account_id TEXT PRIMARY KEY NOT NULL, uid TEXT, session_id TEXT, iban_masked TEXT,
   name TEXT, product TEXT, currency TEXT, usage TEXT, label TEXT,
   category TEXT, included INTEGER NOT NULL DEFAULT 1,
   aspsp TEXT NOT NULL DEFAULT '',
   incarnation TEXT NOT NULL DEFAULT '',
-  first_seen TEXT, last_seen TEXT);
+  first_seen TEXT, last_seen TEXT,
+  history_requested_from TEXT, history_answered_from TEXT);
 
 CREATE TABLE IF NOT EXISTS balances (
   account_id TEXT NOT NULL, balance_type TEXT NOT NULL, amount_minor INTEGER,
@@ -379,6 +387,19 @@ def _register_functions(conn: sqlite3.Connection) -> None:
         lambda s: hashlib.sha256((s or "").encode("utf-8")).hexdigest())
 
 
+def _add_accounts_column(name: str):
+    """A conditional `ALTER TABLE accounts ADD COLUMN <name> TEXT`: None when
+    the column is already there, so a ledger whose `_SCHEMA` carried it and was
+    then stamped at an older version migrates instead of failing on a
+    duplicate column."""
+    def migrate(conn):
+        if any(r[1] == name
+               for r in conn.execute("PRAGMA table_info(accounts)")):
+            return None
+        return "ALTER TABLE accounts ADD COLUMN %s TEXT;" % name
+    return migrate
+
+
 _MIGRATIONS = {
     3: ("INSERT INTO notes_fts(rowid, note)"
         " SELECT note_id, note FROM transaction_notes;",),
@@ -460,6 +481,15 @@ _MIGRATIONS = {
         " updated_at, datetime('now'), 'schema v6 (earned trust)'"
         " FROM aspsp_capability;",
         "DELETE FROM aspsp_capability;"),
+    # v7 is the history request floor (issue #23): two nullable columns, and
+    # nothing to backfill. Rebuilding the pair from `ref_observations` and
+    # `transactions` would be a derivation from proxies -- a UTC observation
+    # time against a local request date, rows a purge removed, shallow runs --
+    # so an existing ledger stays "not recorded" until its next link or
+    # renewal writes the real values. Same conditional-ALTER shape as v6, one
+    # callable per column, each reading the table's actual columns.
+    7: (_add_accounts_column("history_requested_from"),
+        _add_accounts_column("history_answered_from")),
 }
 
 

@@ -2735,6 +2735,33 @@ def link_bank(args: dict) -> str:
         else:
             standing = ("You already have a live consent for this bank, with "
                         "%d days left on it" % value)
+        # Issue #23: a renewal is also what an operator reaches for "to pull
+        # older data", and for an account whose earlier full-history fetches
+        # already came back without it, that spends an SCA round on a request
+        # not expected to answer differently. Said BEFORE the tap, as a
+        # prediction, never as "cannot"; the renewal still proceeds, because
+        # keeping access is a reason to renew on its own. Only when the
+        # answered floor is newer than today's request floor: an older one is
+        # a date no renewal requests, so the sentence would say nothing.
+        floor_today = flows.request_floor()
+        reach = []
+        for bound in c.execute(
+                "SELECT account_id, name, label FROM accounts"
+                " WHERE session_id=? ORDER BY account_id",
+                (prior["session_id"],)):
+            recorded = flows.history_floor(c, bound["account_id"])
+            if recorded is None or not recorded[1] > floor_today:
+                continue
+            reach.append(
+                "Renewing is not expected to bring back history older than %s "
+                "for %s: earlier full-history fetches asked back to %s and "
+                "returned nothing older. A renewal requests history from %s "
+                "onward and could return more only if the bank now serves more "
+                "than it did."
+                % (tools_read._neutralized(recorded[1]),
+                   tools_read._label(dict(bound)),
+                   tools_read._neutralized(recorded[0]),
+                   tools_read._neutralized(floor_today)))
         return "\n".join(preface + [
             "Renewing %s (%s, %s). %s, and this replaces it — it is the same "
             "%s as the original link." % (
@@ -2746,6 +2773,7 @@ def link_bank(args: dict) -> str:
             "account id derived from the IBAN and currency, which does not "
             "change when the consent does. Nothing is re-imported or "
             "renumbered.",
+        ] + reach + [
             _SHALLOW_WARNING,
             _safe_url(url),
             "Tap it within 30 minutes — the pending authorization expires "
@@ -3925,14 +3953,27 @@ def consent_status(args: dict) -> str:
             continue                     # nothing proven, or one solid span
         gaps = apply.holes(c, row[0], proven[0][0], proven[-1][1])
         if gaps:
+            # What a renewal can do is worded per span of the earliest gap,
+            # by the same classifier and sentences `list_transactions` uses.
+            # This used to promise the whole gap "is closed at the next
+            # renewal", which is false for any part of it no renewal requests
+            # or earlier full-history fetches were answered with nothing for
+            # (issue #23). A one-span gap reads as a single sentence.
+            segments = flows.renewal_reach(c, row[0], gaps[0][0], gaps[0][1])
+            if len(segments) == 1:
+                remedy = tools_read.coverage_remedy(c, row[0], segments[0][2])
+            else:
+                remedy = " ".join(
+                    "From %s to %s: %s" % (_safe(s0), _safe(s1),
+                                           tools_read.coverage_remedy(c, row[0], k))
+                    for s0, s1, k in segments)
             lines.append(
                 "Account %s has %d coverage gap(s) inside the range it has "
-                "proven (%s to %s); the earliest is %s to %s. Only a fresh SCA "
-                "reopens the deep-history window, so this is closed at the next "
-                "renewal — run link_bank against that bank when you are ready. "
+                "proven (%s to %s); the earliest is %s to %s. %s "
                 "It is REPORTED rather than silently filled: a gap is 'we do "
                 "not know', never 'nothing happened'. Targeted gap filling is "
                 "follow-up work."
                 % (_safe(row[1]) or row[0], len(gaps), _safe(proven[0][0]),
-                   _safe(proven[-1][1]), _safe(gaps[0][0]), _safe(gaps[0][1])))
+                   _safe(proven[-1][1]), _safe(gaps[0][0]), _safe(gaps[0][1]),
+                   remedy))
     return "\n".join(lines)

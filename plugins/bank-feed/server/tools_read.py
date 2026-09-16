@@ -47,6 +47,7 @@ import sqlite3
 
 import apply
 import bank_feed_server
+import flows
 import money
 import store
 
@@ -174,9 +175,19 @@ def _neutralize(text: str) -> str:
     This runs BEFORE `_clip`, so the clip marker always lands inside the
     fence and the length limit applies to what will actually render.
     """
+    # EVERY line break, not just CR and LF: a reader that splits lines the way
+    # `str.splitlines` does also breaks on VT, FF, FS, GS, RS, NEL and the
+    # Unicode line and paragraph separators, and any one of them forges a line
+    # exactly as a newline does. Using `splitlines` itself as the mechanism
+    # means the set cannot drift from the reader it defends against.
+    #
+    # FIRST, before the delimiters are removed. Flattening turns a break back
+    # into a space, and both delimiters contain spaces, so a delimiter written
+    # with a break in place of one of its spaces survives a removal that runs
+    # first and is rebuilt by the flattening that follows it.
+    text = " ".join(text.splitlines())
     text = text.replace(UNTRUSTED_OPEN, "[fence-open removed]")
     text = text.replace(UNTRUSTED_CLOSE, "[fence-close removed]")
-    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     return text
 
 
@@ -631,16 +642,33 @@ def list_accounts(args: dict) -> str:
         # It must appear here: this listing is the read surface a user
         # re-checks to confirm a label_account write landed (#12).
         label = a.get("label")
+        # How far back full-history fetches reached, when recorded: the date
+        # an operator needs BEFORE asking for a renewal "to pull older data"
+        # (issue #23). Both are neutralised -- the answered floor is a raw
+        # provider `booking_date` -- and a request with no answer prints
+        # nothing, as `flows.history_floor` defines.
+        floor = flows.history_floor(c, a["account_id"])
         lines.append(
-            "  %s  %s  %s  %s  %scategory=%s  included=%s" % (
+            "  %s  %s  %s  %s  %s%scategory=%s  included=%s" % (
                 a["account_id"], _untrusted(a.get("name")),
                 _neutralized(a.get("iban_masked")),
                 _untrusted(a.get("currency")) if a.get("currency") else "?",
                 "label=%s  " % _clip(label) if label else "",
+                "fetched_back_to=%s (asked from %s)  "
+                % (_neutralized(floor[1]), _neutralized(floor[0]))
+                if floor is not None else "",
                 a.get("category") or "unlabelled",
                 "yes" if a.get("included") else "no"))
     lines.append("account_id is a keyed HMAC of IBAN+currency and is the "
                  "durable handle other tools take.")
+    if any("fetched_back_to=" in line for line in lines):
+        lines.append(
+            "fetched_back_to is the oldest transaction any full-history fetch "
+            "(a link or renewal) has returned for that account, and the date "
+            "in brackets how far back they asked. A renewal asks for history "
+            "from %s onward, so it is not expected to return anything older "
+            "than fetched_back_to unless the bank now serves more history than "
+            "it did." % _neutralized(flows.request_floor()))
     return "\n".join(lines)
 
 
@@ -758,6 +786,35 @@ def _effective_range(c, account_ids, args) -> tuple:
                 starts.append(cov[0][0])
         date_from = min(starts) if starts else "1970-01-01"
     return str(date_from), str(date_to)
+
+
+def coverage_remedy(c, account_id: str, kind: str) -> str:
+    """The one sentence saying what a renewal can do about a gap span of
+    `kind` (a `flows.renewal_reach` tag). Shared by `list_transactions` and
+    `consent_status`, so the two can never word the same span differently.
+
+    Only the request floor is a certainty, and even it says "does not
+    request", never "cannot fill": a bank may return rows older than asked.
+    The recorded answer is a PREDICTION about the next answer and is worded
+    as one. Every date is neutralised: the answered floor is a raw provider
+    `booking_date`.
+    """
+    floor = _neutralized(flows.request_floor())
+    if kind == flows.BEYOND_REQUEST:
+        return ("A renewal does not request this span (it asks for history "
+                "from %s onward), so it is not expected to fill it." % floor)
+    if kind == flows.NOT_RETURNED:
+        recorded = flows.history_floor(c, account_id)
+        if recorded is not None:
+            return ("Earlier full-history fetches for this account asked back "
+                    "to %s and returned nothing older than %s. A renewal "
+                    "requests history from %s onward; based on those answers "
+                    "it is not expected to fill this span unless the bank now "
+                    "serves more history than it did."
+                    % (_neutralized(recorded[0]), _neutralized(recorded[1]),
+                       floor))
+    return ("A renewal requests this span again (run link_bank against that "
+            "bank) and may close it.")
 
 
 def _signed(row) -> str:
@@ -1073,11 +1130,23 @@ def list_transactions(args: dict) -> str:
             # Unfenced (not `_untrusted`) because a coverage bound is expected
             # to look like a date, same reasoning as
             # `reference_date`/`iban_masked` above.
-            lines.append("Coverage: %s has a gap %s to %s inside the requested "
-                         "range — that span is NOT proven and may be missing "
-                         "rows. Only a fresh SCA can close it, so it is closed "
-                         "at the next renewal — run link_bank against that bank." %
-                         (_label(a), _neutralized(hole[0]), _neutralized(hole[1])))
+            #
+            # One line per span `flows.renewal_reach` tells apart, because what
+            # a renewal can do differs across a single hole: the part before
+            # today's request floor is not requested at all, the part earlier
+            # full-history fetches were answered with nothing for is not
+            # expected back, and only the rest is worth a renewal. This line
+            # used to promise every hole "is closed at the next renewal", and
+            # that promise is what sent an operator to renew for history the
+            # bank had already declined to serve (issue #23).
+            for seg_start, seg_end, kind in flows.renewal_reach(
+                    c, a["account_id"], hole[0], hole[1]):
+                lines.append(
+                    "Coverage: %s has a gap %s to %s inside the requested "
+                    "range — that span is NOT proven and may be missing rows. "
+                    "%s" % (_label(a), _neutralized(seg_start),
+                            _neutralized(seg_end),
+                            coverage_remedy(c, a["account_id"], kind)))
     if untagged and has_more and rows:
         # After every other line, so it is genuinely the last thing read.
         # The cursor is a server-generated integer: nothing to fence.
