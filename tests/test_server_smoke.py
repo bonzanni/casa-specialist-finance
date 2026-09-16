@@ -145,13 +145,12 @@ class TestPluginManifest(unittest.TestCase):
         `plugin_store.manifest_result_contract`: `version` exactly 1, no
         member but `version` and `tools`, the setup tool absent (it is exempt
         and casa admits it only as safe), and -- for this plugin -- every
-        entry `{"result": "safe"}`, because no tool returns a live credential
-        that a same-plugin tool could redeem. link_bank returns the bank's
-        consent URL for the operator to tap; casa has no operator-facing
-        rendering of an escrow reference, so `capability` would make linking
-        impossible. Its `safe` entry is provisional until the operator
-        decides on issue #21; this test pins the declaration, not that
-        decision."""
+        entry `{"result": "safe"}` except `link_bank`'s. No tool returns a
+        live credential that a same-plugin tool could redeem; link_bank
+        produces the one link the operator must open, and casa >= v0.318.0
+        delivers it to the operator's chat (ha-casa-app#1015), so it is a
+        `capability` that provides and `delivers` exactly one slot, as an
+        `operator_link`, and that no tool consumes."""
         manifest = json.loads(PLUGIN_JSON.read_text())
         contract = manifest["casa"]["resultContract"]
         self.assertEqual(sorted(contract), ["tools", "version"],
@@ -177,7 +176,15 @@ class TestPluginManifest(unittest.TestCase):
             "casa before it runs, a declared tool nothing serves is a lie")
         self.assertEqual(len(contract["tools"]), 31)
         for name, entry in contract["tools"].items():
+            if name == "link_bank":
+                continue
             self.assertEqual(entry, {"result": "safe"}, name)
+        self.assertEqual(contract["tools"]["link_bank"], {
+            "result": "capability", "provides": ["approval_link"],
+            "delivers": {"approval_link": "operator_link"}})
+        # The slot the manifest declares is the field the server fills.
+        self.assertIn('\nAPPROVAL_SLOT = "approval_link"\n',
+                      (SERVER_DIR / "tools_auth.py").read_text("utf-8"))
         protected = {p if isinstance(p, str) else p["name"]
                      for p in manifest["casa"]["protectedTools"]}
         self.assertLessEqual(protected, set(contract["tools"]),

@@ -269,7 +269,10 @@ class TestWorldGuardLinkBank(SandboxBase):
         self.assertEqual(len(self.ais.auths), 1)
         self.assertIn("one tap", out)
         self.assertNotIn("tap 1", out)
-        self.assertNotIn("enablebanking.com/whitelist", out)
+        self.assertEqual([d[2] for d in self.broker.deposits],
+                         ["Approve at Rabobank"])
+        self.assertEqual(self.broker.deposits[0][1],
+                         "https://tpp.enablebanking.com/auth?x=1")
 
     def test_production_link_bank_still_runs_the_whitelist_tap(self):
         # The mirror pin: outside sandbox, an unwhitelisted bank still gets
@@ -281,6 +284,8 @@ class TestWorldGuardLinkBank(SandboxBase):
                          [("app-1", "Rabobank", "NL", "personal")])
         self.assertEqual(self.ais.auths, [])
         self.assertIn("tap 1 of 2", out)
+        self.assertEqual([d[2] for d in self.broker.deposits],
+                         ["Whitelist at Rabobank"])
 
     def test_production_link_bank_verifies_and_proceeds(self):
         # Production verifies too — FakeAdmin's default record IS production's
@@ -404,6 +409,139 @@ class TestDispatcher(SandboxBase):
         self.register_stub(fn=lambda args: (_ for _ in ()).throw(
             RuntimeError("boom")))
         self.assertEqual(self.dispatch(), "error: RuntimeError: boom")
+
+    # -- a `capability` tool (casa's result contract) -----------------------
+    def register_capability(self, fn, error_text_types=()):
+        bank_feed_server.TOOLS["__cap__"] = {
+            "description": "cap", "schema": {"type": "object"}, "fn": fn,
+            "capability": True, "error_text_types": error_text_types}
+        self.addCleanup(bank_feed_server.TOOLS.pop, "__cap__", None)
+
+    def dispatch_result(self, name, arguments=None):
+        return bank_feed_server.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": name, "arguments": arguments or {}}})["result"]
+
+    RABOBANK = {"aspsp": "Rabobank", "country": "NL", "psu_type": "personal"}
+
+    CAP = {"approval_link": "casa-cap-" + "ab" * 16, "text": "handed over"}
+
+    def test_a_capability_success_is_one_json_object_in_both_modes(self):
+        # casa parses the WHOLE result text as one JSON object and checks the
+        # reference in it; a banner in front of it would make casa withhold
+        # the result as a broken plugin. In sandbox the banner rides inside.
+        self.register_capability(lambda args: dict(self.CAP))
+        prod = self.dispatch_result("__cap__")
+        self.assertNotIn("isError", prod)
+        self.assertEqual(len(prod["content"]), 1)
+        self.assertEqual(json.loads(prod["content"][0]["text"]), self.CAP)
+        self.sandbox()
+        sand = self.dispatch_result("__cap__")
+        self.assertNotIn("isError", sand)
+        obj = json.loads(sand["content"][0]["text"])
+        self.assertEqual(obj["approval_link"], self.CAP["approval_link"])
+        self.assertEqual(obj["text"],
+                         bank_feed_server.SANDBOX_BANNER + "\nhanded over")
+
+    def test_anything_else_a_capability_tool_produces_is_a_tool_error(self):
+        # A refusal returned as prose, and an exception, carry no reference:
+        # as ordinary results casa would withhold them as a broken plugin, as
+        # errors their text reaches the model. Both modes, banner kept.
+        for sandbox in (False, True):
+            if sandbox:
+                self.sandbox()
+            for fn, needle in ((lambda args: "Linking has NOT been started",
+                                "NOT been started"),
+                               (lambda args: (_ for _ in ()).throw(
+                                   RuntimeError("boom")),
+                                "error: RuntimeError")):
+                with self.subTest(sandbox=sandbox, needle=needle):
+                    self.register_capability(fn)
+                    result = self.dispatch_result("__cap__")
+                    self.assertIs(result.get("isError"), True)
+                    text = result["content"][0]["text"]
+                    self.assertIn(needle, text)
+                    self.assertEqual(
+                        text.startswith(bank_feed_server.SANDBOX_BANNER),
+                        sandbox)
+
+    def test_a_capability_tools_exception_text_speaks_only_for_declared_types(self):
+        # A stdlib parser quotes the bytes it chokes on, and on a capability
+        # tool's path those bytes can be the link: undeclared types render by
+        # class name alone. A declared type keeps its message (the remedy).
+        class Declared(RuntimeError):
+            pass
+        leak = "https://tpp.enablebanking.com/auth?state=secret"
+        for exc, expected in ((ValueError(leak), "error: ValueError"),
+                              (Declared("run setup_bank_feed"),
+                               "error: Declared: run setup_bank_feed")):
+            with self.subTest(exc=type(exc).__name__):
+                self.register_capability(
+                    lambda args, e=exc: (_ for _ in ()).throw(e),
+                    error_text_types=(Declared,))
+                result = self.dispatch_result("__cap__")
+                self.assertIs(result.get("isError"), True)
+                self.assertEqual(result["content"][0]["text"], expected)
+        # A safe tool's rendering is unchanged: class and message.
+        self.register_stub(fn=lambda args: (_ for _ in ()).throw(ValueError("v")))
+        self.assertEqual(self.dispatch(), "error: ValueError: v")
+
+    def test_link_bank_never_speaks_a_provider_parse_error(self):
+        # Measured: a provider whose status line IS the approval URL makes
+        # http.client raise BadStatusLine(<that line>), and a redirect host
+        # carrying a token makes urllib raise a ValueError quoting it. Through
+        # the real link_bank and the real dispatcher, neither reaches the text.
+        import http.client
+        url = "https://tpp.enablebanking.com/auth?state=secret-token"
+        for exc in (http.client.BadStatusLine(url + "\r\n"),
+                    ValueError("'secret-token' does not appear to be an IPv4 "
+                               "or IPv6 address")):
+            with self.subTest(exc=type(exc).__name__):
+                self.ais.start_auth = lambda *a, e=exc, **k: (_ for _ in ()).throw(e)
+                result = self.dispatch_result("link_bank", self.RABOBANK)
+                self.assertIs(result.get("isError"), True)
+                text = result["content"][0]["text"]
+                self.assertEqual(text, "error: %s" % type(exc).__name__)
+                self.assertNotIn("secret-token", text)
+
+    def test_link_bank_keeps_its_own_refusals_remedy(self):
+        # The plugin's own literal refusal still names what to do.
+        import tools_auth as ta
+        self.addCleanup(setattr, ta, "_entry", ta._entry)
+        ta._entry = lambda: None
+        result = self.dispatch_result("link_bank", self.RABOBANK)
+        self.assertIs(result.get("isError"), True)
+        self.assertEqual(result["content"][0]["text"],
+                         "error: PluginRefusal: callback is not routed; run "
+                         "setup_bank_feed")
+
+    def test_an_invalid_mode_is_a_tool_error_for_a_capability_tool(self):
+        self.register_capability(lambda args: dict(self.CAP))
+        os.environ[ebmode.ENV_MODE_VAR] = "garbage"
+        self.addCleanup(os.environ.pop, ebmode.ENV_MODE_VAR, None)
+        ebmode._reset()
+        self.addCleanup(ebmode._reset)
+        result = self.dispatch_result("__cap__")
+        self.assertIs(result.get("isError"), True)
+        self.assertIn(ebmode.ENV_MODE_VAR, result["content"][0]["text"])
+
+    def test_a_safe_tool_is_never_flagged_as_an_error(self):
+        # Unchanged for every other tool: prose results and rendered
+        # exceptions stay ordinary results.
+        self.register_stub()
+        self.assertNotIn("isError", self.dispatch_result("__stub__"))
+        self.register_stub(fn=lambda args: (_ for _ in ()).throw(
+            RuntimeError("boom")))
+        self.assertNotIn("isError", self.dispatch_result("__stub__"))
+
+    def test_only_link_bank_is_registered_as_a_capability_tool(self):
+        # The manifest's resultContract and the registry must agree on which
+        # tool succeeds only with a reference: a mismatch either withholds
+        # every link_bank result or hides a safe tool's answers as errors.
+        self.assertEqual(
+            sorted(n for n, t in bank_feed_server.TOOLS.items()
+                   if t.get("capability") and not n.startswith("__")),
+            ["link_bank"])
 
     def test_an_invalid_mode_refuses_every_tool_unbannered(self):
         ran = []

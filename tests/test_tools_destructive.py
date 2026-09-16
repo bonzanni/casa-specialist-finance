@@ -553,8 +553,10 @@ class TestFailedRevocation(DestructiveBase):
         self.assertIn(ref, out)
         self.assertIn("unlink_bank", out)
         self.assertNotIn(SESSION_ID, out)
-        # Named, not blocked: the authorization was still minted.
-        self.assertIn("https://tpp.enablebanking.com/auth?x=1", out)
+        # Named, not blocked: the authorization was still minted, and its
+        # link handed to casa.
+        self.assertEqual(self.broker.deposits[-1][1],
+                         "https://tpp.enablebanking.com/auth?x=1")
         self.assertEqual(len(self.ais.auths), 1)
 
     def test_only_a_404_is_treated_as_proof_that_the_consent_is_gone(self):

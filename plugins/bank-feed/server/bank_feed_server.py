@@ -58,19 +58,45 @@ def handle(req: dict) -> dict | None:
         # (4) The banner, over success AND error alike — a wrapper inside
         # register() would never see the rendered exception, which is why the
         # banner lives here at the dispatcher.
+        #
+        # A `capability` tool (casa's result contract, see `register`) has one
+        # success shape: a dict, sent as ONE JSON object, because casa parses
+        # the whole result text as JSON and checks the reference in it. Its
+        # banner therefore goes INSIDE the object, into its `text` field, and
+        # never in front of it. Anything else such a tool produces (a refusal
+        # it returns as prose, or an exception) is an MCP tool error: casa
+        # passes an error's text to the model unchanged, whereas a non-error
+        # result without the reference would be withheld as a broken plugin.
         try:
             sandbox = ebmode.is_sandbox()
         except ebmode.ModeError as exc:
-            return _result(id_, {"content": [{"type": "text",
-                                              "text": str(exc)}]})
+            payload = {"content": [{"type": "text", "text": str(exc)}]}
+            if tool.get("capability"):
+                payload["isError"] = True
+            return _result(id_, payload)
         try:
             store.check_mode_marker(os.environ.get("CLAUDE_PLUGIN_DATA"))
-            text = tool["fn"](params.get("arguments") or {})
+            out = tool["fn"](params.get("arguments") or {})
         except Exception as exc:                       # surfaced, never swallowed
-            text = f"error: {type(exc).__name__}: {exc}"
-        if sandbox:
-            text = SANDBOX_BANNER + "\n" + text
-        return _result(id_, {"content": [{"type": "text", "text": text}]})
+            # A capability tool's link exists as bytes on its own path, and a
+            # stdlib parser quotes the bytes it chokes on (a status line, a
+            # redirect host). So its exception text is rendered only for the
+            # types it declares as speaking in its own words (`register`).
+            if tool.get("capability") and not isinstance(
+                    exc, tool.get("error_text_types") or ()):
+                out = f"error: {type(exc).__name__}"
+            else:
+                out = f"error: {type(exc).__name__}: {exc}"
+        if isinstance(out, dict):
+            if sandbox:
+                out = dict(out, text=SANDBOX_BANNER + "\n" + str(out.get("text") or ""))
+            payload = {"content": [{"type": "text", "text": json.dumps(out)}]}
+        else:
+            text = SANDBOX_BANNER + "\n" + out if sandbox else out
+            payload = {"content": [{"type": "text", "text": text}]}
+            if tool.get("capability"):
+                payload["isError"] = True
+        return _result(id_, payload)
     return _error(id_, -32601, f"unknown method {method!r}")
 
 

@@ -24,15 +24,18 @@ rather than guess a world. Neither is reachable unless those two are wired
 through `op://`, which nothing here asks for — the CP token is pasted and
 the mode is a plain word.
 
-**Requires casa v0.155.0 or later** (issue #4). Two things it relies on: the
-`casa.setupProvides` declaration, and defaulted references being shippable in
-a bundled plugin tree.
+**Requires casa v0.318.0 or later.** It relies on the `casa.setupProvides`
+declaration and on defaulted references being shippable in a bundled plugin
+tree (casa v0.155.0, issue #4). It also relies on casa delivering the link
+`link_bank` produces (casa v0.318.0, ha-casa-app#1015): an older casa refuses
+the manifest's `delivers` declaration at install.
 
 Under **casa v0.290.0 or later** the manifest's `casa.resultContract` is what
 lets any tool but `setup_bank_feed` run at all: casa refuses a call to a
-non-setup tool the declaration omits, before it runs. Every bank-feed tool is
-declared `safe`; `docs/reference/casa-compatibility.md` says why, and which
-one entry is provisional.
+non-setup tool the declaration omits, before it runs. Every bank-feed tool but
+`link_bank` is declared `safe`. `link_bank` is a `capability` whose link casa
+posts in the operator's chat itself, so the URL never passes through the
+assistant; `docs/reference/casa-compatibility.md` says how.
 
 Every entry has a KEY and a reference. The **key** is what this server reads
 out of `os.environ`. The **reference** is the name casa resolves out of

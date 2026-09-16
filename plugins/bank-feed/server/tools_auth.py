@@ -70,8 +70,10 @@ from pathlib import Path
 
 import apply
 import callbacks
+import casa_broker
 import eb_admin
 import eb_ais
+import httpx
 import ebmode
 import fbauth
 import flows
@@ -200,11 +202,20 @@ AIS_FACTORY = None
 ADMIN_FACTORY = None
 OPVAULT = opvault     # test seam: setup's vault access goes through this name
 FB = fbauth           # test seam: setup's Firebase access goes through this name
+DEPOSIT_LINK = casa_broker.deposit_link   # test seam: every link handed to casa goes through this name
 
 #: App ids this process has proven to live in THIS mode's world. A plain set:
 #: within one process the mode is a constant (ebmode's memo), so the id alone
 #: keys it exactly. Tests reset it like eb_admin's _MINTER.
 _WORLD_OK: set = set()
+
+
+class PluginRefusal(RuntimeError):
+    """A refusal whose message this module writes from its own literals and
+    identifiers, never from a provider's or casa's bytes. It is a
+    `RuntimeError`, so every existing handler still catches it; being its own
+    type is what lets `link_bank`'s error rendering keep the remedy it names
+    (see `register(error_text_types=...)`)."""
 
 
 class WorldMismatch(RuntimeError):
@@ -720,7 +731,7 @@ def _bare_ais():
         except OPVAULT.OpError:
             pem = None
     if not app_id or not pem:
-        raise RuntimeError("at least one of %s / %s did not resolve to a "
+        raise PluginRefusal("at least one of %s / %s did not resolve to a "
                            "usable value, and no substitute was available to "
                            "this attempt (the vault read may also have "
                            "failed)" % (WIRE_APP_ID_VAR, WIRE_KEY_VAR))
@@ -2563,12 +2574,12 @@ def _start_auth(c, aspsp: str, country: str, psu_type: str, purpose: str, *,
     """
     entry = _entry()
     if not entry:
-        raise RuntimeError("callback is not routed; run setup_bank_feed")
+        raise PluginRefusal("callback is not routed; run setup_bank_feed")
     generation = None
     if account_id:
         generation = current_generation(c, account_id)
         if generation is None:
-            raise RuntimeError(
+            raise PluginRefusal(
                 "refusing to mint an unfenced %s attempt for %s: the account "
                 "has no bound session generation to fence against"
                 % (purpose, account_id))
@@ -2599,16 +2610,82 @@ _SHALLOW_WARNING = (
     "here so approving now is an informed choice.")
 
 
+#: The slot `link_bank` declares in `casa.resultContract`: `provides` it and
+#: `delivers` it as an `operator_link`. casa posts the link in the operator's
+#: chat; this result carries only casa's reference to it, in this field.
+APPROVAL_SLOT = "approval_link"
+
+#: Said wherever a link was handed over. Delivery-neutral on purpose: the tool
+#: cannot know whether the link arrived. casa replaces this result with a
+#: receipt carrying `casa_delivery` when it did, and withholds the result when
+#: it could not confirm it. So a model holding THIS text holds no claim either
+#: way, and must not make one.
+_HANDED_TO_CASA = (
+    "A one-time link for the operator was handed to casa, which reports "
+    "whether it reached their chat. The link itself is not in this result, "
+    "and this result does not confirm delivery.")
+
+
+def _link_caption(aspsp: str, country: str, psu_type: str, tail: str) -> str:
+    """`<bank>, <country>, <psu type> — <tail>`, as a caption casa accepts.
+
+    The three values are clipped BEFORE they are joined to `tail`, so a long
+    name can never cut off the part this module wrote (the step and the
+    expiry). The final pass only guarantees the result.
+    """
+    return casa_broker.fit_caption("%s, %s, %s \u2014 %s" % (
+        casa_broker.fit_caption(aspsp, 60), casa_broker.fit_caption(country, 8),
+        casa_broker.fit_caption(psu_type, 16), tail))
+
+
+def _hand_to_casa(url, *, label: str, caption: str):
+    """Deposit `url` for delivery. Returns `(reference, None)`, or
+    `(None, code)` when casa did not accept it. The URL itself is never part
+    of what this returns."""
+    try:
+        return DEPOSIT_LINK(APPROVAL_SLOT, str(url or ""),
+                            label=label, caption=caption), None
+    except casa_broker.DepositFailed as exc:
+        return None, exc.code
+
+
+def _not_handed_over(aspsp: str, what: str, code: str, after: str) -> str:
+    """The refusal when casa did not take a link: returned as prose, which the
+    dispatcher reports as a tool error (see `register`). The code is casa's or
+    `casa_broker`'s own label, never text either of them echoed."""
+    remedy = ("this casa delivers no links: bank-feed needs casa v0.318.0 or "
+              "later" if code == "broker_env_missing"
+              else "tell the operator the link could not be handed over, "
+                   "naming the code")
+    return ("Linking %s: %s was created, but casa did not accept its link for "
+            "delivery (%s), so this call put no link in front of the operator. "
+            "%s If it happens again, %s."
+            % (_safe(aspsp), what, _safe(code), after, remedy))
+
+
 @register("link_bank",
-          "Start a bank authorization: returns the URL to tap. Returns "
-          "immediately; casa redelivers the result, this plugin never polls.",
+          "Start a bank authorization. The link the operator must open is "
+          "handed to casa, which posts it in their chat; the result carries "
+          "only casa's reference to it, never the URL. Returns immediately; "
+          "casa redelivers the bank's answer, this plugin never polls.",
           {"type": "object",
            "properties": {"aspsp": {"type": "string"},
                           "country": {"type": "string", "default": "NL"},
                           "psu_type": {"type": "string",
                                        "enum": ["personal", "business"]}},
-           "required": ["aspsp", "psu_type"]})
-def link_bank(args: dict) -> str:
+           "required": ["aspsp", "psu_type"]},
+          capability=True,
+          # Types whose messages are built from this plugin's literals, a
+          # status and an operation name, or data read BEFORE the link exists.
+          # Anything else (a stdlib parser choking on the provider's response,
+          # for one) is rendered by class name only, because its text can
+          # quote the response that carries the link.
+          error_text_types=(PluginRefusal, WorldMismatch, WorldUnverified,
+                            eb_ais.ApiError, eb_admin.AdminError,
+                            eb_admin.AdminTokenMissing, httpx.NotAllowed,
+                            httpx.TooLarge, httpx.RateLimited,
+                            callbacks.Unsupported))
+def link_bank(args: dict):
     c = _conn()
     aspsp = str(args.get("aspsp") or "")
     country = str(args.get("country") or "NL").upper()
@@ -2673,15 +2750,34 @@ def link_bank(args: dict) -> str:
         if missing:
             url = (_admin().link_accounts(app_id, aspsp, country, psu_type)
                    or {}).get("url") or ""
-            return ("Linking %s takes two taps. This is tap 1 of 2 — the "
-                    "account whitelist.\n%s\n"
-                    "That link ends on an Enable Banking page: nothing comes "
-                    "back to our callback, so completion is confirmed by "
-                    "re-reading the whitelist, never assumed. When you have "
-                    "finished it, call link_bank again for tap 2 (the bank's "
-                    "own approval).\n"
-                    "The turn ends here — nothing is waiting on you."
-                    % (_safe(aspsp), _safe_url(url)))
+            # The whitelist page is a link the operator must open, exactly
+            # like the bank's approval, so casa delivers it too. Its lifetime
+            # is the provider's and is not measured here. The "about 30
+            # minutes" is an indication the operator asked for, not a
+            # verified figure.
+            reference, code = _hand_to_casa(
+                url, label=casa_broker.fit_label("Whitelist at ", aspsp),
+                caption=_link_caption(
+                    aspsp, country, psu_type,
+                    "step 1 of 2, account whitelist; one-time link, expires "
+                    "in about 30 minutes"))
+            if reference is None:
+                return _not_handed_over(
+                    aspsp, "the tap-1 whitelist session", code,
+                    "Nothing was minted at the bank. Run link_bank again.")
+            return {APPROVAL_SLOT: reference, "text": "\n".join([
+                "Linking %s takes two taps. This is tap 1 of 2 — the "
+                "account whitelist." % _safe(aspsp),
+                _HANDED_TO_CASA,
+                "It is a one-time link and expires after about 30 minutes; "
+                "once it has, run link_bank again for a fresh one.",
+                "That link ends on an Enable Banking page: nothing comes "
+                "back to our callback, so completion is confirmed by "
+                "re-reading the whitelist, never assumed. When you have "
+                "finished it, call link_bank again for tap 2 (the bank's "
+                "own approval).",
+                "The turn ends here — nothing is waiting on you.",
+            ])}
 
     # A bank that already holds a live consent is being RENEWED,
     # not linked for the first time. The distinction is not cosmetic — it
@@ -2712,6 +2808,15 @@ def link_bank(args: dict) -> str:
 
     url = _start_auth(c, aspsp, country, psu_type,
                       "renew" if prior else "link", account_id=target)
+    reference, code = _hand_to_casa(
+        url, label=casa_broker.fit_label("Approve at ", aspsp),
+        caption=_link_caption(aspsp, country, psu_type,
+                              "one-time link, expires in 30 minutes"))
+    if reference is None:
+        return _not_handed_over(
+            aspsp, "the bank authorization", code,
+            "That pending authorization expires unused 30 minutes after it "
+            "was minted; run link_bank again for a fresh one.")
     if prior:
         # Issue #6. `_renewable_session` returns an expired consent — correctly,
         # since renewal is the path that carries everything forward — so THIS
@@ -2762,7 +2867,7 @@ def link_bank(args: dict) -> str:
                    tools_read._label(dict(bound)),
                    tools_read._neutralized(recorded[0]),
                    tools_read._neutralized(floor_today)))
-        return "\n".join(preface + [
+        return {APPROVAL_SLOT: reference, "text": "\n".join(preface + [
             "Renewing %s (%s, %s). %s, and this replaces it — it is the same "
             "%s as the original link." % (
                 _safe(aspsp), _safe(country), _safe(psu_type), standing,
@@ -2775,9 +2880,9 @@ def link_bank(args: dict) -> str:
             "renumbered.",
         ] + reach + [
             _SHALLOW_WARNING,
-            _safe_url(url),
-            "Tap it within 30 minutes — the pending authorization expires "
-            "1800 s after it was minted.",
+            _HANDED_TO_CASA,
+            "It must be opened in a real browser within 30 minutes — the "
+            "pending authorization expires 1800 s after it was minted.",
             # The refusal branch's own consequence, and the second place the
             # expired case had to be told apart (issue #6): the old consent
             # stays BOUND either way — that is what makes the ledger keep
@@ -2798,7 +2903,7 @@ def link_bank(args: dict) -> str:
             "The turn ends here. This plugin never polls or waits: when the "
             "redirect lands, casa dispatches a fresh turn on its own durable "
             "schedule, and that turn should call collect_authorization.",
-        ])
+        ])}
     if ebmode.is_sandbox():
         opening = (
             "Linking %s (%s, %s) takes one tap in sandbox mode: there is no "
@@ -2813,17 +2918,17 @@ def link_bank(args: dict) -> str:
             "coming back to our callback — is already satisfied. This is "
             "tap 2 of 2, the bank's own approval."
             % (_safe(aspsp), _safe(country), _safe(psu_type)))
-    return "\n".join(preface + [
+    return {APPROVAL_SLOT: reference, "text": "\n".join(preface + [
         opening,
         _SHALLOW_WARNING,
-        _safe_url(url),
-        "Tap it within 30 minutes — the pending authorization expires 1800 s "
-        "after it was minted, and a fresh link must then be created.",
-        "The URL is a one-time credential; it is not logged or repeated.",
+        _HANDED_TO_CASA,
+        "It must be opened in a real browser within 30 minutes — the pending "
+        "authorization expires 1800 s after it was minted, and a fresh link "
+        "must then be created.",
         "The turn ends here. This plugin never polls or waits: when the "
         "redirect lands, casa dispatches a fresh turn on its own durable "
         "schedule, and that turn should call collect_authorization.",
-    ])
+    ])}
 
 
 class _FencedAIS:

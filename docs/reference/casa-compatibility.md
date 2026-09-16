@@ -18,8 +18,9 @@ real casa through `$CASA_ROOT` at runtime; the suite has no such root.
 
 ## Version range
 
-The values below were taken from **casa v0.148.0** and **casa v0.155.0** — the
-version each row names is the version its value was read from.
+The values below were taken from **casa v0.148.0**, **casa v0.155.0** and
+**casa v0.318.0** — the version each row names is the version its value was read
+from.
 
 **This table is a copy, and a copy is a claim about another codebase.** Nothing
 in this commit can show that a row matches what casa actually defines — no casa
@@ -33,15 +34,19 @@ compared against the real symbol. Without a checkout, the suite checks only that
 the copies and this table agree with each other — which catches drift between
 them, and nothing about casa.
 
-The component **requires casa >= v0.155.0**, because the environment-declaration
-rows below do not exist in earlier versions.
+The component **requires casa >= v0.318.0**. The environment-declaration rows below
+do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
+outright: `link_bank` declares `delivers` (below), a member an older casa's
+result-contract validator does not know, so it rejects the declaration as malformed
+(`result_contract_invalid`) and the plugin is excluded rather than half-loaded.
 
-**Nothing declares that requirement and nothing enforces it.** There is no
-version field in the plugin manifest, no handshake, and no check at install:
-this page and `plugins/bank-feed/README.md` are the only places it is written
-down. Installing under an older casa fails at the point the missing behaviour is
-needed, with whatever error casa raises there. Stated plainly rather than left
-to be discovered.
+**Nothing declares that requirement as a version.** There is no version field in
+the plugin manifest and no handshake: this page and `plugins/bank-feed/README.md`
+are the only places it is written down. Under a casa from v0.290.0 and before v0.318.0 the
+refusal is at install, with `result_contract_invalid`, and names no version; under
+anything older the install goes through and fails at the point the missing
+behaviour is needed, with whatever error casa raises there. Stated plainly rather
+than left to be discovered.
 
 ## The copied values
 
@@ -60,6 +65,12 @@ to be discovered.
 | `MCP_JSON_VAR_RE` | `specialist_install._MCP_JSON_VAR_RE` | v0.155.0 | The `${VAR}` and `${VAR:-default}` interpolation syntax casa carves out of each `.mcp.json` string leaf before the marker scan. Without the carve-out a defaulted reference keeps its `${` and trips the forbidden markers, refusing a bundled plugin for syntax a standalone plugin may use freely. The named `default` group is load-bearing for expansion. |
 | `REQUIRED_REF_RE` | `plugin_env_extractor._VAR_PATTERN` | v0.155.0 | Which references count as REQUIREMENTS for the withhold gate: bare `${VAR}` only. A `${VAR:-default}` is satisfied by its own default, so withholding an install for it would be wrong. |
 | `ANY_REF_RE` | `plugin_env_extractor._ANY_VAR_PATTERN` | v0.155.0 | Both documented reference forms. Consent enumeration and the name-collision preflight use this one, so a default cannot hide a name claim. |
+| `ENV_CLIENT` | `result_broker.ENV_CLIENT` | v0.318.0 | The environment variable casa sets to this server's broker client id. `casa_broker.deposit_link` sends it as `client`; without it no deposit binds and no link is delivered. |
+| `ENV_SOCKET` | `result_broker.ENV_SOCKET` | v0.318.0 | The environment variable naming the Unix socket casa's broker listens on. Its absence is how a casa older than the result contract shows itself, reported as `broker_env_missing`. |
+| `REFERENCE_RE` | `result_broker._REF_RE` | v0.318.0 | The exact shape of a reference casa mints. Anything else in a deposit answer is never returned, so a broker that echoed the link cannot put it in front of the model. |
+| `MAX_LABEL_CHARS` | `result_broker.MAX_LABEL_CHARS` | v0.318.0 | The longest label a delivered link may carry. A longer one is `bad_label` and the link is not delivered, so `fit_label` clips a bank name to fit. |
+| `MAX_CAPTION_CHARS` | `result_broker.MAX_CAPTION_CHARS` | v0.318.0 | The longest caption a delivered link may carry. A longer one is `bad_caption`, so `fit_caption` clips to it. |
+| `DOMAINISH_RE` | `result_broker._DOMAINISH_RE` | v0.318.0 | What a label may not contain: a dot followed by a letter, which reads as a domain, because the host is casa's to print from the URL. A bank name such as `N.V.` would trip it, so `fit_label` removes the dots. |
 
 ## The authorization-callback contract
 
@@ -105,22 +116,39 @@ plugin's non-setup tools; a malformed declaration refuses the install), refuses
 a call to any non-setup tool of a plugin without the declaration, and refuses a
 call to any tool the declaration omits. The setup tool is exempt.
 
-bank-feed declares all thirty-one non-setup tools `safe`, and no escrow
-handshake is implemented, because no bank-feed tool returns a credential that
-another bank-feed tool could redeem. One entry is provisional: `link_bank`
-returns the bank's consent URL for the operator to open, and casa renders no
-escrow reference to an operator, so a `capability` entry would leave the
-operator with nothing to tap and make linking impossible. It is declared
-`safe` on the same footing as casa's own exemption of the setup tool's consent
-link, and the classification is recorded as an operator decision owed on this
-repository's issue #21. `bank_feed_signin` is not provisional: it consumes a
-sign-in link the operator pasted and returns statuses and the redirect URI,
-never a live link.
+bank-feed declares thirty of its thirty-one non-setup tools `safe`: none returns
+a credential that another bank-feed tool could redeem, and `bank_feed_signin`
+consumes a sign-in link the operator pasted and returns statuses and the redirect
+URI, never a live link.
+
+`link_bank` is the one `capability`. It produces the link the operator must open
+(the bank's approval, or in production first the Enable Banking whitelist page),
+and casa v0.318.0 added the declaration that lets casa deliver such a link itself
+(ha-casa-app#1015):
+
+```json
+"link_bank": {"result": "capability", "provides": ["approval_link"],
+              "delivers": {"approval_link": "operator_link"}}
+```
+
+During the call `link_bank` deposits the URL with casa's broker, with a label
+(`Approve at <bank>`, or `Whitelist at <bank>` for the whitelist page) and a
+caption naming the bank, country, PSU type and expiry. It returns a JSON object
+`{"approval_link": "<reference>", "text": "<prose>"}`. After the result passes
+casa's structural check, casa posts one message to the chat the operator asked
+from, never a task topic, and replaces the result with a receipt carrying
+`casa_delivery`. When casa cannot confirm delivery, it withholds the result. The
+prose is delivery-neutral: it says the link was handed to casa, which reports
+whether it reached the operator's chat, and never that it was sent. A refused
+deposit (`plugins/bank-feed/server/casa_broker.py` reports casa's error code, or
+`broker_env_missing` when casa gave the server no broker) is returned as a tool
+error, because casa withholds any non-error result of a capability tool that
+carries no reference. The values the deposit copies from casa are the
+`result_broker` rows of the table above.
 
 `tests/test_server_smoke.py` holds the declaration to the live `tools/list` of a
-launched server. Nothing here is copied from casa as a constant, so the table
-above is unchanged; the component's stated floor stays casa >= v0.155.0, and
-under casa v0.290.0 or later the declaration is what makes any tool but
+launched server. The declaration is why the component's floor is casa >= v0.318.0.
+Under casa v0.290.0 or later, the declaration is what makes any tool but
 `setup_bank_feed` run at all.
 
 ## How this stays true
@@ -151,9 +179,12 @@ to them.
 **Source**
 - `tests/test_component.py`
 - `plugins/bank-feed/server/callbacks.py`
+- `plugins/bank-feed/server/casa_broker.py`
 
 **Tests**
 - `tests/test_component.py`
+- `tests/test_casa_broker.py`
+- `tests/test_server_smoke.py`
 
 **Related**
 - [`architecture/bank-linking.md`](../architecture/bank-linking.md)

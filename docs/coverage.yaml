@@ -14,6 +14,8 @@
   doc: architecture/overview.md
 - item: plugins/bank-feed/server/callbacks.py
   doc: architecture/bank-linking.md
+- item: plugins/bank-feed/server/casa_broker.py
+  doc: reference/casa-compatibility.md
 - item: plugins/bank-feed/server/eb_admin.py
   doc: architecture/credentials.md
 - item: plugins/bank-feed/server/eb_ais.py
@@ -218,6 +220,10 @@
   doc: reference/configuration.md
 - item: env:CASA_BANKFEED_EB_PRIVATE_KEY
   doc: reference/configuration.md
+- item: env:CASA_BROKER_CLIENT
+  doc: reference/casa-compatibility.md
+- item: env:CASA_BROKER_SOCKET
+  doc: reference/casa-compatibility.md
 - item: env:CASA_CALLBACK_SPOOL_ROOT
   doc: reference/configuration.md
 - item: env:CASA_HOST_ID
