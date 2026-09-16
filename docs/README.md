@@ -25,7 +25,7 @@ Start with the row that matches what you are about to change.
 | the Firebase sign-in exchange, the token cache, or the control-panel credential | [`reference/enable-banking-credentials.md`](reference/enable-banking-credentials.md) |
 | the commit guard, the identifier scan, or its exception list | [`contributing/protecting-account-data.md`](contributing/protecting-account-data.md) |
 | the component layout, the plugin split, or how a tool call is dispatched | [`architecture/overview.md`](architecture/overview.md) |
-| the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, or hook installation | [`contributing/publication-guards.md`](contributing/publication-guards.md) |
+| the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, hook installation, or the release-tag route | [`contributing/publication-guards.md`](contributing/publication-guards.md) |
 | the documentation rules, the corpus verifier, or the coverage ledger | [`contributing/doc-contract.md`](contributing/doc-contract.md) |
 | the setup tools, the reconcile ladder, or what setup provisions | [`reference/setup-flow.md`](reference/setup-flow.md) |
 <!-- END ROUTING -->

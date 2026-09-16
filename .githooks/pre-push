@@ -244,7 +244,12 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
   # ONLY branch updates are publishable through this hook.
   #
   #   refs/tags/*   - a tag publishes its annotation, its tagger identity and its name,
-  #                   none of them a commit and none covered by any sweep here.
+  #                   none of them a commit and none covered by any sweep here. This
+  #                   repository does not tag locally: .github/workflows/release.yml
+  #                   pushes the version's lightweight tag from CI, with the one
+  #                   deploy key, once both scans have passed on main; the rulesets
+  #                   refuse tag creation to everyone but a deploy key, tag mutation
+  #                   to everyone, and keep that key from touching any branch.
   #   anything else - an arbitrary namespace such as refs/archive/* can carry an object
   #                   that is already reachable, so it introduces no commits and would
   #                   slip past the enumeration below entirely.

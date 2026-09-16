@@ -1,0 +1,144 @@
+# Cut the release tag for a version that reached main — the ONE route by which
+# a tag can exist in this repository.
+#
+# The publication posture is that nothing reaches GitHub that the sweeps have
+# not read. A tag pushed by a person carries an annotation, a tagger identity
+# and a name that no sweep covers, so `.githooks/pre-push` refuses every tag
+# and the repository's rulesets refuse tag creation to every actor except a
+# deploy key, and tag update or deletion to everyone. The only deploy key is
+# `release-tag`, whose private half is a secret of the `release` environment,
+# which only a job running from `main` may enter; its token is read-only. What
+# this job pushes is a lightweight tag — a ref pointing straight at a commit,
+# with no tag object, no annotation and no tagger — whose name is `v` plus the
+# MAJOR.MINOR.PATCH in manifest.json, and nothing else: no GitHub Release, no
+# notes, no text read from the tree. The commit must be on main, and both `ci`
+# and `no account data` must have concluded success on it as push runs of this
+# repository. Branch rulesets keep the same key from creating, updating or
+# deleting any branch, so it is tag-only.
+#
+# The boundary this rests on, stated plainly: every workflow on main is code
+# that passed the push gate, and any workflow on main that declared this
+# environment could read the key. Retrieval is what the environment limits;
+# a key that was copied out of a run is a compromise, and the remedy is to
+# replace the deploy key and the secret.
+name: release
+
+on:
+  workflow_run:
+    workflows: ["ci", "no account data"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag the version on main
+    # Only a push to main of this repository that the triggering workflow
+    # passed. A pull_request run is excluded by event, a run on another
+    # branch by head_branch, a fork by head_repository.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      actions: read # read the other workflow's runs for this commit
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Admit the commit
+        # Fail-closed: every API error is an error. The only quiet exit is
+        # "the other scan has not concluded yet", which happens before any
+        # credential is touched. Sets `eligible=1` for the steps below.
+        id: admit
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+
+          # The tree the version is read from IS the commit the scans passed on.
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          git merge-base --is-ancestor "$SHA" origin/main
+
+          for wf in "ci" "no account data"; do
+            ok=$(gh run list --repo "$R" --workflow "$wf" --commit "$SHA" \
+                   --event push --branch main \
+                   --json conclusion,event,headBranch,headSha \
+                 | jq --arg sha "$SHA" \
+                   '[.[] | select(.conclusion == "success" and .event == "push"
+                                  and .headBranch == "main" and .headSha == $sha)]
+                    | length')
+            if [ "$ok" -lt 1 ]; then
+              echo "'$wf' has no successful push run on main for $SHA yet — nothing to do"
+              exit 0
+            fi
+          done
+
+          # Whole-string validation of a string-typed field: the tag name is
+          # the only text this job publishes, and it is digits and dots.
+          VERSION=$(python3 - <<'PY'
+          import json, re, sys
+          v = json.load(open("manifest.json")).get("version")
+          if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v):
+              sys.exit(f"manifest.json version {v!r} is not MAJOR.MINOR.PATCH")
+          print(v)
+          PY
+          )
+          TAG="v${VERSION}"
+
+          existing=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          if [ -n "$existing" ]; then
+            echo "$TAG already names $existing — the first successful creation among eligible commits wins; not re-tagged"
+            exit 0
+          fi
+          echo "eligible=1" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Push the tag with the release deploy key
+        if: steps.admit.outputs.eligible == '1'
+        env:
+          RELEASE_TAG_KEY: ${{ secrets.RELEASE_TAG_KEY }}
+          TAG: ${{ steps.admit.outputs.tag }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/release-ssh"
+          trap 'rm -rf "$RUNNER_TEMP/release-ssh"' EXIT
+          printf '%s\n' "$RELEASE_TAG_KEY" > "$RUNNER_TEMP/release-ssh/key"
+          # GitHub's published host keys (api.github.com/meta, ssh_keys),
+          # pinned: a host that presents none of them fails closed.
+          cat > "$RUNNER_TEMP/release-ssh/known_hosts" <<'HOSTS'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          HOSTS
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/release-ssh/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/release-ssh/known_hosts"
+          REMOTE="git@github.com:${GITHUB_REPOSITORY}.git"
+
+          # A lightweight tag: the commit sha itself, pushed as a tag ref.
+          # The push result is advisory — the other firing may have won —
+          # so the tag is re-read afterwards and must name a commit on main.
+          # The re-read goes through the checkout's HTTPS remote, which a
+          # public repository answers anonymously; the key is gone by then.
+          git push "$REMOTE" "$SHA:refs/tags/$TAG" || echo "push rejected; checking what exists"
+          rm -f "$RUNNER_TEMP/release-ssh/key"
+          unset GIT_SSH_COMMAND
+          winner=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          [ -n "$winner" ] || { echo "$TAG does not exist after the push" >&2; exit 1; }
+          git merge-base --is-ancestor "$winner" origin/main
+          echo "$TAG -> $winner"
+
+      - name: Remove the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/release-ssh"

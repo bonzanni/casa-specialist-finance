@@ -224,12 +224,13 @@
 
 - doc: contributing/publication-guards.md
   summary: What refuses a commit and a push, how to run each check by hand, and where an exception is declared.
-  when_changing: the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, or hook installation
+  when_changing: the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, hook installation, or the release-tag route
   covers:
     - scripts/deny-sweep.sh
     - scripts/run-gitleaks.sh
     - scripts/setup-dev.sh
     - .githooks/pre-push
+    - .github/workflows/release.yml
     - .githooks/deny-patterns.txt
     - .githooks/gitleaks-allow-sites.txt
     - .gitleaks.toml
