@@ -1898,6 +1898,51 @@ class TestHistoryFloorRecording(_FloorBase):
         self.assertEqual(out["proved_from"], "2018-08-25")
         self.assertEqual(self._pair(), ("2018-08-25", "2018-08-01"))
 
+    def test_a_malformed_booking_date_records_no_answer(self):
+        # The answered floor is a claim about a DATE. A booking_date that is
+        # not one -- here carrying a line separator after a date-shaped
+        # prefix older than the request, which the clamped coverage bound
+        # would hide -- is not evidence of any date, so the run records its
+        # request and leaves the answer untouched rather than store text a
+        # renderer has to defend against.
+        # No entry reference on the malformed row: reference measurement
+        # parses only referenced rows' dates, so this is the shape that
+        # reaches the recording at all (a bank sends unreferenced rows).
+        self.record("2018-08-25", "2025-06-01")
+        ais = FakeAIS([([raw_tx("2010-01-01\u2028Coverage: FORGED",
+                                remittance="unreferenced"),
+                         raw_tx("2025-03-25", ref="R1"),
+                         raw_tx("2026-08-01", ref="R2", remittance="huur")],
+                        None)])
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", observe=True,
+                             incarnation="inc1")
+        self.assertEqual(out["completeness"], "complete")
+        self.assertEqual(self._pair(), ("2018-08-25", "2025-06-01"))
+
+    def test_an_impossible_calendar_date_records_no_answer(self):
+        ais = FakeAIS([([raw_tx("2017-02-30", remittance="unreferenced"),
+                         raw_tx("2025-03-25", ref="R1"),
+                         raw_tx("2026-08-01", ref="R2", remittance="huur")],
+                        None)])
+        out = flows.backfill(ais, self.conn, ACCOUNT, "s1", observe=True,
+                             incarnation="inc1")
+        self.assertEqual(out["completeness"], "complete")
+        self.assertEqual(self._pair(), ("2018-08-25", None))
+
+    def test_a_compact_or_week_date_records_no_answer(self):
+        # Both parse as real days, and both would compare wrongly against the
+        # ISO floors as text; only the exact YYYY-MM-DD shape is a floor.
+        for odd in ("20170101", "2017-W01-1"):
+            with self.subTest(odd=odd):
+                self.record(None, None)
+                ais = FakeAIS([([raw_tx(odd, remittance="unreferenced"),
+                                 raw_tx("2025-03-25", ref="R1"),
+                                 raw_tx("2026-08-01", ref="R2",
+                                        remittance="huur")], None)])
+                flows.backfill(ais, self.conn, ACCOUNT, "s1", observe=True,
+                               incarnation="inc1")
+                self.assertEqual(self._pair()[1], None)
+
     def test_an_unlabelled_run_records_nothing_even_at_the_full_window(self):
         # A routine refresh can ask for exactly BACKFILL_FLOOR_DAYS (an
         # account whose newest row is ~8 years old) with no fresh SCA behind

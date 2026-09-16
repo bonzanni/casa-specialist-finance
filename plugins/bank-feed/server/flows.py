@@ -618,6 +618,27 @@ NOT_RETURNED = "not_returned"
 REQUESTABLE = "requestable"
 
 
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _is_iso_date(value) -> bool:
+    """True only for an exact `YYYY-MM-DD` string naming a real calendar day.
+
+    Two checks, each for what the other lets through. `date.fromisoformat`
+    alone accepts `20170101` and `2017-W01-1`, which name real days but sort
+    wrongly against ISO dates as TEXT, and the floors are compared as text.
+    The pattern alone accepts `2017-02-30`. A date-shaped prefix followed by
+    anything -- a line separator and forged text -- fails both, so that case
+    does not depend on `fullmatch` over `match`."""
+    if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
+        return False
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
 def request_floor(today=None) -> str:
     """The oldest date a full-history fetch made on `today` asks for -- the
     same subtraction `backfill` makes, from the same clock. It advances daily."""
@@ -898,8 +919,18 @@ def backfill(ais, conn, account: dict, session_id: str,
     # `proved_from`: that is floored at `requested_from` for coverage, and a
     # history floor built on it would claim no row older than the request came
     # back when one did.
+    #
+    # And it must BE a date. `proved_from` is clamped to the request, so a
+    # booking_date older than the request never reaches a date parser on the
+    # coverage path, and an unreferenced row never reaches the one in
+    # reference measurement -- a malformed value can arrive here intact. The
+    # answered floor is a claim about a date, so a run that returned any
+    # non-date records no answer at all rather than a floor built on text a
+    # renderer would have to defend against.
     returned = [r["booking_date"] for r in fetched if r.get("booking_date")]
-    answered_from = min(returned) if returned else None
+    answered_from = (min(returned)
+                     if returned and all(_is_iso_date(d) for d in returned)
+                     else None)
 
     # A response never licenses a tombstone interval BY ITSELF, and the licence
     # is withheld UNCONDITIONALLY. `TOMBSTONE_LICENSED_ASPSPS` above records

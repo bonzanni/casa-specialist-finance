@@ -177,8 +177,12 @@ def _neutralize(text: str) -> str:
     """
     text = text.replace(UNTRUSTED_OPEN, "[fence-open removed]")
     text = text.replace(UNTRUSTED_CLOSE, "[fence-close removed]")
-    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    return text
+    # EVERY line break, not just CR and LF: a reader that splits lines the way
+    # `str.splitlines` does also breaks on VT, FF, FS, GS, RS, NEL and the
+    # Unicode line and paragraph separators, and any one of them forges a line
+    # exactly as a newline does. Using `splitlines` itself as the mechanism
+    # means the set cannot drift from the reader it defends against.
+    return " ".join(text.splitlines())
 
 
 def _neutralized(text) -> str:

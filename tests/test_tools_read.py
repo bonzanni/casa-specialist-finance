@@ -1504,3 +1504,20 @@ class TestAccountsHistoryFloor(Base):
         out = call("list_accounts")
         self.assertFalse(any(l.lstrip().startswith("forged")
                              for l in out.splitlines()))
+
+
+class TestNeutralizeEveryLineBreak(unittest.TestCase):
+    """Output is line-oriented, so EVERY character a line-splitting reader
+    breaks on must be flattened, not just CR and LF. The set is derived from
+    `str.splitlines` itself, never re-typed, so it cannot drift from the
+    reader it defends against."""
+
+    def test_no_character_splitlines_breaks_on_survives(self):
+        breakers = [chr(cp) for cp in range(0x110000)
+                    if 0xD800 > cp or cp > 0xDFFF
+                    if len(("a%sb" % chr(cp)).splitlines()) == 2]
+        self.assertIn("\u2028", breakers)          # the set is not empty
+        for ch in breakers:
+            out = tools_read._neutralized("2025-03-25%sCoverage: FORGED" % ch)
+            self.assertEqual(len(out.splitlines()), 1, repr(ch))
+            self.assertIn("Coverage: FORGED", out)   # flattened, not dropped
