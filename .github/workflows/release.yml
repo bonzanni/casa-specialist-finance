@@ -1,0 +1,106 @@
+# Cut the release tag for a version that reached main — the ONE route by which
+# a tag can exist in this repository.
+#
+# The publication posture is that nothing reaches GitHub that the sweeps have
+# not read. A tag pushed by a person carries an annotation, a tagger identity
+# and a name that no sweep covers, so `.githooks/pre-push` refuses every tag
+# and the `no-tag-creation` ruleset refuses tag creation for every actor except
+# the GitHub Actions integration. This job is the only workflow whose token may
+# write, so it is the only thing that integration ever creates a tag as. What
+# it creates is a lightweight tag — a ref pointing straight at a commit, with
+# no tag object, no annotation and no tagger — whose name is `v` plus the
+# MAJOR.MINOR.PATCH in manifest.json, and nothing else: no GitHub Release, no
+# notes, no text read from the tree. The commit must be on main, and both
+# `ci` and `no account data` must have concluded success on it as push runs of
+# this repository. A separate `no-tag-mutation` ruleset with no bypass at all
+# means nothing — this job included — can move or delete a tag afterwards.
+name: release
+
+on:
+  workflow_run:
+    workflows: ["ci", "no account data"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Tag the version on main
+    # Only a push to main of this repository that the triggering workflow
+    # passed. A pull_request run is excluded by event, a run on another
+    # branch by head_branch, a fork by head_repository.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag ref, nothing else
+      actions: read # read the other workflow's runs for this commit
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Tag once both scans concluded success on this exact commit
+        # ONE fail-closed script: every API error is an error, and the only
+        # quiet exit is "the other scan has not concluded yet", which happens
+        # before any write. This job fires once per completed workflow;
+        # whichever firing sees both green creates the tag, and a firing that
+        # loses the race re-reads the tag it lost to and verifies it.
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+
+          # The tree the version is read from IS the commit the scans passed on.
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          git merge-base --is-ancestor "$SHA" origin/main
+
+          for wf in "ci" "no account data"; do
+            ok=$(gh run list --repo "$R" --workflow "$wf" --commit "$SHA" \
+                   --event push --branch main \
+                   --json conclusion,event,headBranch,headSha \
+                 | jq --arg sha "$SHA" \
+                   '[.[] | select(.conclusion == "success" and .event == "push"
+                                  and .headBranch == "main" and .headSha == $sha)]
+                    | length')
+            if [ "$ok" -lt 1 ]; then
+              echo "'$wf' has no successful push run on main for $SHA yet — nothing to do"
+              exit 0
+            fi
+          done
+
+          # Whole-string validation of a string-typed field: the tag name is
+          # the only text this job publishes, and it is digits and dots.
+          VERSION=$(python3 - <<'PY'
+          import json, re, sys
+          v = json.load(open("manifest.json")).get("version")
+          if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v):
+              sys.exit(f"manifest.json version {v!r} is not MAJOR.MINOR.PATCH")
+          print(v)
+          PY
+          )
+          TAG="v${VERSION}"
+
+          existing=$(gh api "repos/$R/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            echo "$TAG already names $existing — the first successful creation among eligible commits wins; not re-tagged"
+            exit 0
+          fi
+
+          if gh api -X POST "repos/$R/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA"; then
+            echo "created $TAG -> $SHA"
+            exit 0
+          fi
+          # The other firing may have won the race: the tag must now exist and
+          # name a commit on main — anything else is a real failure.
+          winner=$(gh api "repos/$R/git/ref/tags/$TAG" --jq .object.sha)
+          git merge-base --is-ancestor "$winner" origin/main
+          echo "$TAG was created concurrently -> $winner"

@@ -129,7 +129,18 @@ not from the checkout, because the answer is about that commit.
 files:
 
 - **Only `refs/heads/*`.** A tag publishes an annotation, a tagger identity and a name,
-  none of them a commit and none covered by any sweep here.
+  none of them a commit and none covered by any sweep here. The one tag route is
+  `.github/workflows/release.yml`, which runs after both `ci` and `no account data` have
+  concluded success on a push to main and creates a lightweight tag — a ref straight to
+  that commit, no tag object, no annotation, no tagger — named `v` plus the
+  MAJOR.MINOR.PATCH in `manifest.json` and nothing else: no GitHub Release, no notes. Two
+  rulesets on the repository hold that shape: `no-tag-creation` refuses tag creation for
+  every actor except the GitHub Actions integration, and `no-tag-mutation` refuses moving
+  or deleting a tag for everyone, that integration included. The release job is the only
+  workflow whose token may write; a workflow that asks for write is a change to who may
+  publish and goes through the same gate as code. What this does not cover: a GitHub
+  Release or its notes is a GitHub-side text surface, like an issue, and nothing here
+  creates or reads one.
 - **The destination branch name**, checked before any commit enumeration. Pushing
   already-published objects under a new name introduces no commits at all, so a check
   placed after the enumeration never runs for the one case it exists for.
@@ -204,6 +215,7 @@ named human gate rather than a machine one.
 - `scripts/run-gitleaks.sh`
 - `scripts/setup-dev.sh`
 - `.githooks/pre-push`
+- `.github/workflows/release.yml`
 - `.githooks/deny-patterns.txt`
 - `.githooks/gitleaks-allow-sites.txt`
 - `.gitleaks.toml`
