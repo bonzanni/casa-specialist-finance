@@ -1842,3 +1842,223 @@ class TestRenewalErasureFence(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT status FROM sessions WHERE session_id='s-new'"
             ).fetchone()[0], "REVIEW_REQUIRED")
+
+
+class _FloorBase(unittest.TestCase):
+    """An account row with a REAL incarnation token, so the fence is live."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = store.open_db(pathlib.Path(self.tmp.name) / "f.sqlite")
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency, aspsp,"
+            " incarnation) VALUES ('acc1','uid-1','s1','EUR','Revolut','inc1')")
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.tmp.cleanup()
+
+    def _pair(self):
+        return tuple(self.conn.execute(
+            "SELECT history_requested_from, history_answered_from FROM accounts"
+            " WHERE account_id='acc1'").fetchone())
+
+    def record(self, requested, answered):
+        self.conn.execute(
+            "UPDATE accounts SET history_requested_from=?,"
+            " history_answered_from=? WHERE account_id='acc1'",
+            (requested, answered))
+
+
+def _deep_pages(*dates):
+    return FakeAIS([([raw_tx(d, ref="R%d" % i, remittance="r%d" % i)
+                      for i, d in enumerate(dates)], None)])
+
+
+class TestHistoryFloorRecording(_FloorBase):
+    """What a full-history fetch asked for and the oldest row it returned.
+
+    TODAY is 2026-08-03, so the deep request is from 2018-08-25 and the
+    run's `end` is 2026-08-04."""
+
+    def test_a_completed_deep_run_records_request_and_oldest_row(self):
+        flows.backfill(_deep_pages("2025-03-25", "2026-08-01"), self.conn,
+                       ACCOUNT, "s1", observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), ("2018-08-25", "2025-03-25"))
+
+    def test_a_row_older_than_the_request_is_recorded_unclamped(self):
+        # Coverage stays clamped at the request; the answered floor must not
+        # be, or it would claim no row older than 2018-08-25 came back when
+        # one did.
+        out = flows.backfill(_deep_pages("2018-08-01", "2026-08-01"),
+                             self.conn, ACCOUNT, "s1", observe=True,
+                             incarnation="inc1")
+        self.assertEqual(out["proved_from"], "2018-08-25")
+        self.assertEqual(self._pair(), ("2018-08-25", "2018-08-01"))
+
+    def test_an_unlabelled_run_records_nothing_even_at_the_full_window(self):
+        # A routine refresh can ask for exactly BACKFILL_FLOOR_DAYS (an
+        # account whose newest row is ~8 years old) with no fresh SCA behind
+        # it. The label, not the window size, is what makes a fetch recorded.
+        out = flows.backfill(_deep_pages("2020-01-01", "2026-08-01"),
+                             self.conn, ACCOUNT, "s1",
+                             floor_days=flows.BACKFILL_FLOOR_DAYS,
+                             incarnation="inc1")
+        self.assertEqual(out["completeness"], "complete")
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_a_shallow_deep_run_records_nothing(self):
+        out = flows.backfill(_deep_pages("2026-05-05", "2026-08-01"),
+                             self.conn, ACCOUNT, "s1", observe=True,
+                             incarnation="inc1")
+        self.assertTrue(out["shallow"])
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_the_shallow_line_is_the_same_line_backfill_reports(self):
+        # Exactly SHALLOW_SPAN_DAYS of span is not shallow and records; one
+        # day less is shallow and does not. Both sides, so the recording gate
+        # cannot drift from `shallow` by a day unnoticed.
+        end = dt.date(2026, 8, 4)
+        at = (end - dt.timedelta(days=flows.SHALLOW_SPAN_DAYS)).isoformat()
+        out = flows.backfill(_deep_pages(at), self.conn, ACCOUNT, "s1",
+                             observe=True, incarnation="inc1")
+        self.assertFalse(out["shallow"])
+        self.assertEqual(self._pair(), ("2018-08-25", at))
+
+    def test_one_day_inside_the_shallow_line_records_nothing(self):
+        end = dt.date(2026, 8, 4)
+        at = (end - dt.timedelta(days=flows.SHALLOW_SPAN_DAYS - 1)).isoformat()
+        out = flows.backfill(_deep_pages(at), self.conn, ACCOUNT, "s1",
+                             observe=True, incarnation="inc1")
+        self.assertTrue(out["shallow"])
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_an_empty_deep_run_records_the_request_only(self):
+        flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
+                       observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), ("2018-08-25", None))
+
+    def test_an_empty_run_keeps_an_answer_already_recorded(self):
+        self.record("2018-01-01", "2025-03-25")
+        flows.backfill(FakeAIS([([], None)]), self.conn, ACCOUNT, "s1",
+                       observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), ("2018-01-01", "2025-03-25"))
+
+    def test_a_capped_run_records_nothing(self):
+        out = flows.backfill(EndlessAIS(), self.conn, ACCOUNT, "s1",
+                             observe=True, incarnation="inc1")
+        self.assertTrue(out["capped"])
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_a_failed_run_records_nothing(self):
+        with self.assertRaises(OSError):
+            flows.backfill(BrokenAIS(), self.conn, ACCOUNT, "s1",
+                           observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_minima_are_kept_independently_across_runs(self):
+        self.record("2018-01-01", "2025-06-01")
+        flows.backfill(_deep_pages("2025-03-25", "2026-08-01"), self.conn,
+                       ACCOUNT, "s1", observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), ("2018-01-01", "2025-03-25"))
+
+    def test_a_later_shallower_answer_does_not_raise_the_floor(self):
+        self.record("2018-08-25", "2020-01-01")
+        flows.backfill(_deep_pages("2025-03-25", "2026-08-01"), self.conn,
+                       ACCOUNT, "s1", observe=True, incarnation="inc1")
+        self.assertEqual(self._pair(), ("2018-08-25", "2020-01-01"))
+
+    def test_a_stale_incarnation_records_nothing(self):
+        out = flows.backfill(_deep_pages("2025-03-25", "2026-08-01"),
+                             self.conn, ACCOUNT, "s1", observe=True,
+                             incarnation="another-life")
+        self.assertTrue(out["erased"])
+        self.assertEqual(self._pair(), (None, None))
+
+    def test_the_pair_rolls_back_with_its_transaction(self):
+        real = apply.apply_plan
+
+        def failing(conn, aid, plan, pre_apply=None):
+            def hook(c):
+                pre_apply(c)
+                raise RuntimeError("the transaction dies after the hook ran")
+            return real(conn, aid, plan, pre_apply=hook)
+
+        apply.apply_plan = failing
+        try:
+            with self.assertRaises(RuntimeError):
+                flows.backfill(_deep_pages("2025-03-25", "2026-08-01"),
+                               self.conn, ACCOUNT, "s1", observe=True,
+                               incarnation="inc1")
+        finally:
+            apply.apply_plan = real
+        self.assertEqual(self._pair(), (None, None))
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM transactions").fetchone()[0], 0)
+
+
+class TestRenewalReach(_FloorBase):
+    """F on TODAY (2026-08-03) is 2018-08-25."""
+
+    def reach(self, start, end):
+        return flows.renewal_reach(self.conn, "acc1", start, end, today=TODAY)
+
+    def test_the_request_floor_counts_back_from_the_same_clock(self):
+        self.assertEqual(flows.request_floor(TODAY), "2018-08-25")
+        self.assertEqual(flows.request_floor(), "2018-08-25")
+
+    def test_unrecorded_splits_only_at_the_request_floor(self):
+        self.assertEqual(self.reach("2018-01-01", "2019-01-01"), [
+            ("2018-01-01", "2018-08-25", flows.BEYOND_REQUEST),
+            ("2018-08-25", "2019-01-01", flows.REQUESTABLE)])
+
+    def test_recorded_splits_at_the_floor_and_the_answer(self):
+        self.record("2018-08-25", "2025-03-25")
+        self.assertEqual(self.reach("2018-01-01", "2025-06-01"), [
+            ("2018-01-01", "2018-08-25", flows.BEYOND_REQUEST),
+            ("2018-08-25", "2025-03-25", flows.NOT_RETURNED),
+            ("2025-03-25", "2025-06-01", flows.REQUESTABLE)])
+
+    def test_an_answer_older_than_today_floor_adds_no_not_returned(self):
+        self.record("2018-01-01", "2018-06-01")
+        self.assertEqual(self.reach("2018-01-01", "2019-01-01"), [
+            ("2018-01-01", "2018-08-25", flows.BEYOND_REQUEST),
+            ("2018-08-25", "2019-01-01", flows.REQUESTABLE)])
+
+    def test_a_request_without_an_answer_is_not_recorded(self):
+        self.record("2018-08-25", None)
+        self.assertIsNone(flows.history_floor(self.conn, "acc1"))
+        self.assertEqual(self.reach("2019-01-01", "2020-01-01"), [
+            ("2019-01-01", "2020-01-01", flows.REQUESTABLE)])
+
+    def test_boundaries_are_half_open(self):
+        self.record("2018-08-25", "2025-03-25")
+        self.assertEqual(self.reach("2025-03-25", "2025-03-26"), [
+            ("2025-03-25", "2025-03-26", flows.REQUESTABLE)])
+        self.assertEqual(self.reach("2025-03-24", "2025-03-25"), [
+            ("2025-03-24", "2025-03-25", flows.NOT_RETURNED)])
+        self.assertEqual(self.reach("2018-08-24", "2018-08-25"), [
+            ("2018-08-24", "2018-08-25", flows.BEYOND_REQUEST)])
+        self.assertEqual(self.reach("2018-08-25", "2018-08-26"), [
+            ("2018-08-25", "2018-08-26", flows.NOT_RETURNED)])
+
+    def test_an_empty_range_has_no_segments(self):
+        self.record("2018-08-25", "2025-03-25")
+        self.assertEqual(self.reach("2020-01-01", "2020-01-01"), [])
+
+    def test_the_floor_advances_with_the_date(self):
+        self.record("2018-08-25", "2025-03-25")
+        later = dt.date(2026, 8, 10)
+        self.assertEqual(
+            flows.renewal_reach(self.conn, "acc1", "2018-08-25",
+                                "2018-09-10", today=later),
+            [("2018-08-25", "2018-09-01", flows.BEYOND_REQUEST),
+             ("2018-09-01", "2018-09-10", flows.NOT_RETURNED)])
+
+    def test_an_unknown_account_is_unrecorded(self):
+        self.assertEqual(
+            flows.renewal_reach(self.conn, "nope", "2019-01-01", "2019-02-01",
+                                today=TODAY),
+            [("2019-01-01", "2019-02-01", flows.REQUESTABLE)])

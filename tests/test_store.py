@@ -1357,3 +1357,64 @@ class TestSchemaV6EarnedTrust(unittest.TestCase):
             self.assertTrue(provenance.capability(
                 conn, "Revolut", "acc1")["ref_stable"])
             conn.close()
+
+
+class TestSchemaV7HistoryFloor(unittest.TestCase):
+    """v7: how far back full-history fetches asked, and the oldest row they
+    returned. Two nullable columns on `accounts`; NULL means "not recorded",
+    which every reader treats as saying nothing."""
+
+    COLS = ("history_requested_from", "history_answered_from")
+
+    def _cols(self, conn):
+        return {r[1] for r in conn.execute("PRAGMA table_info(accounts)")}
+
+    def _v6_db(self, path, drop=True):
+        # `_SCHEMA` already carries the v7 columns, so a GENUINE v6 file has
+        # to have them taken away again; without the DROP this would only
+        # ever exercise the "column already present" arm of the migration.
+        conn = sqlite3.connect(path)
+        conn.executescript(store._SCHEMA)
+        if drop:
+            for col in self.COLS:
+                conn.execute("ALTER TABLE accounts DROP COLUMN %s" % col)
+        conn.execute("INSERT INTO accounts(account_id, incarnation)"
+                     " VALUES ('acc1', 'tok1')")
+        conn.execute("INSERT OR REPLACE INTO meta(key, value)"
+                     " VALUES ('schema_version', '6')")
+        conn.commit()
+        conn.close()
+
+    def test_a_fresh_file_has_both_columns(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = store.open_db(pathlib.Path(d) / "f.sqlite")
+            self.assertLessEqual(set(self.COLS), self._cols(conn))
+            conn.close()
+
+    def test_a_genuine_v6_file_gains_both_columns_as_null(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v6_db(path)
+            probe = sqlite3.connect(path)
+            self.assertFalse(set(self.COLS) & self._cols(probe),
+                             "the fixture must start without the columns")
+            probe.close()
+            conn = store.open_db(path)
+            self.assertLessEqual(set(self.COLS), self._cols(conn))
+            row = conn.execute(
+                "SELECT history_requested_from, history_answered_from,"
+                " incarnation FROM accounts").fetchone()
+            self.assertEqual(tuple(row), (None, None, "tok1"))
+            self.assertEqual(conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()[0], str(store.SCHEMA_VERSION))
+            self.assertEqual(store.SCHEMA_VERSION, 7)
+            conn.close()
+
+    def test_a_v6_stamp_over_columns_already_present_migrates(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v6_db(path, drop=False)
+            conn = store.open_db(path)
+            self.assertLessEqual(set(self.COLS), self._cols(conn))
+            conn.close()

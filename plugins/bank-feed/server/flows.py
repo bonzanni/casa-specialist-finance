@@ -602,6 +602,79 @@ def _proven_lower_bound(fetched: list, requested_from: str) -> str | None:
     return max(requested_from, min(dates)) if dates else None
 
 
+#: What a renewal can do about a span of history, as `renewal_reach` tags it.
+#: Three names rather than a boolean because the tools word each differently
+#: and only one of them is a certainty.
+#:
+#: BEYOND_REQUEST  before `request_floor()`: no link or renewal made today
+#:                 REQUESTS it. Certain, from the constant -- but whether a bank
+#:                 returns older rows anyway is not, so nothing may say "cannot".
+#: NOT_RETURNED    at or after the floor and before the oldest row any recorded
+#:                 full-history fetch returned: requested before, answered with
+#:                 nothing. A prediction about the next answer, worded as one.
+#: REQUESTABLE     everything else: a renewal requests it and may return it.
+BEYOND_REQUEST = "beyond_request"
+NOT_RETURNED = "not_returned"
+REQUESTABLE = "requestable"
+
+
+def request_floor(today=None) -> str:
+    """The oldest date a full-history fetch made on `today` asks for -- the
+    same subtraction `backfill` makes, from the same clock. It advances daily."""
+    return ((today or _today())
+            - dt.timedelta(days=BACKFILL_FLOOR_DAYS)).isoformat()
+
+
+def history_floor(conn, account_id: str):
+    """`(requested_from, answered_from)` when both are recorded, else None.
+
+    A recorded request with no recorded answer is None: every fetch that asked
+    came back empty, and "asked and got nothing" is dormant-or-truncated, the
+    same indistinguishable pair that records no coverage. Nothing downstream
+    may treat it as evidence about older history.
+    """
+    row = conn.execute(
+        "SELECT history_requested_from, history_answered_from FROM accounts"
+        " WHERE account_id=?", (account_id,)).fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None
+    return str(row[0]), str(row[1])
+
+
+def renewal_reach(conn, account_id: str, start: str, end: str,
+                  today=None) -> list:
+    """Split `[start, end)` into contiguous `(seg_start, seg_end, kind)`
+    segments by what a renewal made on `today` could do about each.
+
+    Half-open like `coverage`; an empty range has no segments, and adjacent
+    segments never share a kind. The cuts are the request floor and, when
+    recorded, the answered floor.
+    """
+    floor = request_floor(today)
+    recorded = history_floor(conn, account_id)
+    cuts = {floor}
+    if recorded is not None:
+        cuts.add(recorded[1])
+    out, cursor = [], start
+    for cut in sorted(c for c in cuts if start < c < end) + [end]:
+        if cursor < cut:
+            if cursor < floor:
+                kind = BEYOND_REQUEST
+            elif recorded is not None and cursor < recorded[1]:
+                kind = NOT_RETURNED
+            else:
+                kind = REQUESTABLE
+            if out and out[-1][2] == kind:
+                # A cut that does not change the kind (an answered floor
+                # older than today's request floor) must not split a segment:
+                # each segment is one line of prose to the operator.
+                out[-1] = (out[-1][0], cut, kind)
+            else:
+                out.append((cursor, cut, kind))
+            cursor = cut
+    return out
+
+
 def backfill(ais, conn, account: dict, session_id: str,
              floor_days: int = BACKFILL_FLOOR_DAYS,
              observe: bool = False, *, incarnation) -> dict:
@@ -807,6 +880,27 @@ def backfill(ais, conn, account: dict, session_id: str,
     proved_from = _proven_lower_bound(fetched, requested_from)
     proved_to = None if proved_from is None else end
 
+    span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
+                                          - dt.date.fromisoformat(proved_from)).days
+    # "Under 180 days" and "nothing at all" are DIFFERENT findings and must not
+    # share one signal. An account that proved nothing has not missed a window
+    # -- there is no window to miss -- and treating it as shallow durably tells
+    # the operator to re-link a bank that has nothing to re-link: doing that to
+    # a genuinely dormant account reproduces the same nothing, and nothing
+    # would ever clear the note again. Only a NONZERO but short proven span is
+    # "shallow".
+    shallow = proved_from is not None and span < SHALLOW_SPAN_DAYS
+    # Computed HERE, before the apply transaction, because the history floor
+    # is recorded inside that transaction and must not record a shallow answer
+    # (see `_evidence_and_revalidate`).
+    #
+    # The oldest row the provider actually RETURNED, unclamped. Not
+    # `proved_from`: that is floored at `requested_from` for coverage, and a
+    # history floor built on it would claim no row older than the request came
+    # back when one did.
+    returned = [r["booking_date"] for r in fetched if r.get("booking_date")]
+    answered_from = min(returned) if returned else None
+
     # A response never licenses a tombstone interval BY ITSELF, and the licence
     # is withheld UNCONDITIONALLY. `TOMBSTONE_LICENSED_ASPSPS` above records
     # that no ASPSP has the measured capability which would justify one — but
@@ -855,6 +949,28 @@ def backfill(ais, conn, account: dict, session_id: str,
             raise apply.AccountErased(
                 "account %s was erased while this run was fetching; nothing "
                 "from the fetch may land" % aid, aid)
+        if observe and not shallow:
+            # THE HISTORY FLOOR (issue #23): how far back this full-history
+            # fetch asked and the oldest row it returned, folded into two
+            # independent running minima. Inside this transaction, after the
+            # fence, so it lands with the run's rows or not at all.
+            #
+            # Gated on the LABEL, not on `floor_days`: a routine refresh can
+            # ask for exactly BACKFILL_FLOOR_DAYS with no fresh SCA behind it,
+            # and what the tools say about a renewal rests on what a renewal-
+            # shaped fetch was answered. Not on a shallow answer either: that
+            # is the missed-window signature whose remedy IS a re-link, and
+            # recording it would let the tools advise against that re-link.
+            # An empty answer records the request and leaves the answer alone.
+            c.execute(
+                "UPDATE accounts SET history_requested_from ="
+                " MIN(COALESCE(history_requested_from, ?), ?),"
+                " history_answered_from = CASE WHEN ? IS NULL"
+                " THEN history_answered_from"
+                " ELSE MIN(COALESCE(history_answered_from, ?), ?) END"
+                " WHERE account_id=? AND incarnation=?",
+                (requested_from, requested_from, answered_from, answered_from,
+                 answered_from, aid, incarnation))
         if observe:
             # The labelled deep run files its observation whatever it saw --
             # a zero-row dormant account included: "measured, and nothing"
@@ -886,17 +1002,6 @@ def backfill(ais, conn, account: dict, session_id: str,
         # provider, plan, database — keeps its meaning and propagates. The
         # rollback already unwound rows, evidence and allocations together.
         return _erased(pages)
-
-    span = 0 if proved_from is None else (dt.date.fromisoformat(proved_to)
-                                          - dt.date.fromisoformat(proved_from)).days
-    # "Under 180 days" and "nothing at all" are DIFFERENT findings and must not
-    # share one signal. An account that proved nothing has not missed a window
-    # -- there is no window to miss -- and treating it as shallow durably tells
-    # the operator to re-link a bank that has nothing to re-link: doing that to
-    # a genuinely dormant account reproduces the same nothing, and nothing
-    # would ever clear the note again. Only a NONZERO but short proven span is
-    # "shallow".
-    shallow = proved_from is not None and span < SHALLOW_SPAN_DAYS
 
     if proved_from is not None:
         # AFTER the rows are durably committed: coverage attests to the ledger,
