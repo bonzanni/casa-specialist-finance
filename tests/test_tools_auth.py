@@ -976,6 +976,37 @@ class TestRenewal(Base):
         self.assertIn("carry forward", out)
         self.assertIn("https://tpp.enablebanking.com/auth?x=1", out)
 
+    def _renewal_with_floor(self, requested, answered):
+        real = flows._today
+        flows._today = lambda: datetime.date(2026, 8, 3)     # floor 2018-08-25
+        self.addCleanup(setattr, flows, "_today", real)
+        self._linked()
+        self.raw.execute(
+            "UPDATE accounts SET history_requested_from=?,"
+            " history_answered_from=? WHERE account_id=?",
+            (requested, answered, self.expected_account_id()))
+        return call("link_bank", aspsp="Rabobank", country="NL",
+                    psu_type="personal")
+
+    def test_a_renewal_says_it_is_not_expected_to_reach_older_history(self):
+        out = self._renewal_with_floor("2018-08-25", "2025-03-25")
+        line = [l for l in out.splitlines()
+                if l.startswith("Renewing is not expected")]
+        self.assertEqual(len(line), 1, out)
+        self.assertIn("history older than 2025-03-25", line[0])
+        self.assertIn("asked back to 2018-08-25", line[0])
+        self.assertIn("from 2018-08-25 onward", line[0])
+        self.assertNotIn("cannot", line[0])
+        self.assertIn("https://tpp.enablebanking.com/auth?x=1", out)
+
+    def test_an_answer_below_the_request_floor_adds_no_line(self):
+        out = self._renewal_with_floor("2018-01-01", "2018-06-01")
+        self.assertNotIn("Renewing is not expected", out)
+
+    def test_an_unrecorded_account_adds_no_line(self):
+        out = self._renewal_with_floor(None, None)
+        self.assertNotIn("Renewing is not expected", out)
+
     def test_an_exact_match_renewal_switches_the_binding_and_retires_the_old(self):
         # The requirement, end to end: two taps and everything keeps working.
         self._linked()
@@ -1557,6 +1588,13 @@ class TestRenewalWhenTheBankChangesTheAccountSet(Base):
 class TestCoverageGapReporting(Base):
     """The line fires only when something actionable is missing."""
 
+    def _pin_flows_today(self):
+        # A renewal's request floor counts back from `flows._today`; pinned so
+        # these dates keep their meaning as the calendar moves.
+        real = flows._today
+        flows._today = lambda: datetime.date(2026, 8, 3)
+        self.addCleanup(setattr, flows, "_today", real)
+
     def test_a_contiguous_account_reports_no_gap(self):
         # It used to ask apply.holes about 1970 onwards, while the deepest
         # history any authorization can reach is BACKFILL_FLOOR_DAYS (2900) --
@@ -1599,6 +1637,35 @@ class TestCoverageGapReporting(Base):
         self.assertIn("2021-01-01", out)
         self.assertIn("2024-01-01", out)
         self.assertNotIn("1970-01-01", out)
+
+    def test_an_interior_gap_the_bank_never_returned_is_not_promised_to_renewal(self):
+        self._pin_flows_today()
+        # The gap sits above today's request floor but below the oldest row
+        # any full-history fetch returned: a renewal requests it, and the
+        # earlier answers say it is not expected to come back.
+        self.account()
+        self.covered("acc1", "2020-01-01", "2021-01-01")
+        self.covered("acc1", "2024-01-01", "2026-08-01")
+        self.raw.execute(
+            "UPDATE accounts SET history_requested_from='2018-10-01',"
+            " history_answered_from='2023-01-01' WHERE account_id='acc1'")
+        out = call("consent_status")
+        gap = [ln for ln in out.splitlines() if "coverage gap" in ln]
+        self.assertEqual(len(gap), 1, out)
+        self.assertIn("returned nothing older than 2023-01-01", gap[0])
+        self.assertIn("not expected to fill", gap[0])
+        self.assertNotIn("closed at the next renewal", gap[0])
+
+    def test_an_interior_gap_with_nothing_recorded_may_be_closed_by_renewal(self):
+        self._pin_flows_today()
+        self.account()
+        self.covered("acc1", "2020-01-01", "2021-01-01")
+        self.covered("acc1", "2024-01-01", "2026-08-01")
+        out = call("consent_status")
+        gap = [ln for ln in out.splitlines() if "coverage gap" in ln]
+        self.assertEqual(len(gap), 1, out)
+        self.assertIn("may close it", gap[0])
+        self.assertNotIn("closed at the next renewal", gap[0])
 
     def test_the_happy_path_link_does_not_end_by_asking_for_more_sca_taps(self):
         # The reproduction that made this a Major: link a bank, collect it
