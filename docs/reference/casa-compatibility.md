@@ -34,6 +34,10 @@ compared against the real symbol. Without a checkout, the suite checks only that
 the copies and this table agree with each other — which catches drift between
 them, and nothing about casa.
 
+`tx-classifier` declares its classification workflow as a background job
+(`casa.jobs`); casa v0.321.0 is the first that reads that key, and an older one
+ignores it, so the declaration raises nothing and the floor below is unchanged.
+
 The component **requires casa >= v0.318.0**. The environment-declaration rows below
 do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
 outright: `link_bank` declares `delivers` (below), a member an older casa's

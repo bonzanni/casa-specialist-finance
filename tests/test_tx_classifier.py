@@ -29,14 +29,19 @@ class TestManifest(unittest.TestCase):
         self.assertTrue(man["version"])
         self.assertTrue(man["description"])
 
-    def test_manifest_declares_no_casa_keys(self):
+    def test_manifest_declares_only_the_job(self):
         # Skill-only plugin: bank-feed presence is guaranteed by the bundle
         # itself plus the role's requires: launch gate — casa has no
-        # plugin-dependency manifest field. A casa.* block appearing means
-        # someone started adding server-side machinery: the design forbids
-        # that.
+        # plugin-dependency manifest field. The ONE casa key this plugin may
+        # declare is `jobs`, which names a skill and nothing else (casa
+        # v0.321.0). Any other casa.* key means someone started adding
+        # server-side machinery: the design forbids that.
         man = json.loads(MANIFEST.read_text(encoding="utf-8"))
-        self.assertNotIn("casa", man)
+        self.assertEqual(list(man.get("casa", {})), ["jobs"])
+        self.assertEqual([job["skill"] for job in man["casa"]["jobs"]],
+                         ["classify-transactions"])
+        self.assertTrue((PLUGIN / "skills" / "classify-transactions"
+                         / "SKILL.md").is_file())
 
     def test_no_mcp_json_anywhere(self):
         # Zero server code. An .mcp.json would make casa derive
