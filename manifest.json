@@ -1,7 +1,7 @@
 {
   "api_version": "casa.specialist-component/v1",
   "component_id": "casa/finance",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "default_persona": {
     "ref": "casa/alex@0.1.0",
     "checksum": "sha256:5567536c118d74e0d1bfe45aaa19dd6398ad7977eb2831ec73d55ddddbc43bce"
@@ -24,7 +24,7 @@
     {
       "kind": "plugin/implementation",
       "identifier": "tx-classifier",
-      "digest": "sha256:35d5cd5b69726c29224175f121d28f909eb1dc4fb07cdb14502760747a5ea898",
+      "digest": "sha256:4b2882f86427ba62f7bf949545f0c88818fc1bb1c4f5b2e497e4e497c3803044",
       "source": {
         "type": "bundled",
         "path": "plugins/tx-classifier"

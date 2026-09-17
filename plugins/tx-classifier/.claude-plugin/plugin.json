@@ -1,6 +1,16 @@
 {
   "name": "tx-classifier",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Transaction-classification workflow for the casa finance specialist — a skill-only plugin that classifies bank-feed transactions, maintains the deterministic auto-tagging rulebook, and runs the parked-row operator Q&A. No server, no storage: all durable state lives in bank-feed (queue, workflow tags, notes, rule rationales). Ships bundled with the finance specialist beside bank-feed.",
-  "author": {"name": "Nicola Bonzanni"}
+  "author": {"name": "Nicola Bonzanni"},
+  "casa": {
+    "jobs": [{
+      "name": "classify-transactions",
+      "skill": "classify-transactions",
+      "title": "Classify transactions",
+      "summary": "Tag untagged transactions in batches, park the ones that need the operator, keep the rulebook current",
+      "batches": "unlimited",
+      "turnsPerBatch": 30
+    }]
+  }
 }
