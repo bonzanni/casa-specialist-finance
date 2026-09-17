@@ -2,9 +2,11 @@
 
 > Code is the source of truth. This file is a map; when it and the code disagree, the code wins.
 
-There is exactly **one** thing an installer must choose: which 1Password vault the
-plugin may use. Everything else is either provided by casa, forged by the plugin at
-setup, or an explicit break-glass override.
+There is **nothing** an installer must choose for this plugin. The one choice it
+depends on — which 1Password vault it may use — is made once in casa, through casa's
+`onepassword_default_vault` app option, and reaches the plugin as
+`ONEPASSWORD_DEFAULT_VAULT`. Everything else is either provided by casa, forged by the
+plugin at setup, an optional override, or an explicit break-glass value.
 
 Regenerate the list this page describes with:
 
@@ -42,8 +44,9 @@ because they are different halves of the contract and either can rot alone.
 
 | Variable | Set by | Absent means |
 |---|---|---|
-| `BANKFEED_OP_VAULT` | the installer — **the one choice** | the vault seam refuses; nothing can be read or forged |
-| `OP_SERVICE_ACCOUNT_TOKEN` | the operator's environment | the vault command-line tool cannot authenticate |
+| `ONEPASSWORD_DEFAULT_VAULT` | casa, from its `onepassword_default_vault` app option — **the vault** | casa withholds the plugin; without a vault the seam refuses and nothing can be read or forged |
+| `BANKFEED_OP_VAULT` | the operator, only to use a different vault than casa's default | the normal path: casa's default vault is used |
+| `OP_SERVICE_ACCOUNT_TOKEN` | casa, from its `onepassword_service_account_token` app option | the vault command-line tool cannot authenticate |
 | `CASA_BANKFEED_EB_PRIVATE_KEY` | forged by setup; wired by casa's configurator on setup's instruction | no signing key; the data API cannot be called |
 | `CASA_BANKFEED_EB_APP_ID` | discovered by setup; wired by casa's configurator on setup's instruction | no application identity to sign as |
 | `CASA_BANKFEED_EB_CP_TOKEN` | the operator, break-glass only | the normal path: the stored refresh token is used instead |
@@ -57,9 +60,30 @@ and the server restarts with it, casa reports the two declared credentials
 `unprovisioned`: that is the designed handoff mid-flight, not a setup step that claimed
 success and failed to deliver. `setup-flow.md` states the contract.
 
-**An empty `BANKFEED_OP_VAULT` is the same as an unset one.** Both are absent, and the
-seam refuses rather than guessing a name — a wrong vault name is not a failure anyone
-would notice quickly.
+**The vault is resolved in one place, `opvault.py`'s `_vault()`:** `BANKFEED_OP_VAULT`
+when it is set and non-empty, otherwise `ONEPASSWORD_DEFAULT_VAULT`. An empty value of
+either is the same as an unset one — `.mcp.json` wires the override as
+`${BANKFEED_OP_VAULT:-}`, so an install that never set it hands the server an empty
+string, and that falls through to casa's default. With neither set, the seam refuses
+rather than guessing a name — a wrong vault name is not a failure anyone would notice
+quickly — and its refusal names both the app option and the override.
+
+**Both vault variables are plain settings, never secrets.** A vault name is where
+secrets live, not one of them, so neither is wired from a vault item. Casa's
+install-time vault exploration still runs for the two `casa.setupProvides`
+credentials, which nothing here wires; the vault name itself is no longer
+something an install must ask about. `ONEPASSWORD_DEFAULT_VAULT` is a bare reference on purpose: casa
+withholds the plugin until a default vault is configured, which is correct rather than
+a deadlock, because a plugin loaded without a vault could only answer every vault step
+"1Password unreachable".
+
+**The override does not stand alone.** casa's withholding gate reads the bare
+reference, so `onepassword_default_vault` must be set for the plugin to load at all —
+`BANKFEED_OP_VAULT` then chooses a DIFFERENT vault, it does not substitute for the app
+option. An install upgrading from 0.7.0 that wired the override while leaving the app
+option empty is withheld until the option is set, and casa's remediation names that
+option. Accepting either variable alone would need casa to express "one of these two",
+which no manifest declaration does today.
 
 **`BANKFEED_EB_ENVIRONMENT` unset or empty means production.** Sandbox is entered only
 by asking for it explicitly at install time. An *unrecognised* value is not a fallback

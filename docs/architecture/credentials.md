@@ -81,8 +81,10 @@ target. Everything shaped like a vault call lives there so its rules exist in on
 - key items are generate-once — editing one is refused by the tool — which is why there
   is a create call and no rotation call.
 
-The vault name is the plugin's one configuration element, `BANKFEED_OP_VAULT`. See
-`../reference/configuration.md` for what an empty value means and who sets it.
+The vault name comes from casa's `ONEPASSWORD_DEFAULT_VAULT` (its
+`onepassword_default_vault` app option), with `BANKFEED_OP_VAULT` as an optional
+override; `_vault()` is the one place that choice is made. See
+`../reference/configuration.md` for what an empty value means and who sets each.
 
 ## Mode
 

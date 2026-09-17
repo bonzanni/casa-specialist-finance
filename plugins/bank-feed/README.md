@@ -40,7 +40,7 @@ assistant; `docs/reference/casa-compatibility.md` says how.
 Every entry has a KEY and a reference. The **key** is what this server reads
 out of `os.environ`. The **reference** is the name casa resolves out of
 `plugin-env.conf` — the name `set_plugin_env_reference` writes and
-`verify_plugin_state` grades. For four of the six they are the same string;
+`verify_plugin_state` grades. For five of the seven they are the same string;
 for the two `casa.setupProvides` credentials they are not, because casa
 reserves the `CASA_PLUGIN_` prefix for declared names (a declared name is
 bound for the whole session, so the namespace is fenced). **Wire the
@@ -52,7 +52,8 @@ reference.**
 | `CASA_BANKFEED_EB_APP_ID` | `CASA_PLUGIN_BANKFEED_EB_APP_ID` | declared `setupProvides` — loads, reports `unprovisioned` |
 | `CASA_BANKFEED_EB_CP_TOKEN` | `CASA_BANKFEED_EB_CP_TOKEN` | optional (its reference carries an empty default) — loads, no row at all |
 | `BANKFEED_EB_ENVIRONMENT` | `BANKFEED_EB_ENVIRONMENT` | optional (empty default) — loads as PRODUCTION |
-| `BANKFEED_OP_VAULT` | `BANKFEED_OP_VAULT` | **withholds the plugin** |
+| `BANKFEED_OP_VAULT` | `BANKFEED_OP_VAULT` | optional (empty default) — loads, uses casa's default vault |
+| `ONEPASSWORD_DEFAULT_VAULT` | *(not here)* — casa exports it from the `onepassword_default_vault` app option | **withholds the plugin** |
 | `OP_SERVICE_ACCOUNT_TOKEN` | *(not here)* — casa exports it from the `onepassword_service_account_token` app option | **withholds the plugin** |
 
 - `CASA_BANKFEED_EB_PRIVATE_KEY` — the Enable Banking application's PKCS#8
@@ -73,10 +74,17 @@ reference.**
   empty) or `SANDBOX`. Its reference carries an EMPTY default, never
   `sandbox`: a non-empty one would silently put a production install in the
   wrong world.
-- `BANKFEED_OP_VAULT` — the 1Password vault, the plugin's one configuration
-  element. Neither declared nor defaulted: `opvault.status()` refuses without
-  it, so being withheld until it is wired is correct rather than a deadlock.
-  An EMPTY value counts as unwired.
+- `ONEPASSWORD_DEFAULT_VAULT` — the 1Password vault, a casa-owned variable
+  exported from casa's `onepassword_default_vault` app option. Neither
+  declared nor defaulted: `opvault.status()` refuses without a vault, so being
+  withheld until casa has a default vault is correct rather than a deadlock.
+  An EMPTY value counts as unset. It is a vault NAME, a plain setting — never
+  something to search the vault for.
+- `BANKFEED_OP_VAULT` — an optional override of that vault; it chooses a different
+  vault, it does not stand in for the app option, which casa's withholding gate still
+  reads. When set and
+  non-empty it wins; unset or empty, casa's default vault is used. Also a
+  plain setting.
 
 Until the two declared credentials are wired, `verify_plugin_state` reports
 them `unprovisioned` and the plugin **not ready**. That is the intended,

@@ -39,10 +39,32 @@ class Base(unittest.TestCase):
         self.addCleanup(os.environ.pop, "OP_SERVICE_ACCOUNT_TOKEN", None)
         os.environ["OP_SERVICE_ACCOUNT_TOKEN"] = "ops_fake"
 
+    def isolate_vault_env(self):
+        """Neither vault variable leaks in from the developer's shell, and
+        whatever a test sets is put back exactly as it was."""
+        import os
+        for var in (opvault.ENV_VAULT_VAR, opvault.ENV_DEFAULT_VAULT_VAR):
+            saved = os.environ.get(var)
+            if saved is None:
+                self.addCleanup(os.environ.pop, var, None)
+            else:
+                self.addCleanup(os.environ.__setitem__, var, saved)
+            os.environ.pop(var, None)
+
     def with_vault(self, name="ExampleVault"):
         import os
-        self.addCleanup(os.environ.pop, "BANKFEED_OP_VAULT", None)
+        self.isolate_vault_env()
         os.environ["BANKFEED_OP_VAULT"] = name
+
+    def with_default_vault(self, name="ExampleVault", override=None):
+        """casa's ONEPASSWORD_DEFAULT_VAULT, optionally with the
+        BANKFEED_OP_VAULT override set to `override` ("" is a wired-empty
+        override, None leaves it unset)."""
+        import os
+        self.isolate_vault_env()
+        os.environ["ONEPASSWORD_DEFAULT_VAULT"] = name
+        if override is not None:
+            os.environ["BANKFEED_OP_VAULT"] = override
 
 
 class TestSubprocessHygiene(Base):
@@ -233,15 +255,31 @@ class TestStatus(Base):
         self.assertIsNone(opvault.status())
 
     def test_missing_vault_is_named_before_token_and_any_subprocess(self):
-        # The vault is the plugin's one configuration element; an unset
-        # BANKFEED_OP_VAULT must be named precisely — not surface later as
-        # a malformed op:// read against `op:///…`.
-        import os
-        os.environ.pop("BANKFEED_OP_VAULT", None)
+        # With neither the override nor casa's default vault set, the gap
+        # must be named precisely — not surface later as a malformed op://
+        # read against `op:///…`. The sentence names BOTH routes: casa's
+        # app option that supplies the vault and the override.
+        self.isolate_vault_env()
         self.with_token()
         r = self.runner()                       # would raise if consulted
-        self.assertIn("BANKFEED_OP_VAULT", opvault.status())
+        reason = opvault.status()
+        self.assertIn("onepassword_default_vault", reason)
+        self.assertIn("ONEPASSWORD_DEFAULT_VAULT", reason)
+        self.assertIn("BANKFEED_OP_VAULT", reason)
         self.assertEqual(r.calls, [])
+
+    def test_empty_override_and_empty_default_are_both_unset(self):
+        self.with_default_vault("", override="")
+        self.with_token()
+        r = self.runner()
+        self.assertIn("onepassword_default_vault", opvault.status())
+        self.assertEqual(r.calls, [])
+
+    def test_the_default_vault_alone_satisfies_the_guard(self):
+        self.with_default_vault("ExampleVault")
+        self.with_token()
+        self.runner(Proc(stdout="2.34.0\n"))
+        self.assertIsNone(opvault.status())
 
     def test_missing_token_is_named_before_any_subprocess_runs(self):
         import os
@@ -258,9 +296,43 @@ class TestStatus(Base):
         self.assertIn("not installed", opvault.status())
 
 
+class TestVaultResolution(Base):
+    """The override wins when set and non-empty; casa's default otherwise."""
+
+    def test_the_default_vault_is_used_when_the_override_is_absent(self):
+        self.with_default_vault("ExampleVault")
+        self.assertEqual(opvault.VAULT, "ExampleVault")
+
+    def test_the_default_vault_is_used_when_the_override_is_empty(self):
+        # `.mcp.json` wires `${BANKFEED_OP_VAULT:-}`, so an install that
+        # never set the override hands the server an EMPTY string, not an
+        # absent one — empty must fall through exactly like absent.
+        self.with_default_vault("ExampleVault", override="")
+        self.assertEqual(opvault.VAULT, "ExampleVault")
+
+    def test_the_override_wins_when_set(self):
+        self.with_default_vault("ExampleVault", override="Other")
+        self.assertEqual(opvault.VAULT, "Other")
+        self.assertEqual(opvault.REF_REFRESH_TOKEN,
+                         "op://Other/EnableBanking/refresh token")
+
+    def test_neither_set_resolves_to_empty(self):
+        self.isolate_vault_env()
+        self.assertEqual(opvault.VAULT, "")
+
+    def test_every_ref_follows_the_default_vault(self):
+        self.with_default_vault("ExampleVault")
+        self.assertEqual(opvault.REF_PRIVATE_KEY,
+                         "op://ExampleVault/EnableBanking Key/private key")
+        self.assertEqual(opvault.REF_REFRESH_TOKEN,
+                         "op://ExampleVault/EnableBanking/refresh token")
+        self.assertEqual(opvault.REF_EMAIL,
+                         "op://ExampleVault/EnableBanking/username")
+
+
 class TestConstants(Base):
     def test_the_refs_derive_from_the_configured_vault(self):
-        # VAULT and every REF_* resolve from BANKFEED_OP_VAULT at access
+        # VAULT and every REF_* resolve through opvault._vault() at access
         # time: the status() guard and the references must never disagree
         # about which vault is in play.
         self.with_vault("ExampleVault")

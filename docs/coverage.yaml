@@ -236,6 +236,8 @@
   doc: reference/configuration.md
 - item: env:CLAUDE_PLUGIN_ROOT
   doc: reference/configuration.md
+- item: env:ONEPASSWORD_DEFAULT_VAULT
+  doc: reference/configuration.md
 - item: env:OP_SERVICE_ACCOUNT_TOKEN
   doc: reference/configuration.md
 - item: skill:plugins/bank-feed/skills/bank-accounts/SKILL.md

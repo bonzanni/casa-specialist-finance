@@ -124,10 +124,13 @@ item, stop and read the error rather than letting it create.
 The `op` calls below need a 1Password service-account token in the
 environment. Load it however your installation supplies one — a service
 account, `op signin`, or exporting `OP_SERVICE_ACCOUNT_TOKEN` yourself — and
-set `VAULT` to the vault the plugin is configured with (`BANKFEED_OP_VAULT`).
+set `VAULT` to the vault the plugin uses: casa's `onepassword_default_vault` app
+option, unless you set the `BANKFEED_OP_VAULT` override. The first line below resolves
+it the way the plugin does when those two are exported in your shell; otherwise set
+`VAULT` to the vault name yourself.
 
 ```bash
-VAULT="${BANKFEED_OP_VAULT:?set this to your 1Password vault}" \
+VAULT="${BANKFEED_OP_VAULT:-${ONEPASSWORD_DEFAULT_VAULT:?set this to your 1Password vault}}" \
 OOB='<paste the oobCode here>' EB_EMAIL='YOU@example.com' python3 - <<'PY'
 import json, os, subprocess, urllib.request, urllib.parse, urllib.error
 K = "AIzaSyBn8fvjRYQKslskRaO3cblUjmcyl5b9o-c"
@@ -185,7 +188,8 @@ path.
 Verify (the stored token must mint a fresh ID token):
 
 ```bash
-RT="$(op read "op://${BANKFEED_OP_VAULT}/EnableBanking/refresh token")"
+VAULT="${BANKFEED_OP_VAULT:-${ONEPASSWORD_DEFAULT_VAULT:?set this to your 1Password vault}}"
+RT="$(op read "op://${VAULT}/EnableBanking/refresh token")"
 curl -s -X POST \
   "https://securetoken.googleapis.com/v1/token?key=AIzaSyBn8fvjRYQKslskRaO3cblUjmcyl5b9o-c" \
   -H "Content-Type: application/x-www-form-urlencoded" \

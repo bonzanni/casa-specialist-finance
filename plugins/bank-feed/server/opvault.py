@@ -16,10 +16,14 @@ place:
   on CLI 2.34.0), which is why there is a create call and no key-rotation
   call.
 
-The vault is the plugin's ONE configuration element: `BANKFEED_OP_VAULT`,
-set by the configurator at install time (it discovers the vault via its own
-1Password tools — the operator is never asked). Item names are plugin-internal
-constants; the operator never addresses the items directly. Vault layout
+The vault comes from casa: `ONEPASSWORD_DEFAULT_VAULT`, a casa-owned variable
+exported from casa's `onepassword_default_vault` app option, so the vault name
+is no longer something an install has to wire or ask about (casa's own
+exploration still searches for the setup-provisioned credentials, which nothing
+here wires). `BANKFEED_OP_VAULT` is an optional override:
+when it is set and non-empty it wins, and an empty one is the same as an unset
+one. `_vault()` is the one place that choice is made. Item names are
+plugin-internal constants; the operator never addresses the items directly. Vault layout
 renamed 2026-08-05 (was `EnableBanking Production` / `Enable Banking`).
 """
 from __future__ import annotations
@@ -30,17 +34,29 @@ import subprocess
 
 import ebmode
 
-ENV_VAULT_VAR = "BANKFEED_OP_VAULT"         # must equal .mcp.json's declared name
+ENV_VAULT_VAR = "BANKFEED_OP_VAULT"         # optional override; must equal .mcp.json's key
+ENV_DEFAULT_VAULT_VAR = "ONEPASSWORD_DEFAULT_VAULT"   # casa-owned; the default
 
 # Item names are mode-derived: one suffix rule over both items, so a sandbox
 # run structurally cannot address production's items. `EnableBanking Key
-# Sandbox` is the item name expected in whichever vault BANKFEED_OP_VAULT
-# names; the sandbox credential item is created on first store by
+# Sandbox` is the item name expected in whichever vault `_vault()` resolves
+# to; the sandbox credential item is created on first store by
 # `upsert_field`. These are FUNCTIONS (and `__getattr__` names) rather than
 # constants because module `__getattr__` is not consulted for the module's own
 # internal global reads — both the attribute surface and the internal uses must
 # go through the same helpers or they drift.
 _SANDBOX_SUFFIX = " Sandbox"
+
+
+def _vault() -> str:
+    """The vault every op:// reference is built from: the override when it is
+    set and non-empty, else casa's default vault, else empty. Read at every
+    call — `VAULT`, each `REF_*` and `status()` all come through here, so the
+    guard and the references can never disagree about which vault is in
+    play."""
+    return (os.environ.get(ENV_VAULT_VAR)
+            or os.environ.get(ENV_DEFAULT_VAULT_VAR)
+            or "")
 
 
 def _key_item() -> str:
@@ -61,12 +77,12 @@ def __getattr__(name: str) -> str:
     one process these never change; access-time resolution is
     for the VAULT name and for tests that reset the memo.)"""
     if name == "VAULT":
-        return os.environ.get(ENV_VAULT_VAR, "")
+        return _vault()
     if name == "KEY_ITEM":
         return _key_item()
     if name == "CRED_ITEM":
         return _cred_item()
-    vault = os.environ.get(ENV_VAULT_VAR, "")
+    vault = _vault()
     if name == "REF_PRIVATE_KEY":
         return f"op://{vault}/{_key_item()}/private key"
     if name == "REF_REFRESH_TOKEN":
@@ -113,10 +129,12 @@ def status():
     token is a configuration gap the operator fixes in .mcp.json wiring,
     and naming it precisely beats a generic op authentication error.
     """
-    if not os.environ.get(ENV_VAULT_VAR):
-        return (ENV_VAULT_VAR + " is not set — the configurator supplies "
-                "the 1Password vault name at install time; without it no "
-                "op:// reference can be addressed")
+    if not _vault():
+        return ("no 1Password vault is configured — casa's "
+                "onepassword_default_vault app option supplies it (as "
+                + ENV_DEFAULT_VAULT_VAR + ") and " + ENV_VAULT_VAR +
+                " overrides it; without one no op:// reference can be "
+                "addressed")
     if not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
         return ("OP_SERVICE_ACCOUNT_TOKEN is not set — the configurator "
                 "must wire it through .mcp.json before setup can reach "

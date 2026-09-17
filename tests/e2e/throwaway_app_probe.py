@@ -32,7 +32,8 @@ NAME = "casa-finance-probe-%d" % int(time.time())
 
 # The SANDBOX key's public half backs the throwaway — the same public key may
 # back multiple applications, and the production key stays out of probe
-# traffic. The vault comes from BANKFEED_OP_VAULT like every other reference; a
+# traffic. The vault comes from opvault.VAULT like every other reference (casa's
+# ONEPASSWORD_DEFAULT_VAULT unless BANKFEED_OP_VAULT overrides it); a
 # hardcoded name would make this recipe runnable only for whoever wrote it.
 key = jwtsign.load_pkcs8(opvault.read(
     "op://%s/EnableBanking Key Sandbox/private key" % opvault.VAULT))
