@@ -899,25 +899,34 @@ class TestPluginEnvDeclarations(unittest.TestCase):
         # #429 — a fresh install that never reaches setup_bank_feed, with no
         # error naming the cause.
         #
-        # The two hard requirements, deliberately undeclared and undefaulted:
-        #   OP_SERVICE_ACCOUNT_TOKEN — casa-owned; comes from the
-        #     onepassword_service_account_token app option and cannot be
-        #     supplied through plugin-env.conf at all. `opvault.status()`
-        #     refuses without it.
-        #   BANKFEED_OP_VAULT — the plugin's ONE configuration element
-        #     (opvault.ENV_VAULT_VAR); it names the vault every op://
-        #     reference is built from, and `status()` refuses without it too.
-        #     ha-casa-app#429 observed it wired EMPTY, which casa counts as
-        #     unresolved exactly like absent — the actual root blocker.
-        #     Withholding is the CORRECT answer here, not a deadlock:
-        #     defaulting it would let the plugin load and answer every vault
-        #     rung "1Password unreachable" instead.
+        # The two hard requirements, deliberately undeclared and undefaulted,
+        # BOTH casa-owned — each comes from a casa app option and cannot be
+        # supplied through plugin-env.conf at all, so an install has nothing
+        # here to search the vault for:
+        #   OP_SERVICE_ACCOUNT_TOKEN — from the
+        #     onepassword_service_account_token app option.
+        #     `opvault.status()` refuses without it.
+        #   ONEPASSWORD_DEFAULT_VAULT — from the onepassword_default_vault app
+        #     option (opvault.ENV_DEFAULT_VAULT_VAR); it names the vault every
+        #     op:// reference is built from unless the override below is set,
+        #     and `status()` refuses without a vault too. An empty value
+        #     counts as unresolved exactly like an absent one. Withholding is
+        #     the CORRECT answer here, not a deadlock: defaulting it would
+        #     let the plugin load and answer every vault rung "1Password
+        #     unreachable" instead.
+        # BANKFEED_OP_VAULT is DEFAULTED, not required: it is an optional
+        # override of that vault (opvault.ENV_VAULT_VAR). It is a plain
+        # setting, never a secret, so it is not a name a vault search can
+        # resolve — which is why it is no longer a bare requirement.
         required = (set(_mcp_references(REQUIRED_REF_RE).values())
                     - set(_declared_env("setupProvides")))
         self.assertEqual(required,
-                         {"OP_SERVICE_ACCOUNT_TOKEN", "BANKFEED_OP_VAULT"})
+                         {"OP_SERVICE_ACCOUNT_TOKEN", "ONEPASSWORD_DEFAULT_VAULT"})
+        # Every hard requirement is one casa supplies from an app option.
+        self.assertLessEqual(required, set(CASA_OWNED_ENV_OPTIONS))
         self.assertEqual(set(_defaulted_references()),
-                         {"CASA_BANKFEED_EB_CP_TOKEN", "BANKFEED_EB_ENVIRONMENT"})
+                         {"CASA_BANKFEED_EB_CP_TOKEN", "BANKFEED_EB_ENVIRONMENT",
+                          "BANKFEED_OP_VAULT"})
 
     def test_every_env_value_is_a_single_recognised_reference(self):
         # `_mcp_references` skips what it cannot parse, so every assertion

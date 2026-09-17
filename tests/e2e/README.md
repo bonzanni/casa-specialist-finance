@@ -29,7 +29,8 @@ real `DELETE /sessions/{id}` calls. Never point it at production either.
 
 ## Credentials
 
-Both live in 1Password, in the vault `BANKFEED_OP_VAULT` names. Load a
+Both live in 1Password, in the vault the plugin uses: casa's
+`onepassword_default_vault` app option, unless `BANKFEED_OP_VAULT` overrides it. Load a
 1Password service-account token into the environment first, however your
 installation supplies one.
 
@@ -45,7 +46,7 @@ credentials.
 
 ## Run it
 
-    VAULT="${BANKFEED_OP_VAULT:?set this to your 1Password vault}"
+    VAULT="${BANKFEED_OP_VAULT:-${ONEPASSWORD_DEFAULT_VAULT:?set this to your 1Password vault}}"
     export CASA_BANKFEED_EB_APP_ID="<sandbox kid>"
     export CASA_BANKFEED_EB_PRIVATE_KEY="$(op read "op://$VAULT/EnableBanking Key Sandbox/private key")"
     export CASA_ROOT="<path to a casa checkout>/casa/rootfs/opt/casa"

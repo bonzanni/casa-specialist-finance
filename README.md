@@ -29,7 +29,7 @@ Everything is installed and versioned as one bundle with pinned content digests.
 | **casa** | v0.155.0 is the version this component is written and tested against. Nothing here declares or enforces it, and no casa source ships here — under an older casa the install fails when it reaches the behaviour that is missing. |
 | **Python** | 3.11. The plugin runtime uses no third-party packages at all. |
 | **An Enable Banking account** | The setup tool registers the *application* for you. Signing in to the provider's control panel to authorize that is the step it cannot do. |
-| **1Password** | A service account and a vault. The plugin forges and stores its own credentials there; this is the one thing you choose. |
+| **1Password** | A service account and a vault, both configured in casa (its `onepassword_service_account_token` and `onepassword_default_vault` app options). The plugin forges and stores its own credentials in that vault; the vault is the one thing you choose. |
 | **A bank Enable Banking covers** | And the ability to complete strong customer authentication for the accounts you link. |
 
 ## Installing
@@ -59,7 +59,7 @@ link arrives from casa itself, in your chat with the assistant, never in a task
 topic; this needs casa v0.318.0 or later.
 
 `docs/reference/setup-flow.md` walks the whole thing; `docs/reference/configuration.md`
-is the one configuration choice and every environment variable;
+is where the vault comes from and every environment variable;
 `docs/reference/sandbox-mode.md` is how to try it against a disposable test world
 instead of real accounts.
 

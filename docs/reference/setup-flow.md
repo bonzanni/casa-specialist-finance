@@ -63,8 +63,9 @@ may be shorter or missing. None of those is plumbing.
      1Password generates the key, and no key material ever exists outside the
      vault. The signing-key items are `EnableBanking Key` / `EnableBanking Key
      Sandbox` and the API-credential items are `EnableBanking` / `EnableBanking
-     Sandbox`; the vault itself comes from `BANKFEED_OP_VAULT`, the plugin's one
-     configuration element, supplied by the configurator. A key created this way
+     Sandbox`; the vault itself is casa's default vault (`ONEPASSWORD_DEFAULT_VAULT`, from
+     casa's `onepassword_default_vault` app option) unless `BANKFEED_OP_VAULT`
+     overrides it — `$VAULT` below means that resolved vault. A key created this way
      reads back as a PKCS#8 PEM, which is what `jwtsign.load_pkcs8` accepts.
      Two caveats on record: `op item edit` refuses SSH-key items,
      so the item is generate-once/read-only; and the item's `public key` field is
@@ -73,7 +74,7 @@ may be shorter or missing. None of those is plumbing.
      small stdlib DER construction from `n, e`; `jwtsign` already parses to
      those). No human.
    - Yes → use it.
-3. **Durable credential** — read `op://$BANKFEED_OP_VAULT/EnableBanking/refresh token`
+3. **Durable credential** — read `op://$VAULT/EnableBanking/refresh token`
    (which removes exactly one trailing newline — never a general strip, or a
    secret with meaningful trailing whitespace is silently altered), and exchange
    it at `securetoken.googleapis.com`.
@@ -155,7 +156,7 @@ them fails closed.
 
 - **The credential mechanism, end to end.** `sendOobCode` (email-link) →
   `signInWithEmailLink` → refresh token → stored at
-  `op://$BANKFEED_OP_VAULT/EnableBanking/refresh token` → mints a fresh 1h ID token from the
+  `op://$VAULT/EnableBanking/refresh token` → mints a fresh 1h ID token from the
   stored copy. This is the durable replacement for the 1-hour
   `CASA_BANKFEED_EB_CP_TOKEN`.
 - **Firebase config** (public): project `enablebanking`, web apiKey

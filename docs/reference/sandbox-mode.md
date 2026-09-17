@@ -9,9 +9,11 @@ should read.
   unset (or empty) runs the production world. Sandbox is chosen ONLY
   when the operator explicitly asks for it at install time — "install
   the finance specialist, **sandbox**" — and the configurator then sets
-  `BANKFEED_EB_ENVIRONMENT=SANDBOX` in `plugin-env.conf`, next to
-  `BANKFEED_OP_VAULT`. The name is unchanged by issue #4: only the two
-  setup-provisioned credentials were renamed.
+  `BANKFEED_EB_ENVIRONMENT=SANDBOX` in `plugin-env.conf`. The vault is
+  the same in both modes — casa's default vault unless `BANKFEED_OP_VAULT`
+  overrides it; only the item names inside it differ. The name is
+  unchanged by issue #4: only the two setup-provisioned credentials were
+  renamed.
 - **Leaving it unset stays safe under casa's env-readiness gate**
   (issue #4, casa v0.155.0): `.mcp.json` references the variable as
   `${BANKFEED_EB_ENVIRONMENT:-}`, and a defaulted reference is invisible
