@@ -22,7 +22,7 @@ from pathlib import Path
 
 import ebmode
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _PROD_DB_FILENAME = "bank_feed.sqlite"
 _SANDBOX_DB_FILENAME = "bank_feed.sandbox.sqlite"
@@ -327,6 +327,10 @@ END;
 -- the duplicate-detection primitive; NULL predicates serialize explicitly
 -- so SQLite NULL-distinctness cannot defeat UNIQUE.
 -- All matching happens in Python (rules.py); no SQL string functions.
+-- SCHEMA_VERSION 8 added the two account-scope predicates at the END of the
+-- table, so a migrated file and a fresh one have the same column order:
+-- `account_id` (one account) or `account_category` (personal/company, matched
+-- against the account's category at application time), never both.
 CREATE TABLE IF NOT EXISTS tag_rules (
   rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
   signature TEXT NOT NULL UNIQUE,
@@ -341,7 +345,9 @@ CREATE TABLE IF NOT EXISTS tag_rules (
   weekdays TEXT,
   tags TEXT NOT NULL,
   rationale TEXT,
-  created_at TEXT);
+  created_at TEXT,
+  account_id TEXT,
+  account_category TEXT);
 """
 
 # Forward-only migrations: {target_version: (sql, ...)}. Anything _SCHEMA
@@ -385,6 +391,20 @@ def _register_functions(conn: sqlite3.Connection) -> None:
     conn.create_function(
         "bankfeed_sha256", 1,
         lambda s: hashlib.sha256((s or "").encode("utf-8")).hexdigest())
+
+
+def _add_tag_rules_column(name: str):
+    """A conditional `ALTER TABLE tag_rules ADD COLUMN <name> TEXT`: None when
+    the column is already there, AND None when the table is not there at all.
+    The second case is a pre-v4 ledger: this callable is resolved before the
+    migration script runs, and in that script `_SCHEMA` creates `tag_rules`
+    already carrying the column, so an ALTER would fail on a duplicate."""
+    def migrate(conn):
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tag_rules)")]
+        if not cols or name in cols:
+            return None
+        return "ALTER TABLE tag_rules ADD COLUMN %s TEXT;" % name
+    return migrate
 
 
 def _add_accounts_column(name: str):
@@ -490,6 +510,23 @@ _MIGRATIONS = {
     # callable per column, each reading the table's actual columns.
     7: (_add_accounts_column("history_requested_from"),
         _add_accounts_column("history_answered_from")),
+    # v8 is account-scoped rules: two nullable predicate columns, and every
+    # existing signature rewritten to the 11-field form rules.signature() now
+    # produces. The rewrite is not cosmetic: add_rule's duplicate check is
+    # `signature = ?`, so a rule left with its 9-field signature would let the
+    # identical predicate set be minted a second time, past both the check and
+    # UNIQUE. The two new fields are appended to PREDICATE_FIELDS and are NULL
+    # on every migrated rule, so the 11-field signature is the stored string
+    # with `,null,null` before its closing bracket. That is done on the string
+    # Python wrote rather than rebuilt with SQLite's json_array(), which does
+    # not escape non-ASCII the way json.dumps(ensure_ascii=True) does, so an
+    # anchor like a cafe name with an accent would get a signature
+    # rules.signature() never produces. On a ledger whose tag_rules `_SCHEMA`
+    # has only just created, the UPDATE touches no row.
+    8: (_add_tag_rules_column("account_id"),
+        _add_tag_rules_column("account_category"),
+        "UPDATE tag_rules SET signature = substr(signature, 1,"
+        " length(signature) - 1) || ',null,null]';"),
 }
 
 

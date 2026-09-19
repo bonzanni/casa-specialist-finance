@@ -791,7 +791,8 @@ class TestSchemaV4Upgrade(Base):
                                 "remittance_token", "direction", "currency",
                                 "amount_min_minor", "amount_max_minor",
                                 "dom_min", "dom_max", "weekdays", "tags",
-                                "rationale", "created_at"])
+                                "rationale", "created_at", "account_id",
+                                "account_category"])
         conn.close()
 
     def test_v3_ledger_upgrades_and_gains_tag_rules(self):
@@ -802,6 +803,11 @@ class TestSchemaV4Upgrade(Base):
                          store.SCHEMA_VERSION)
         self.assertEqual(conn.execute(
             "SELECT COUNT(*) FROM tag_rules").fetchone()[0], 0)
+        # `_SCHEMA` creates tag_rules inside the migration script, AFTER the
+        # v8 conditional ALTERs were resolved against a ledger that had no
+        # such table: they must stand down, not fail on a duplicate column.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tag_rules)")}
+        self.assertLessEqual({"account_id", "account_category"}, cols)
         conn.close()
 
     def test_signature_is_unique(self):
@@ -1408,7 +1414,7 @@ class TestSchemaV7HistoryFloor(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()[0], str(store.SCHEMA_VERSION))
-            self.assertEqual(store.SCHEMA_VERSION, 7)
+            self.assertGreaterEqual(store.SCHEMA_VERSION, 7)
             conn.close()
 
     def test_a_v6_stamp_over_columns_already_present_migrates(self):
@@ -1417,4 +1423,83 @@ class TestSchemaV7HistoryFloor(unittest.TestCase):
             self._v6_db(path, drop=False)
             conn = store.open_db(path)
             self.assertLessEqual(set(self.COLS), self._cols(conn))
+            conn.close()
+
+
+class TestSchemaV8Upgrade(unittest.TestCase):
+    """Faithful deployed-v7 ledger -> v8: tag_rules without the two account
+    columns, every signature in the 9-field form rules.signature() wrote
+    before v8, version stamped 7. Non-ASCII anchors on purpose: the migration
+    must reproduce Python's ensure_ascii serialization exactly, which a
+    SQLite-side JSON rebuild would not."""
+
+    ANCHORS = ("Caf\u00e9 Noir", "ACME", "Z\u00fcrich AG", 'quote"d')
+
+    def setUp(self):
+        import rules
+        self.rules = rules
+        self.dir = tempfile.TemporaryDirectory()
+        self.path = pathlib.Path(self.dir.name) / "v7.sqlite"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def _v7_ledger_with_rules(self):
+        import json
+        conn = store.open_db(self.path)
+        conn.execute("ALTER TABLE tag_rules DROP COLUMN account_id")
+        conn.execute("ALTER TABLE tag_rules DROP COLUMN account_category")
+        for cp in self.ANCHORS:
+            f, refusal = self.rules.validate_rule({"counterparty": cp,
+                                                   "tags": ["x"]})
+            assert refusal is None, refusal
+            sig9 = json.dumps([f[k] for k in self.rules.PREDICATE_FIELDS[:9]],
+                              ensure_ascii=True, separators=(",", ":"))
+            conn.execute("INSERT INTO tag_rules(signature, counterparty_canon,"
+                         " tags) VALUES (?,?,'x')",
+                         (sig9, f["counterparty_canon"]))
+        conn.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+        conn.close()
+
+    def test_v7_rules_gain_columns_and_canonical_signatures(self):
+        self._v7_ledger_with_rules()
+        conn = store.open_db(self.path)
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM tag_rules")]
+            self.assertEqual(len(rows), len(self.ANCHORS))
+            for row in rows:
+                self.assertIsNone(row["account_id"])
+                self.assertIsNone(row["account_category"])
+                self.assertEqual(row["signature"], self.rules.signature(row))
+            self.assertEqual(int(conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()[0]), store.SCHEMA_VERSION)
+        finally:
+            conn.close()
+
+    def test_a_migrated_rule_still_refuses_its_duplicate(self):
+        self._v7_ledger_with_rules()
+        conn = store.open_db(self.path)
+        try:
+            f, _ = self.rules.validate_rule({"counterparty": " caf\u00e9  NOIR",
+                                             "tags": ["y"]})
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO tag_rules(signature, tags)"
+                             " VALUES (?, 'y')", (self.rules.signature(f),))
+        finally:
+            conn.close()
+
+    def test_reopening_a_current_file_never_rewrites_a_signature(self):
+        conn = store.open_db(self.path)
+        f, _ = self.rules.validate_rule({"counterparty": "ACME",
+                                         "tags": ["x"]})
+        conn.execute("INSERT INTO tag_rules(signature, tags) VALUES (?, 'x')",
+                     (self.rules.signature(f),))
+        conn.close()
+        conn = store.open_db(self.path)
+        try:
+            self.assertEqual(conn.execute(
+                "SELECT signature FROM tag_rules").fetchone()[0],
+                self.rules.signature(f))
+        finally:
             conn.close()
