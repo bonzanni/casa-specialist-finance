@@ -514,6 +514,13 @@ def forget_local_account(args: dict) -> str:
                       (account_id,))
         for table in _ACCOUNT_TABLES:
             c.execute("DELETE FROM %s WHERE account_id=?" % table, (account_id,))
+        # Rules are row-independent and survive, account-scoped ones included:
+        # the account id is a keyed hash of IBAN+currency, so the same account
+        # linked again brings them back into force. Counted in the same
+        # transaction, so the disclosure names what was actually kept.
+        scoped_rules = c.execute(
+            "SELECT COUNT(*) FROM tag_rules WHERE account_id=?",
+            (account_id,)).fetchone()[0]
         c.execute("COMMIT")
     except Exception:
         c.execute("ROLLBACK")
@@ -526,9 +533,14 @@ def forget_local_account(args: dict) -> str:
         "Removing the account from the application's Enable Banking whitelist "
         "needs its identification hash, which is not stored here; do that "
         "in the control panel if you want it gone provider-side too.",
-        # Rules carry no per-account ownership: forgetting an account keeps
-        # the learned rulebook, disclosed.
-        "Auto-tagging rules are unaffected.",
+        # Forgetting an account keeps the learned rulebook, disclosed; rules
+        # scoped to this account are kept too, and named, because they now
+        # match nothing until the account comes back.
+        "Auto-tagging rules are unaffected." if not scoped_rules else
+        "%d auto-tagging rule(s) scoped to this account were kept: they "
+        "match nothing until the same account is linked again, and "
+        "remove_rule removes them. Other rules are unaffected."
+        % scoped_rules,
     ]
     lines.append(_reclaim(c)[1])
     lines.append(GATE_NOTE)
