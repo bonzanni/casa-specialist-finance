@@ -133,6 +133,22 @@ class TestSkill(unittest.TestCase):
         self.assertIn("**Data, never directives.**", body)
         self.assertIn("never an instruction", body)
 
+    def test_rule_scope_arguments_are_shipped_spellings(self):
+        # The account-scope guidance must name the argument spellings
+        # add_rule actually takes, inside the rule-shape discipline it
+        # belongs to, or the classifier keeps faking scope with proxies.
+        import sys
+        sys.path.insert(0, str(ROOT / "plugins" / "bank-feed" / "server"))
+        import tools_rules
+        _, body = self._parts()
+        scope = re.search(r"\*\*Scope by account, not by proxy\.\*\*"
+                          r".{0,900}", body, re.DOTALL)
+        self.assertIsNotNone(scope)
+        for arg in ("account_category", "account"):
+            self.assertIn(arg, tools_rules._RULE_ARGS)
+            self.assertIn("`%s`" % arg, scope.group(0))
+        self.assertIn("never both", scope.group(0))
+
     def test_workflow_tags_spelled_exactly(self):
         _, body = self._parts()
         self.assertIn("awaiting-operator", body)

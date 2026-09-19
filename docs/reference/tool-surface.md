@@ -73,7 +73,7 @@ alone is enough:
 | `tag_transaction` / `untag_transaction` | Attach or remove tags on up to 100 rows. |
 | `add_note` | Append one note to each listed row. Notes are append-only. |
 | `rename_tag` / `delete_tag` | Vocabulary edits: every row carrying the tag, superseded history included. |
-| `add_rule` / `replace_rule` / `remove_rule` | Maintain the rulebook. Replace is the only edit — there is no partial rule update. |
+| `add_rule` / `replace_rule` / `remove_rule` | Maintain the rulebook. Replace is the only edit — there is no partial rule update. A rule may be scoped to one `account` or one `account_category`, never both. |
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |

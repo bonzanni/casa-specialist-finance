@@ -2223,3 +2223,15 @@ class TestRulesAtDeletionSites(DestructiveBase):
         self.assertIn("rules are unaffected", out)
         self.assertEqual(self.count("tag_rules"), 1)
 
+    def test_forget_discloses_the_account_scoped_rules_it_kept(self):
+        self.account()
+        self.tx()
+        for sig, aid in (("s1", "acc1"), ("s2", "acc1"), ("s3", "other")):
+            self.raw.execute("INSERT INTO tag_rules(signature, tags,"
+                             " account_id) VALUES (?,'a',?)", (sig, aid))
+        out = call("forget_local_account", account_id="acc1")
+        self.assertIn("2 auto-tagging rule(s) scoped to this account were "
+                      "kept", out)
+        self.assertNotIn("Auto-tagging rules are unaffected.", out)
+        self.assertEqual(self.count("tag_rules"), 3)
+

@@ -202,6 +202,18 @@ Rule shape discipline:
   substrings), then tighten with what the evidence supports: amount band
   (requires currency), day-of-month band, weekdays, direction. All
   predicates must hold — need OR? mint two rules.
+- **Scope by account, not by proxy.** When a counterparty means
+  different things on different accounts (personal vs company above
+  all: a tax authority, a railway, a software vendor), add
+  `account_category` (`personal` or `company`, matched against the
+  account's category each time rules run) — or `account` (an
+  account_id from `list_accounts`) when exactly one account is meant;
+  never both. Never fake the scope with a direction, an amount band or
+  a counterparty-spelling difference: those hold only until the
+  incidental difference goes away, and then mislabel silently. A rule
+  you find leaning on such a proxy: re-scope it with `replace_rule`
+  when you next touch it, and say so in its rationale. No bulk
+  rewrites.
 - Rules only ADD tags. Reapplication is always safe.
 - Workflow tags are refused in rule tag sets — don't try.
 - Duplicate signature refusals point at the existing rule: follow the

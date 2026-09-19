@@ -27,7 +27,21 @@ _RULE_ARGS = {
     "tags": {"type": "array", "items": {"type": "string"},
              "minItems": 1, "maxItems": rules.MAX_TAGS_PER_RULE},
     "rationale": {"type": "string"},
+    "account": {"type": "string"},
+    "account_category": {"type": "string",
+                         "enum": list(rules.ACCOUNT_CATEGORIES)},
 }
+
+# The tag_rules columns a rule write sets, derived from the signature's own
+# field list so an INSERT or UPDATE cannot silently drop a predicate the
+# signature carries.
+_WRITE_COLS = rules.PREDICATE_FIELDS + ("tags", "rationale")
+
+_SCOPE_DOC = ("Optional scope: account (an account_id from list_accounts) "
+              "OR account_category (personal/company, matched against the "
+              "account's category at each application), not both — use it "
+              "when the same counterparty means different things on "
+              "different accounts. ")
 
 
 def _now() -> str:
@@ -42,9 +56,31 @@ def _rule_id_arg(value):
     return value, None
 
 
-def _sentence(rule: dict) -> str:
+def _accounts(c) -> dict:
+    """account_id -> operator label (or None) for every cached account: what
+    _sentence needs to name an account-scoped rule's account, or to call the
+    rule dormant when that account is no longer cached."""
+    return {r["account_id"]: r["label"]
+            for r in c.execute("SELECT account_id, label FROM accounts")}
+
+
+def _no_such_account(c, fields):
+    """The refusal for an `account` no cached account has, or None. Run inside
+    the write transaction, so a concurrent forget cannot land between this
+    check and the write."""
+    aid = fields["account_id"]
+    if aid is None or c.execute("SELECT 1 FROM accounts WHERE account_id=?",
+                                (aid,)).fetchone():
+        return None
+    return ("no cached account %s — account ids come from list_accounts. "
+            "Nothing was changed." % tools_read._neutralized(aid))
+
+
+def _sentence(rule: dict, accounts: dict) -> str:
     """One human-readable line per rule. Anchors are provider-derived:
-    fenced. Everything else is validated storage: raw."""
+    fenced. The account id and label go through the neutralising path (a
+    label is operator text, but a line break in it would still forge a
+    line). Everything else is validated storage: raw."""
     preds = []
     if rule["counterparty_canon"] is not None:
         preds.append("counterparty %s"
@@ -67,6 +103,17 @@ def _sentence(rule: dict) -> str:
         preds.append("day %s..%s" % (rule["dom_min"], rule["dom_max"]))
     if rule["weekdays"] is not None:
         preds.append("on %s" % rule["weekdays"])
+    if rule["account_id"] is not None:
+        aid = tools_read._neutralized(rule["account_id"])
+        if rule["account_id"] not in accounts:
+            preds.append("on account %s (not linked — dormant)" % aid)
+        elif accounts[rule["account_id"]]:
+            preds.append("on account %s (%s)" % (
+                aid, tools_read._neutralized(accounts[rule["account_id"]])))
+        else:
+            preds.append("on account %s" % aid)
+    if rule["account_category"] is not None:
+        preds.append("on %s accounts" % rule["account_category"])
     return "#%d  %s -> %s" % (rule["rule_id"], "; ".join(preds),
                               rule["tags"])
 
@@ -78,9 +125,9 @@ def _sentence(rule: dict) -> str:
           "amount_min/max_minor band (currency required with amounts), "
           "dom_min/dom_max day-of-month band, weekdays) that additively "
           "tags every matching transaction at ingest and on "
-          "apply_rules. Strict by design: rules only ADD tags, never "
-          "remove. rationale (recommended, max 1000 chars) records how "
-          "the rule came about.",
+          "apply_rules. " + _SCOPE_DOC + "Strict by design: rules only "
+          "ADD tags, never remove. rationale (recommended, max 1000 "
+          "chars) records how the rule came about.",
           {"type": "object", "properties": dict(_RULE_ARGS),
            "required": ["tags"]})
 def add_rule(args: dict) -> str:
@@ -91,6 +138,10 @@ def add_rule(args: dict) -> str:
     c = tools_read.conn()
     c.execute("BEGIN IMMEDIATE")
     try:
+        refusal = _no_such_account(c, fields)
+        if refusal:
+            c.execute("ROLLBACK")
+            return refusal
         dup = c.execute("SELECT rule_id FROM tag_rules WHERE"
                         " signature=?", (sig,)).fetchone()
         if dup:
@@ -107,20 +158,14 @@ def add_rule(args: dict) -> str:
                     "operator rather than pruning silently. Nothing was "
                     "changed." % rules.RULEBOOK_CAP)
         cur = c.execute(
-            "INSERT INTO tag_rules(signature, counterparty_canon,"
-            " remittance_token, direction, currency, amount_min_minor,"
-            " amount_max_minor, dom_min, dom_max, weekdays, tags,"
-            " rationale, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sig, fields["counterparty_canon"],
-             fields["remittance_token"], fields["direction"],
-             fields["currency"], fields["amount_min_minor"],
-             fields["amount_max_minor"], fields["dom_min"],
-             fields["dom_max"], fields["weekdays"], fields["tags"],
-             fields["rationale"], _now()))
+            "INSERT INTO tag_rules(signature, %s, created_at)"
+            " VALUES (?, %s, ?)" % (", ".join(_WRITE_COLS),
+                                    ", ".join("?" * len(_WRITE_COLS))),
+            (sig,) + tuple(fields[k] for k in _WRITE_COLS) + (_now(),))
         rule_id = cur.lastrowid
         rule = dict(c.execute("SELECT * FROM tag_rules WHERE rule_id=?",
                               (rule_id,)).fetchone())
-        sentence = _sentence(rule)      # render before COMMIT
+        sentence = _sentence(rule, _accounts(c))   # render before COMMIT
         c.execute("COMMIT")
     except Exception:
         c.execute("ROLLBACK")
@@ -150,7 +195,7 @@ def remove_rule(args: dict) -> str:
             c.execute("ROLLBACK")
             return ("no rule #%d — rule ids come from list_rules. "
                     "Nothing was changed." % rid)
-        sentence = _sentence(dict(row))
+        sentence = _sentence(dict(row), _accounts(c))
         c.execute("DELETE FROM tag_rules WHERE rule_id=?", (rid,))
         c.execute("COMMIT")
     except Exception:
@@ -166,8 +211,9 @@ _RATIONALE_CLIP = 120
 @register("replace_rule",
           "Atomically replace a rule (by rule_id from list_rules) with a "
           "fully-specified new version — same argument set as add_rule; "
-          "this is the ONLY rule edit. Update the rationale to reflect "
-          "the new understanding: it is the rule's working memory.",
+          "this is the ONLY rule edit. " + _SCOPE_DOC + "Update the "
+          "rationale to reflect the new understanding: it is the rule's "
+          "working memory.",
           {"type": "object",
            "properties": dict(_RULE_ARGS, rule_id={"type": "integer"}),
            "required": ["rule_id", "tags"]})
@@ -188,6 +234,10 @@ def replace_rule(args: dict) -> str:
             c.execute("ROLLBACK")
             return ("no rule #%d — rule ids come from list_rules. "
                     "Nothing was changed." % rid)
+        refusal = _no_such_account(c, fields)
+        if refusal:
+            c.execute("ROLLBACK")
+            return refusal
         dup = c.execute("SELECT rule_id FROM tag_rules WHERE"
                         " signature=? AND rule_id != ?",
                         (sig, rid)).fetchone()
@@ -196,20 +246,12 @@ def replace_rule(args: dict) -> str:
             return ("that predicate set already belongs to rule #%d. "
                     "Nothing was changed." % dup["rule_id"])
         c.execute(
-            "UPDATE tag_rules SET signature=?, counterparty_canon=?,"
-            " remittance_token=?, direction=?, currency=?,"
-            " amount_min_minor=?, amount_max_minor=?, dom_min=?,"
-            " dom_max=?, weekdays=?, tags=?, rationale=? WHERE"
-            " rule_id=?",
-            (sig, fields["counterparty_canon"],
-             fields["remittance_token"], fields["direction"],
-             fields["currency"], fields["amount_min_minor"],
-             fields["amount_max_minor"], fields["dom_min"],
-             fields["dom_max"], fields["weekdays"], fields["tags"],
-             fields["rationale"], rid))
+            "UPDATE tag_rules SET signature=?, %s WHERE rule_id=?"
+            % ", ".join("%s=?" % k for k in _WRITE_COLS),
+            (sig,) + tuple(fields[k] for k in _WRITE_COLS) + (rid,))
         rule = dict(c.execute("SELECT * FROM tag_rules WHERE rule_id=?",
                               (rid,)).fetchone())
-        sentence = _sentence(rule)
+        sentence = _sentence(rule, _accounts(c))
         c.execute("COMMIT")
     except Exception:
         c.execute("ROLLBACK")
@@ -237,7 +279,7 @@ def list_rules(args: dict) -> str:
         if row is None:
             return "no rule #%d — rule ids come from list_rules." % rid
         rule = dict(row)
-        lines = [_sentence(rule),
+        lines = [_sentence(rule, _accounts(c)),
                  "created: %s" % (rule["created_at"] or "?")]
         if rule["rationale"]:
             lines.append("rationale: %s"
@@ -250,9 +292,10 @@ def list_rules(args: dict) -> str:
     if not rows:
         return ("No rules yet. add_rule mints one; ingest applies the "
                 "rulebook automatically.")
+    accounts = _accounts(c)
     lines = ["%d rule(s):" % len(rows)]
     for rule in rows:
-        lines.append(_sentence(rule))
+        lines.append(_sentence(rule, accounts))
         if rule["rationale"]:
             # Clip the RAW text first, then the note fence renders it —
             # never hand-compose fence markers.

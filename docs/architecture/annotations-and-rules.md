@@ -54,6 +54,23 @@ applied to a set of rows by `apply_to_rows()`. The rulebook survives independent
 the rows it has tagged — it is row-independent, and a schema migration exists for
 precisely that table.
 
+**A rule can be scoped to where a transaction lives.** Two optional predicates, never
+together: `account` names one account by the same `account_id` every other tool takes,
+and `account_category` names `personal` or `company`. Neither is an anchor — a rule still
+needs a counterparty or a remittance word, because "every company-account debit" is the
+mislabeling machine the anchor requirement exists to refuse. The category is read from
+the account each time the rulebook runs, not copied into the rule, so recategorizing an
+account (an operator-granted `label_account`) re-scopes category rules from the next
+application on; an unlabelled account matches no category rule. An account rule
+survives `forget_local_account` and matches nothing until that same account is linked
+again, which brings it back, since the id is a keyed hash of IBAN and currency.
+
+The signature is the duplicate check, and it serializes every predicate, so adding the
+two predicates changed its shape. Schema v8 rewrites each stored signature to the new
+form in the same transaction that adds the columns — without it, re-minting an existing
+rule would pass the check — and does so on the string Python wrote rather than
+rebuilding it in SQL, whose JSON output escapes non-ASCII differently.
+
 **Reserved workflow tags are machinery, not classifications.** A rule that could mint
 one would mechanically park or terminalize every matching row, which is the state
 machine the classifier owns. Rules cannot mint them.

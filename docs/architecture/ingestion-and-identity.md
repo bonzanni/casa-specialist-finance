@@ -154,7 +154,7 @@ never a binary float. Sums are per currency and are never converted.
 
 ## The schema
 
-SQLite, forward-only migrations, currently version 7. `open_db()` applies migrations,
+SQLite, forward-only migrations, currently version 8. `open_db()` applies migrations,
 checks the file modes, and refuses a pre-existing symlink at the database or sidecar
 paths — those checks are part of opening the database rather than something applied
 afterwards. They detect an existing symlink; they are not symlink-race safe, and the

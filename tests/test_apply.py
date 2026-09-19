@@ -1710,6 +1710,35 @@ class TestRuleApplicationInApplyPlan(Base):
             "SELECT tag FROM transaction_tags WHERE row_id=?", (rid,)))
         self.assertEqual(tags, ["food", "groceries"])
 
+    def test_ingest_honours_account_and_category_scope(self):
+        # The ingest entry point reads the account and its category through
+        # the same apply_to_rows as apply_rules: a rule scoped elsewhere
+        # stays silent, one scoped here fires.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO accounts(account_id, currency, included,"
+            " category, first_seen, last_seen)"
+            " VALUES ('acc1','EUR',1,'company','x','x')")
+        for scope, tag in (({"account": "acc2"}, "elsewhere"),
+                           ({"account": "acc1"}, "here"),
+                           ({"account_category": "personal"}, "personal"),
+                           ({"account_category": "company"}, "company")):
+            fields, refusal = rules.validate_rule(dict(
+                {"counterparty": "Voorbeeld Supermarkt", "tags": [tag]},
+                **scope))
+            assert refusal is None, refusal
+            self.conn.execute(
+                "INSERT INTO tag_rules(signature, counterparty_canon,"
+                " account_id, account_category, tags) VALUES (?,?,?,?,?)",
+                (rules.signature(fields), fields["counterparty_canon"],
+                 fields["account_id"], fields["account_category"],
+                 fields["tags"]))
+        plan = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
+        stats = apply.apply_plan(self.conn, "acc1", plan)
+        rid = stats["inserted_row_ids"][0]
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT tag FROM transaction_tags WHERE row_id=?", (rid,))),
+            ["company", "here"])
+
     def test_no_rules_means_zero_tagged_and_ids_still_returned(self):
         plan = ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN)
         stats = apply.apply_plan(self.conn, "acc1", plan)

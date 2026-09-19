@@ -175,6 +175,59 @@ class TestSignature(unittest.TestCase):
         self.assertEqual(rules.signature(f1), rules.signature(f2))
 
 
+
+class TestAccountPredicateValidation(unittest.TestCase):
+    def test_account_is_stored_stripped(self):
+        f, r = rules.validate_rule(valid(account="  acc1 "))
+        self.assertIsNone(r)
+        self.assertEqual(f["account_id"], "acc1")
+        self.assertIsNone(f["account_category"])
+
+    def test_account_must_be_a_non_empty_string(self):
+        for bad in ("", "   ", 7, True, ["acc1"]):
+            f, r = rules.validate_rule(valid(account=bad))
+            self.assertIsNone(f, bad)
+            self.assertIn("account must be", r)
+
+    def test_category_is_normalized_and_closed(self):
+        f, r = rules.validate_rule(valid(account_category=" Company "))
+        self.assertIsNone(r)
+        self.assertEqual(f["account_category"], "company")
+        for bad in ("business", "", 3, ["company"]):
+            f, r = rules.validate_rule(valid(account_category=bad))
+            self.assertIsNone(f, bad)
+            self.assertIn("account_category must be one of", r)
+
+    def test_both_together_refused(self):
+        f, r = rules.validate_rule(valid(account="acc1",
+                                         account_category="company"))
+        self.assertIsNone(f)
+        self.assertIn("not both", r)
+
+    def test_neither_is_an_anchor(self):
+        for extra in ({"account": "acc1"},
+                      {"account_category": "personal"}):
+            f, r = rules.validate_rule(dict({"tags": ["a"]}, **extra))
+            self.assertIsNone(f)
+            self.assertIn("a rule needs an anchor", r)
+
+    def test_category_parity_with_label_account(self):
+        import tools_refresh
+        self.assertEqual(rules.ACCOUNT_CATEGORIES, tools_refresh.CATEGORIES)
+
+    def test_signature_separates_scopes(self):
+        base, _ = rules.validate_rule(valid())
+        acc, _ = rules.validate_rule(valid(account="acc1"))
+        cat, _ = rules.validate_rule(valid(account_category="company"))
+        sigs = {rules.signature(base), rules.signature(acc),
+                rules.signature(cat)}
+        self.assertEqual(len(sigs), 3)
+        # Appended, never inserted: the v8 migration's suffix rewrite of a
+        # stored 9-field signature depends on it.
+        self.assertTrue(rules.signature(base).endswith(",null,null]"))
+        self.assertEqual(rules.PREDICATE_FIELDS[-2:],
+                         ("account_id", "account_category"))
+
 import sqlite3  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -187,22 +240,23 @@ class LedgerBase(unittest.TestCase):
         self.conn = store.open_db(
             pathlib.Path(self.dir.name) / "f.sqlite")
         self.conn.execute(
-            "INSERT INTO accounts(account_id, currency, included,"
-            " first_seen, last_seen) VALUES ('acc1','EUR',1,'x','x')")
+            "INSERT INTO accounts(account_id, currency, included, category,"
+            " first_seen, last_seen) VALUES ('acc1','EUR',1,'personal','x',"
+            "'x'), ('acc2','EUR',1,'company','x','x')")
 
     def tearDown(self):
         self.dir.cleanup()
 
     def tx(self, counterparty="ACME BV", remittance="invoice 7",
            direction="DBIT", currency="EUR", amount=1000,
-           booking_date="2026-02-03", state="active"):
+           booking_date="2026-02-03", state="active", account="acc1"):
         cur = self.conn.execute(
             "INSERT INTO transactions(account_id, identity_key,"
             " occurrence, booking_date, amount_minor, currency,"
             " direction, status, counterparty, remittance, state,"
-            " match_method) VALUES ('acc1',?,0,?,?,?,?,'BOOK',?,?,?,"
+            " match_method) VALUES (?,?,0,?,?,?,?,'BOOK',?,?,?,"
             "'reference')",
-            ("ik-%d" % self.conn.execute(
+            (account, "ik-%d" % self.conn.execute(
                 "SELECT COUNT(*) FROM transactions").fetchone()[0],
              booking_date, amount, currency, direction, counterparty,
              remittance, state))
@@ -212,18 +266,14 @@ class LedgerBase(unittest.TestCase):
         fields, refusal = rules.validate_rule(
             dict({"counterparty": "ACME BV", "tags": ["office"]}, **over))
         assert refusal is None, refusal
+        # Column list from PREDICATE_FIELDS, so this helper cannot silently
+        # drop a predicate the signature carries.
+        cols = rules.PREDICATE_FIELDS + ("tags", "rationale")
         cur = self.conn.execute(
-            "INSERT INTO tag_rules(signature, counterparty_canon,"
-            " remittance_token, direction, currency, amount_min_minor,"
-            " amount_max_minor, dom_min, dom_max, weekdays, tags,"
-            " rationale, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,"
-            "'2026-08-05')",
-            (rules.signature(fields), fields["counterparty_canon"],
-             fields["remittance_token"], fields["direction"],
-             fields["currency"], fields["amount_min_minor"],
-             fields["amount_max_minor"], fields["dom_min"],
-             fields["dom_max"], fields["weekdays"], fields["tags"],
-             fields["rationale"]))
+            "INSERT INTO tag_rules(signature, %s, created_at) VALUES"
+            " (?, %s, '2026-08-05')" % (", ".join(cols),
+                                        ", ".join("?" * len(cols))),
+            (rules.signature(fields),) + tuple(fields[k] for k in cols))
         return cur.lastrowid
 
     def tags_of(self, rid):
@@ -288,6 +338,46 @@ class TestMatching(LedgerBase):
         self.assertEqual(self.tags_of(rs), [])
         self.assertEqual(self.tags_of(rv), ["office"])
 
+
+
+class TestAccountMatching(LedgerBase):
+    def test_account_rule_tags_only_its_account(self):
+        r1, r2 = self.tx(account="acc1"), self.tx(account="acc2")
+        self.rule(account="acc2", tags=["biz"])
+        rules.apply_to_rows(self.conn, [r1, r2], "now")
+        self.assertEqual((self.tags_of(r1), self.tags_of(r2)),
+                         ([], ["biz"]))
+
+    def test_category_rule_reads_the_category_live(self):
+        r1, r2 = self.tx(account="acc1"), self.tx(account="acc2")
+        self.rule(account_category="company", tags=["biz"])
+        rules.apply_to_rows(self.conn, [r1, r2], "now")
+        self.assertEqual((self.tags_of(r1), self.tags_of(r2)),
+                         ([], ["biz"]))
+        self.conn.execute("UPDATE accounts SET category='company'"
+                          " WHERE account_id='acc1'")
+        rules.apply_to_rows(self.conn, [r1], "now")
+        self.assertEqual(self.tags_of(r1), ["biz"])
+
+    def test_unlabelled_or_missing_account_fails_closed(self):
+        self.conn.execute("UPDATE accounts SET category=NULL"
+                          " WHERE account_id='acc1'")
+        r1, r3 = self.tx(account="acc1"), self.tx(account="ghost")
+        self.rule(account_category="personal", tags=["p"])
+        self.rule(counterparty="Other", account="ghost2", tags=["q"])
+        rules.apply_to_rows(self.conn, [r1, r3], "now")
+        self.assertEqual((self.tags_of(r1), self.tags_of(r3)), ([], []))
+
+    def test_non_string_row_values_fail(self):
+        rule = {k: None for k in rules.PREDICATE_FIELDS}
+        rule["account_id"] = "acc1"
+        self.assertFalse(rules.rule_matches(rule, {"account_id": None}))
+        self.assertTrue(rules.rule_matches(rule, {"account_id": "acc1"}))
+        rule.update(account_id=None, account_category="company")
+        self.assertFalse(rules.rule_matches(rule, {"account_category": 1}))
+        self.assertFalse(rules.rule_matches(rule, {}))
+        self.assertTrue(rules.rule_matches(rule,
+                                           {"account_category": "company"}))
 
 class TestApplication(LedgerBase):
     def test_additive_never_removes_idempotent(self):

@@ -39,9 +39,18 @@ _CURRENCY_RE = re.compile(r"^[A-Za-z]{3}$")
 WEEKDAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DIRECTION_API = {"debit": "DBIT", "credit": "CRDT"}
 
+# Same values as tools_refresh.CATEGORIES (what label_account writes) —
+# asserted equal by test, not imported, for the same reason as TAG_RE.
+ACCOUNT_CATEGORIES = ("personal", "company")
+
+# Order is part of the stored signature. The two account fields are APPENDED:
+# the v8 migration turns every stored 9-field signature into this 11-field
+# form by rewriting its closing bracket, which is only right while new fields
+# go at the end.
 PREDICATE_FIELDS = ("counterparty_canon", "remittance_token", "direction",
                     "currency", "amount_min_minor", "amount_max_minor",
-                    "dom_min", "dom_max", "weekdays")
+                    "dom_min", "dom_max", "weekdays", "account_id",
+                    "account_category")
 
 
 def canon_text(value) -> str:
@@ -201,6 +210,30 @@ def validate_rule(args: dict):
                 fields["weekdays"] = ",".join(
                     w for w in WEEKDAY_ORDER if w in seen)
 
+    # Account scope. Neither is an anchor: "every company debit -> X" is the
+    # mislabeling machine the anchor requirement refuses. Both together are
+    # refused: an account already has one category, so the pair only adds a
+    # way for the rule to stop matching silently when that account is
+    # recategorized.
+    acc = args.get("account")
+    if acc is not None:
+        if not isinstance(acc, str) or not acc.strip():
+            problems.append("account must be a non-empty account_id string "
+                            "(from list_accounts)")
+        else:
+            fields["account_id"] = acc.strip()
+    cat = args.get("account_category")
+    if cat is not None:
+        norm = cat.strip().lower() if isinstance(cat, str) else None
+        if norm not in ACCOUNT_CATEGORIES:
+            problems.append("account_category must be one of: %s"
+                            % ", ".join(ACCOUNT_CATEGORIES))
+        else:
+            fields["account_category"] = norm
+    if acc is not None and cat is not None:
+        problems.append("pass account or account_category, not both — an "
+                        "account already has exactly one category")
+
     raw_tags = args.get("tags")
     if not isinstance(raw_tags, list) or not raw_tags:
         problems.append("tags must be a non-empty array")
@@ -267,7 +300,19 @@ def _parse_iso(text):
 def rule_matches(rule: dict, row: dict) -> bool:
     """Conjunction over the stored predicates; a NULL rule field is
     unconstrained, a NULL/malformed row field never satisfies a present
-    predicate."""
+    predicate.
+
+    The account category is the account's category NOW (apply_to_rows reads
+    it with the row), so recategorizing an account re-scopes category rules
+    from the next application on; tags already applied stay. An unlabelled
+    account, or a row with no accounts row, has no category and fails a
+    category predicate closed."""
+    v = rule.get("account_id")
+    if v is not None and row.get("account_id") != v:
+        return False
+    v = rule.get("account_category")
+    if v is not None and row.get("account_category") != v:
+        return False
     v = rule.get("counterparty_canon")
     if v is not None and canon_text(row.get("counterparty")) != v:
         return False
@@ -333,9 +378,12 @@ def apply_to_rows(conn, row_ids, now: str) -> dict:
         return out
     for rid in sorted(set(row_ids)):
         row = conn.execute(
-            "SELECT row_id, state, counterparty, remittance, direction,"
-            " currency, amount_minor, booking_date FROM transactions"
-            " WHERE row_id=?", (rid,)).fetchone()
+            "SELECT t.row_id, t.state, t.counterparty, t.remittance,"
+            " t.direction, t.currency, t.amount_minor, t.booking_date,"
+            " t.account_id, a.category AS account_category"
+            " FROM transactions t LEFT JOIN accounts a"
+            " ON a.account_id = t.account_id WHERE t.row_id=?",
+            (rid,)).fetchone()
         if row is None or row["state"] not in ("active", "vanished"):
             continue                       # allowlist: fail closed
         row_d = dict(row)

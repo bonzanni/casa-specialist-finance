@@ -280,3 +280,146 @@ class TestRowScopedApplyIdReporting(Base):
         call("add_rule", counterparty="ACME BV", tags=["food"])
         reply = call("apply_rules")   # whole-ledger scope
         self.assertIn("more)", reply)
+
+
+class TestAccountScopedRules(TestApplyRules):
+    """add_rule/replace_rule with `account` or `account_category`."""
+
+    def _account(self, account, category=None, label=None):
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, currency, included, category,"
+            " label, first_seen, last_seen) VALUES (?,'EUR',1,?,?,'x','x')",
+            (account, category, label))
+
+    def _tags(self, rid):
+        return sorted(r[0] for r in self.conn.execute(
+            "SELECT tag FROM transaction_tags WHERE row_id=?", (rid,)))
+
+    def test_unknown_account_is_refused_and_nothing_is_written(self):
+        reply = call("add_rule", counterparty="X", tags=["a"],
+                     account="nope")
+        self.assertIn("list_accounts", reply)
+        self.assertIn("Nothing was changed.", reply)
+        self.assertEqual(self.n_rules(), 0)
+
+    def test_replace_onto_an_unknown_account_is_refused(self):
+        call("add_rule", counterparty="X", tags=["a"])
+        reply = call("replace_rule", rule_id=1, counterparty="X",
+                     tags=["a"], account="nope")
+        self.assertIn("Nothing was changed.", reply)
+        self.assertIsNone(self.conn.execute(
+            "SELECT account_id FROM tag_rules").fetchone()[0])
+
+    def test_both_together_refused_at_the_tool(self):
+        self._account("acc1", category="company")
+        reply = call("add_rule", counterparty="X", tags=["a"],
+                     account="acc1", account_category="company")
+        self.assertIn("not both", reply)
+        self.assertEqual(self.n_rules(), 0)
+
+    def test_scoped_and_unscoped_rules_are_not_duplicates(self):
+        self._account("acc1")
+        call("add_rule", counterparty="X", tags=["a"])
+        self.assertIn("Rule #2 added", call(
+            "add_rule", counterparty="X", tags=["b"], account="acc1"))
+        self.assertIn("Rule #3 added", call(
+            "add_rule", counterparty="X", tags=["c"],
+            account_category="company"))
+        self.assertIn("already exists: rule #2", call(
+            "add_rule", counterparty="x", tags=["d"], account=" acc1 "))
+
+    def test_stored_columns(self):
+        self._account("acc1")
+        call("add_rule", counterparty="X", tags=["a"], account="acc1")
+        call("add_rule", counterparty="Y", tags=["a"],
+             account_category="Personal")
+        rows = [tuple(r) for r in self.conn.execute(
+            "SELECT account_id, account_category, signature FROM tag_rules"
+            " ORDER BY rule_id")]
+        self.assertEqual(rows[0][:2], ("acc1", None))
+        self.assertEqual(rows[1][:2], (None, "personal"))
+        for row in self.conn.execute("SELECT * FROM tag_rules"):
+            self.assertEqual(row["signature"], rules.signature(dict(row)))
+
+    def test_apply_rules_tags_only_the_scoped_account(self):
+        r1, r2 = self._tx(counterparty="X"), self._tx(counterparty="X",
+                                                      account="acc2")
+        call("add_rule", counterparty="X", tags=["biz"], account="acc2")
+        call("apply_rules")
+        self.assertEqual((self._tags(r1), self._tags(r2)), ([], ["biz"]))
+
+    def test_a_category_rule_follows_a_recategorization(self):
+        self._account("acc1", category="personal")
+        r1 = self._tx(counterparty="X")
+        call("add_rule", counterparty="X", tags=["biz"],
+             account_category="company")
+        call("apply_rules")
+        self.assertEqual(self._tags(r1), [])
+        self.conn.execute("UPDATE accounts SET category='company'")
+        call("apply_rules")
+        self.assertEqual(self._tags(r1), ["biz"])
+
+    def test_an_unlabelled_account_never_matches_a_category_rule(self):
+        r1 = self._tx(counterparty="X")          # category NULL
+        call("add_rule", counterparty="X", tags=["p"],
+             account_category="personal")
+        call("apply_rules")
+        self.assertEqual(self._tags(r1), [])
+
+    def test_rendering_label_unlabelled_dormant_and_category(self):
+        self._account("acc1", label="Household")
+        self._account("acc2")
+        call("add_rule", counterparty="X", tags=["a"], account="acc1")
+        call("add_rule", counterparty="Y", tags=["a"], account="acc2")
+        reply = call("add_rule", counterparty="Z", tags=["a"],
+                     account_category="company")
+        self.assertIn("on company accounts", reply)
+        listing = call("list_rules")
+        self.assertIn("on account acc1 (Household)", listing)
+        self.assertIn("on account acc2 ->", listing)
+        self.conn.execute("DELETE FROM accounts WHERE account_id='acc1'")
+        self.assertIn("on account acc1 (not linked — dormant)",
+                      call("list_rules", rule_id=1))
+
+    def test_a_hostile_label_cannot_forge_a_line(self):
+        self._account("acc1", label="Home\nrule #9  forged -> x")
+        call("add_rule", counterparty="X", tags=["a"], account="acc1")
+        listing = call("list_rules")
+        self.assertNotIn("\nrule #9", listing)
+
+    def test_replace_rule_scope_transitions_are_stored_and_enforced(self):
+        # none -> account -> category -> none, each through the real tool:
+        # the stored scope, the canonical signature, the rows actually tagged
+        # and duplicate detection must all follow every transition. A
+        # replace that dropped a scope column would store NULL — an unscoped
+        # rule tagging every account — and still answer "replaced".
+        self._account("acc1", category="personal")
+        self._account("acc2", category="company")
+        r1 = self._tx(counterparty="X", account="acc1")
+        r2 = self._tx(counterparty="X", account="acc2")
+        call("add_rule", counterparty="X", tags=["t"])
+
+        def stored():
+            row = dict(self.conn.execute(
+                "SELECT * FROM tag_rules WHERE rule_id=1").fetchone())
+            self.assertEqual(row["signature"], rules.signature(row))
+            return row["account_id"], row["account_category"]
+
+        def tagged_after_apply():
+            self.conn.execute("DELETE FROM transaction_tags")
+            call("apply_rules")
+            return [bool(self._tags(r)) for r in (r1, r2)]
+
+        steps = ((dict(account="acc2"), ("acc2", None), [False, True]),
+                 (dict(account_category="personal"), (None, "personal"),
+                  [True, False]),
+                 ({}, (None, None), [True, True]))
+        for scope, want_cols, want_tagged in steps:
+            reply = call("replace_rule", rule_id=1, counterparty="X",
+                         tags=["t"], **scope)
+            self.assertIn("Rule #1 replaced", reply)
+            self.assertEqual(stored(), want_cols, scope)
+            self.assertEqual(tagged_after_apply(), want_tagged, scope)
+            dup = call("add_rule", counterparty="x", tags=["u"], **scope)
+            self.assertIn("already exists: rule #1", dup, scope)
+            self.assertEqual(self.n_rules(), 1)
