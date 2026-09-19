@@ -386,3 +386,40 @@ class TestAccountScopedRules(TestApplyRules):
         call("add_rule", counterparty="X", tags=["a"], account="acc1")
         listing = call("list_rules")
         self.assertNotIn("\nrule #9", listing)
+
+    def test_replace_rule_scope_transitions_are_stored_and_enforced(self):
+        # none -> account -> category -> none, each through the real tool:
+        # the stored scope, the canonical signature, the rows actually tagged
+        # and duplicate detection must all follow every transition. A
+        # replace that dropped a scope column would store NULL — an unscoped
+        # rule tagging every account — and still answer "replaced".
+        self._account("acc1", category="personal")
+        self._account("acc2", category="company")
+        r1 = self._tx(counterparty="X", account="acc1")
+        r2 = self._tx(counterparty="X", account="acc2")
+        call("add_rule", counterparty="X", tags=["t"])
+
+        def stored():
+            row = dict(self.conn.execute(
+                "SELECT * FROM tag_rules WHERE rule_id=1").fetchone())
+            self.assertEqual(row["signature"], rules.signature(row))
+            return row["account_id"], row["account_category"]
+
+        def tagged_after_apply():
+            self.conn.execute("DELETE FROM transaction_tags")
+            call("apply_rules")
+            return [bool(self._tags(r)) for r in (r1, r2)]
+
+        steps = ((dict(account="acc2"), ("acc2", None), [False, True]),
+                 (dict(account_category="personal"), (None, "personal"),
+                  [True, False]),
+                 ({}, (None, None), [True, True]))
+        for scope, want_cols, want_tagged in steps:
+            reply = call("replace_rule", rule_id=1, counterparty="X",
+                         tags=["t"], **scope)
+            self.assertIn("Rule #1 replaced", reply)
+            self.assertEqual(stored(), want_cols, scope)
+            self.assertEqual(tagged_after_apply(), want_tagged, scope)
+            dup = call("add_rule", counterparty="x", tags=["u"], **scope)
+            self.assertIn("already exists: rule #1", dup, scope)
+            self.assertEqual(self.n_rules(), 1)
