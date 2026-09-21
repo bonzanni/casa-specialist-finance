@@ -3133,7 +3133,9 @@ class TestSetupCredentialRung(Base):
     # Clauses rather than topic words: a word test survives the deletion of
     # the rule that carried it.
     _FERRY_RULES = (
-        "only if the operator explicitly asks, in this conversation",
+        "only if the operator explicitly asks, in this conversation, to "
+        "have their mailbox used for the sign-in may an agent read this "
+        "one email instead.",
         "Before reading, tell the operator in one sentence that this "
         "removes the human hand from issuing a durable credential, "
         "revocable by signing out all sessions in the Enable Banking "

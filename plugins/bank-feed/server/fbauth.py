@@ -141,9 +141,10 @@ def parse_signin_link(text: str) -> str:
         codes = urllib.parse.parse_qs(query).get("oobCode") or []
         if not codes:
             raise DefangedLink(
-                "that link carries no oobCode parameter — paste the full "
-                "'Sign in to Enable Banking' URL, copied from the email "
-                "without clicking it")
+                "that link carries no oobCode parameter. Copy the full "
+                "'Sign in to Enable Banking' URL by hand from your own mail "
+                "client, without clicking it — a delegated mailbox read "
+                "that produced this is spent, and is not retried")
         code = codes[0]
     if not _CODE_RX.match(code):
         raise DefangedLink(
