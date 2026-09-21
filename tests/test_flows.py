@@ -863,6 +863,153 @@ class TestSupersessionLineageUnderConcurrency(unittest.TestCase):
         self._assert_lineage_reaches_the_annotations()
 
 
+class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
+    """Issue #32, through the real backfill. The live booking for a payment is
+    dated just before a routine refresh's window; the bank returns the same
+    payment dated inside it. Reconcile cannot see the live row, so the fetch is
+    inserted as a second active row. Matching it to the out-of-window row was
+    tried and cut (that row's own restatement is never in the fetch, so it
+    would absorb a different payment); the insert is DISCLOSED instead: both
+    rows are flagged, and nothing else about the plan changes."""
+
+    REASON = "duplicate_across_window_edge"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = store.open_db(pathlib.Path(self.tmp.name) / "f.sqlite")
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency, aspsp)"
+            " VALUES ('acc1','uid-1','s1','EUR','Revolut')")
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _run(self, txs, floor_days=90):
+        flows.backfill(FakeAIS([(txs, None)]), self.conn, ACCOUNT, "s1",
+                       floor_days=floor_days, incarnation="")
+
+    @staticmethod
+    def _tx(date, amount="10.00", status="BOOK", ref="R1"):
+        tx = raw_tx(date, amount=amount, ref=ref)
+        tx["status"] = status
+        return tx
+
+    def _rows(self):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT row_id, booking_date, amount_minor, state, needs_review,"
+            " review_reason FROM transactions ORDER BY row_id")]
+
+    def _book_before_the_window(self, ref="R1"):
+        """Steps 1-2 of the issue: a pending row dated 28 July, booked by a
+        deep sync dated 26 July, annotated. Returns the booked row's id."""
+        self._run([self._tx("2026-07-28", status="PDNG", ref=ref)])
+        pending = self.conn.execute(
+            "SELECT row_id FROM transactions").fetchone()[0]
+        self.conn.execute(
+            "INSERT INTO transaction_notes(row_id, author, note, created_at)"
+            " VALUES (?, 'user', 'invoice 42', '2026-07-29T00:00:00')",
+            (pending,))
+        self._run([self._tx("2026-07-26", ref=ref)])
+        booked = self.conn.execute(
+            "SELECT row_id FROM transactions WHERE state='active'").fetchall()
+        self.assertEqual(len(booked), 1, self._rows())
+        self.assertEqual(self.conn.execute(
+            "SELECT superseded_by FROM transactions WHERE row_id=?",
+            (pending,)).fetchone()[0], booked[0][0])
+        return booked[0][0]
+
+    def _assert_both_flagged(self, booked):
+        active = [r for r in self._rows() if r["state"] == "active"]
+        self.assertEqual(len(active), 2, active)
+        for r in active:
+            self.assertEqual((r["needs_review"], r["review_reason"]),
+                             (1, self.REASON), r)
+        # The annotations stay where the supersession put them.
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT row_id, note FROM transaction_notes")],
+            [(booked, "invoice 42")])
+
+    def test_the_issues_sequence_is_flagged_on_both_rows(self):
+        # Trusted references; the re-dated booking carries a corrected amount,
+        # so only the reference ties it to the live row.
+        observe(self.conn)
+        booked = self._book_before_the_window()
+        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self._assert_both_flagged(booked)
+
+    def test_identical_content_without_a_reference_is_flagged(self):
+        # Untrusted account, no reference at all: content is the only tie.
+        booked = self._book_before_the_window(ref=None)
+        self._run([self._tx("2026-07-28", ref=None)], floor_days=7)
+        self._assert_both_flagged(booked)
+
+    def test_the_next_refresh_adds_nothing(self):
+        observe(self.conn)
+        self._book_before_the_window()
+        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        before = self._rows()
+        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self.assertEqual(self._rows(), before)
+
+    def test_a_standing_flag_on_the_edge_row_keeps_its_reason(self):
+        observe(self.conn)
+        booked = self._book_before_the_window()
+        self.conn.execute(
+            "UPDATE transactions SET needs_review=1,"
+            " review_reason='amount_changed' WHERE row_id=?", (booked,))
+        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self.assertEqual(self.conn.execute(
+            "SELECT review_reason FROM transactions WHERE row_id=?",
+            (booked,)).fetchone()[0], "amount_changed")
+        inserted = self.conn.execute(
+            "SELECT needs_review, review_reason FROM transactions"
+            " WHERE state='active' AND row_id<>?", (booked,)).fetchone()
+        self.assertEqual(tuple(inserted), (1, self.REASON))
+
+    def test_an_unrelated_payment_near_the_edge_is_not_flagged(self):
+        observe(self.conn)
+        booked = self._book_before_the_window()
+        other = raw_tx("2026-07-28", amount="55.00", ref="R9",
+                       remittance="iets anders")
+        self._run([other], floor_days=7)
+        self.assertEqual(
+            [(r["needs_review"], r["review_reason"]) for r in self._rows()
+             if r["state"] == "active"], [(0, None), (0, None)])
+        self.assertEqual(self.conn.execute(
+            "SELECT needs_review FROM transactions WHERE row_id=?",
+            (booked,)).fetchone()[0], 0)
+
+    def test_a_weekly_payment_whose_predecessor_is_in_view_is_not_flagged(self):
+        # The ordinary recurring case: last week's occurrence is inside the
+        # refresh window, so the new one is inserted without a flag.
+        self._run([raw_tx("2026-07-27", amount="20.00")])
+        self._run([raw_tx("2026-07-27", amount="20.00"),
+                   raw_tx("2026-08-03", amount="20.00")], floor_days=8)
+        self.assertEqual(
+            [(r["booking_date"], r["needs_review"]) for r in self._rows()],
+            [("2026-07-27", 0), ("2026-08-03", 0)])
+
+    def test_a_weekly_payment_posted_late_is_not_flagged(self):
+        # The design round's reproduction: the previous occurrence is exactly
+        # a week back and just BEFORE the window, because the bank posted this
+        # week's two days late. A week is a recurrence, not a re-date.
+        self._run([raw_tx("2026-07-21", amount="20.00", ref="W1")])
+        self._run([raw_tx("2026-07-21", amount="20.00", ref="W1"),
+                   raw_tx("2026-07-29", amount="3.00", ref="X1",
+                          remittance="koffie")])
+        window = 7 + (TODAY - dt.date(2026, 7, 29)).days   # the refresh's own
+        self._run([raw_tx("2026-07-28", amount="20.00", ref="W2"),
+                   raw_tx("2026-07-29", amount="3.00", ref="X1",
+                          remittance="koffie")], floor_days=window)
+        self.assertEqual(
+            [(r["booking_date"], r["needs_review"]) for r in self._rows()],
+            [("2026-07-21", 0), ("2026-07-29", 0), ("2026-07-28", 0)])
+
+
 class TestCompleteRenewal(unittest.TestCase):
     """Driven through the entry point `tools_auth` actually calls.
     Renewal must COMPLETE — the resident is asked, they tap, the system keeps

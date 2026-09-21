@@ -89,6 +89,7 @@ REASON_LABELS = {
     "content_present_elsewhere": "identical content matched elsewhere in the ledger",
     "direction_or_currency_changed": "the direction or currency changed after booking",
     "reference_shared_in_fetch": "the provider reference was shared by more than one fetched row",
+    "duplicate_across_window_edge": "possibly the same payment as a row dated just before the sync window",
 }
 MAX_REASONS = 3          # bounded like every other output
 
