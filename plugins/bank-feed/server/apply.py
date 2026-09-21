@@ -95,6 +95,22 @@ class RebindRefused(Exception):
         self.account_id = account_id
 
 
+class StalePlan(Exception):
+    """A plan tried to supersede a row that is no longer active: another run
+    superseded (or tombstoned) it after this plan was built. Writing anyway
+    would repoint `superseded_by` past the row that already holds the
+    predecessor's annotations, and leave two active bookings for one payment
+    (issue #30). The whole plan rolls back.
+
+    The plan is refused, not rebuilt: the run that lost the race also holds
+    the OLDER bank answer, and replanning it against the winner's rows would
+    commit that stale answer over the newer one. It propagates out of
+    `flows.backfill` like any failed apply, so `sync` reports the run as
+    failed with the ledger unchanged, and the next sync fetches again and
+    reconciles against the committed supersession.
+    """
+
+
 def record_binding_review(conn, account_id: str, note: str,
                           incarnation) -> None:
     """Record, durably, that this account's binding needs a human decision.
@@ -702,12 +718,26 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
                     # caller, or two callers racing on the same row_id space
                     # -- would otherwise silently rewrite a different
                     # account's ledger.
-                    " AND account_id=?",
+                    " AND account_id=?"
+                    # Only a row that is still active and has no successor.
+                    # Without this the edge is last-writer-wins: a plan built
+                    # before another run superseded the row would repoint
+                    # superseded_by past the row that now holds the
+                    # annotations (issue #30). A row that exists but fails
+                    # this raises below; it is not the silent skip.
+                    " AND state='active' AND superseded_by IS NULL",
                     (rec.get("state") or "superseded", rec.get("reason"),
                      local_ids[local], rec.get("match_method"),
                      rec.get("match_confidence"),
                      1 if rec.get("needs_review") else 0, now, row_id,
                      account_id))
+                if not cur.rowcount and conn.execute(
+                        "SELECT 1 FROM transactions WHERE row_id=?"
+                        " AND account_id=?", (row_id, account_id)).fetchone():
+                    raise StalePlan(
+                        f"row {row_id} is no longer active; this plan was "
+                        "built before another run superseded or tombstoned "
+                        "it")
                 # The count attests to a WRITE, not to a plan entry. A row_id that no longer exists (deleted by
                 # purge_before or forget_local_account between the caller
                 # loading `stored` and this plan landing) affects zero rows;

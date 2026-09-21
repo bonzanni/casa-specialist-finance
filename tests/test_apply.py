@@ -1570,6 +1570,56 @@ class TestAnnotationSurvival(Base):
             "SELECT COUNT(*) FROM transaction_notes WHERE row_id=?",
             (old,)).fetchone()[0], 1)
 
+    def _state(self):
+        return ([tuple(r) for r in self.conn.execute(
+                    "SELECT row_id, state, superseded_by FROM transactions"
+                    " ORDER BY row_id")],
+                [tuple(r) for r in self.conn.execute(
+                    "SELECT row_id, tag FROM transaction_tags")],
+                [tuple(r) for r in self.conn.execute(
+                    "SELECT row_id, note FROM transaction_notes")])
+
+    def test_a_second_supersede_of_the_same_row_is_refused_whole(self):
+        """Issue #30. Two runs plan the same pending row's supersession; the
+        first lands and moves the annotations. The second must not repoint
+        `superseded_by` past the row that holds them: it raises StalePlan
+        and nothing of it lands, its insert included."""
+        old, plan2 = self._superseding_plan()
+        self._annotate(old)
+        apply.apply_plan(self.conn, "acc1", plan2)
+        before = self._state()
+        stale = ingest.Plan(
+            # A different amount is a different identity, which is what
+            # lets both bookings past UNIQUE (account_id, identity_key,
+            # occurrence) in the issue's reproduction.
+            inserts=[dict(plan2.inserts[0], amount_minor=1100,
+                          identity_key="ik-other", occurrence=0)],
+            updates=plan2.updates, tombstones=[], flags=[])
+        with self.assertRaises(apply.StalePlan):
+            apply.apply_plan(self.conn, "acc1", stale)
+        self.assertEqual(self._state(), before)
+
+    def test_a_supersede_of_a_vanished_row_is_refused(self):
+        old, plan2 = self._superseding_plan()
+        self.conn.execute("UPDATE transactions SET state='vanished'"
+                          " WHERE row_id=?", (old,))
+        before = self._state()
+        with self.assertRaises(apply.StalePlan):
+            apply.apply_plan(self.conn, "acc1", plan2)
+        self.assertEqual(self._state(), before)
+
+    def test_a_committed_edge_is_never_repointed_whatever_the_state(self):
+        # The guard reads the edge itself, not only the state that normally
+        # accompanies it: an active row that already names a successor is
+        # refused too, so no path can overwrite a committed superseded_by.
+        old, plan2 = self._superseding_plan()
+        self.conn.execute("UPDATE transactions SET superseded_by=?"
+                          " WHERE row_id=?", (old, old))
+        before = self._state()
+        with self.assertRaises(apply.StalePlan):
+            apply.apply_plan(self.conn, "acc1", plan2)
+        self.assertEqual(self._state(), before)
+
     def test_tombstone_and_rekey_leave_annotations_in_place(self):
         plan = ingest.reconcile([], [row("2026-02-05", ref="R1")],
                                 IV, CAP_STABLE)
