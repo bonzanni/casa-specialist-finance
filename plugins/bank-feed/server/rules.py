@@ -502,13 +502,21 @@ def classification_state(tags) -> str:
 def queue_totals(conn):
     """(workable, parked) over non-superseded rows, via
     classification_state — counts span ALL accounts, included or not."""
-    workable = parked = 0
-    for row in conn.execute(
-            "SELECT t.row_id, GROUP_CONCAT(tt.tag, ' ') AS tags"
+    # One (row, tag) pair per result row, grouped here: joining tags into
+    # one string and splitting it again would cut a stored value that
+    # contains the separator into tags the SQL queue never sees.
+    tags_by_row: dict = {}
+    for rid, tag in conn.execute(
+            "SELECT t.row_id, tt.tag"
             " FROM transactions t LEFT JOIN transaction_tags tt"
             " ON tt.row_id = t.row_id"
-            " WHERE t.state IN ('active','vanished') GROUP BY t.row_id"):
-        state = classification_state((row["tags"] or "").split())
+            " WHERE t.state IN ('active','vanished')"):
+        bucket = tags_by_row.setdefault(rid, [])
+        if tag is not None:
+            bucket.append(tag)
+    workable = parked = 0
+    for tags in tags_by_row.values():
+        state = classification_state(tags)
         if state == "workable":
             workable += 1
         elif state == "parked":

@@ -157,6 +157,15 @@ class TestQueue(LedgerCase):
         # 'acct:matched' = 4.
         self.assertEqual(tuple(expected_totals), (4, 16))
 
+    def test_totals_read_each_stored_tag_whole(self):
+        # queue_totals must not rebuild a row's tags by joining and
+        # splitting on spaces: a stored 'x::y z' is ONE namespaced value,
+        # which the SQL queue treats as such.
+        rid = self.row()
+        self.store_tag(rid, "x::y z")
+        self.assertEqual(self.queue_ids(), {rid})
+        self.assertEqual(rules.queue_totals(self.conn), (1, 0))
+
 
 class TestCapacity(LedgerCase):
     def test_classification_budget_is_not_consumed_by_foreign_tags(self):
