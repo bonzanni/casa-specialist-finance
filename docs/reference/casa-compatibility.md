@@ -155,6 +155,20 @@ launched server. The declaration is why the component's floor is casa >= v0.318.
 Under casa v0.290.0 or later, the declaration is what makes any tool but
 `setup_bank_feed` run at all.
 
+## The file handoff
+
+`export_history` publishes the ledger export into casa's plugin file handoff
+folder instead of the plugin's own data directory, so another plugin can take the
+file. `plugins/bank-feed/server/casa_handoff.py` is casa's `casa_handoff.py`
+(casa v0.326.0) copied verbatim. It finds the folder through `CASA_HANDOFF_DIR`,
+defaulting to `/data/handoff`, and publishes under `bank-feed/`. The folder
+keeps a file for 7 days and refuses a new one when full; it never evicts one.
+
+That is the one tool that needs **casa >= v0.326.0**; the component's floor for
+everything else is unchanged. Under an older casa the folder does not exist:
+`publish` raises `handoff_unavailable`, and `export_history` answers that the
+export could not be written, naming the reason, and returns no path.
+
 ## How this stays true
 
 The table is **machine-read**, not decorative. `tests/test_component.py` parses
@@ -184,9 +198,11 @@ to them.
 - `tests/test_component.py`
 - `plugins/bank-feed/server/callbacks.py`
 - `plugins/bank-feed/server/casa_broker.py`
+- `plugins/bank-feed/server/casa_handoff.py`
 
 **Tests**
 - `tests/test_component.py`
+- `tests/test_tools_refresh.py`
 - `tests/test_casa_broker.py`
 - `tests/test_server_smoke.py`
 

@@ -38,10 +38,10 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
+import io
 import json
-import os
-from pathlib import Path
 
+import casa_handoff
 import flows
 import httpx
 import money
@@ -912,8 +912,10 @@ def _export_columns(c) -> list:
 
 
 @register("export_history",
-          "Write the full local ledger to a file under the plugin's data "
-          "directory, as CSV or JSONL, and return the path.",
+          "Write the full local ledger as CSV or JSONL into Casa's handoff "
+          "folder and return the path. Another plugin can take the file from "
+          "that path (an accounting import, an email attachment); it is kept "
+          "7 days.",
           {"type": "object",
            "properties": {"format": {"type": "string",
                                      "enum": ["csv", "jsonl"]}}})
@@ -922,32 +924,36 @@ def export_history(args: dict) -> str:
     fmt = str(args.get("format") or "csv").lower()
     if fmt not in ("csv", "jsonl"):
         return "format must be csv or jsonl."
-    data_dir = os.environ.get("CLAUDE_PLUGIN_DATA")
-    if not data_dir:
-        raise RuntimeError("CLAUDE_PLUGIN_DATA is not set")
     columns = _export_columns(c)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = Path(data_dir) / ("export-%s.%s" % (stamp, fmt))
     rows = [dict(r) for r in c.execute(
         "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
         % ", ".join(columns))]
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        if fmt == "csv":
-            writer = csv.DictWriter(handle, fieldnames=columns)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-        else:
-            for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    os.chmod(path, 0o600)
+    buf = io.StringIO(newline="")
+    if fmt == "csv":
+        writer = csv.DictWriter(buf, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    else:
+        for row in rows:
+            buf.write(json.dumps(row, ensure_ascii=False) + "\n")
+    try:
+        out = casa_handoff.publish(
+            "bank-feed", "ledger-export-%s.%s" % (stamp, fmt),
+            data=buf.getvalue().encode("utf-8"))
+    except casa_handoff.HandoffError as exc:
+        return "The export could not be written: %s" % exc
     return "\n".join([
         "Exported %d transaction(s) as %s, every column of the ledger except "
-        "%s. The file is yours to keep and is written in full — it is a file "
-        "for you, not model context, so nothing is clipped or delimited, and "
-        "it therefore contains bank-supplied text exactly as the bank sent it."
-        % (len(rows), fmt, ", ".join(sorted(EXPORT_EXCLUDE))),
-        "Path: %s" % path,
+        "%s. The file is written in full — it is a file, not model context, "
+        "so nothing is clipped or delimited, and it therefore contains "
+        "bank-supplied text exactly as the bank sent it. It is in Casa's "
+        "handoff folder for %d days: pass the path to the tool that needs it, "
+        "or copy it somewhere to keep it."
+        % (len(rows), fmt, ", ".join(sorted(EXPORT_EXCLUDE)),
+           casa_handoff.RETENTION_S // 86400),
+        "Path: %s" % out["path"],
     ])
 
 

@@ -1,7 +1,7 @@
 {
   "api_version": "casa.specialist-component/v1",
   "component_id": "casa/finance",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "default_persona": {
     "ref": "casa/alex@0.1.0",
     "checksum": "sha256:5567536c118d74e0d1bfe45aaa19dd6398ad7977eb2831ec73d55ddddbc43bce"
@@ -15,7 +15,7 @@
     {
       "kind": "plugin/implementation",
       "identifier": "bank-feed",
-      "digest": "sha256:5f51968060cc59bf659aee21e79e45ce2197058c35871afffc6693d7778977df",
+      "digest": "sha256:7c0740986f6a5a6eee5ae3d110561c38eff7382e07035524b173a01f19d4b968",
       "source": {
         "type": "bundled",
         "path": "plugins/bank-feed"
