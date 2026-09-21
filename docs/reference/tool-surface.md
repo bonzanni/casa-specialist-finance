@@ -77,7 +77,7 @@ alone is enough:
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
-| `export_history` | Write the whole local ledger to a file under the plugin's data directory. |
+| `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it. |
 
 ### Tags another workflow owns
 

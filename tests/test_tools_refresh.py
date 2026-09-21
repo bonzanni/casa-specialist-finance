@@ -15,6 +15,7 @@ import bank_feed_server  # noqa: E402
 import flows  # noqa: E402
 import tools_auth  # noqa: E402
 import tools_read  # noqa: E402
+import casa_handoff
 import tools_refresh  # noqa: E402
 
 from _toolbase import (Base as _ToolBase, FROZEN_NOW, SESSION_ID,  # noqa: E402
@@ -372,14 +373,17 @@ class TestRenameAccount(Base):
 
 
 class TestExport(Base):
-    def test_export_history_writes_csv_under_plugin_data(self):
+    def test_export_history_publishes_csv_to_the_handoff_folder(self):
         self.account()
         self.tx()
         out = call("export_history", format="csv")
         path = pathlib.Path(out.strip().splitlines()[-1].split(": ", 1)[1])
-        self.assertTrue(path.exists())
-        self.assertEqual(path.parent, self.root)
-        self.assertIn("booking_date", path.read_text("utf-8"))
+        # <handoff>/bank-feed/<id>/<name>: a file another plugin can take.
+        self.assertEqual(path.parent.parent, self.handoff / "bank-feed")
+        name, data = casa_handoff.capture(str(path))
+        self.assertTrue(name.startswith("ledger-export-") and name.endswith(".csv"))
+        self.assertIn("booking_date", data.decode("utf-8"))
+        self.assertEqual([p.name for p in self.root.glob("export-*")], [])
 
     def test_export_history_writes_jsonl(self):
         self.account()
@@ -444,12 +448,19 @@ class TestExport(Base):
         with self.assertRaises(RuntimeError):
             call("export_history", format="csv")
 
-    def test_the_export_file_is_readable_only_by_its_owner(self):
+    def test_the_export_is_not_readable_by_other_users(self):
         self.account()
         self.tx()
         out = call("export_history", format="csv")
         path = pathlib.Path(out.strip().splitlines()[-1].split(": ", 1)[1])
-        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o007, 0)
+
+    def test_export_history_says_so_when_the_handoff_folder_is_missing(self):
+        self.account()
+        os.rmdir(self.handoff)
+        out = call("export_history", format="csv")
+        self.assertIn("could not be written", out)
+        self.assertNotIn("Path:", out)
 
     def test_the_export_names_what_it_left_out(self):
         # "written in full" has to be true or it is worse than no claim.

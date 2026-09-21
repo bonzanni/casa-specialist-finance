@@ -764,6 +764,11 @@ class Base(unittest.TestCase):
 
         os.environ["CLAUDE_PLUGIN_ROOT"] = str(self.root)
         os.environ["CLAUDE_PLUGIN_DATA"] = str(self.root)
+        # Casa's plugin file handoff folder, where export_history publishes.
+        # Casa creates it; the plugin only writes into it.
+        self.handoff = self.root / "handoff"
+        self.handoff.mkdir(mode=0o770)
+        os.environ["CASA_HANDOFF_DIR"] = str(self.handoff)
         os.environ["CASA_BANKFEED_EB_APP_ID"] = "app-1"
         os.environ["CASA_BANKFEED_EB_PRIVATE_KEY"] = TEST_KEY_PEM
         # ONLY the variable .mcp.json declares. Setting the undeclared name is

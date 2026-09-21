@@ -30,6 +30,10 @@ tree (casa v0.155.0, issue #4). It also relies on casa delivering the link
 `link_bank` produces (casa v0.318.0, ha-casa-app#1015): an older casa refuses
 the manifest's `delivers` declaration at install.
 
+`export_history` needs **casa v0.326.0 or later**: it publishes the export into
+casa's plugin file handoff folder (ha-casa-app#486), which an older casa does not
+create. There the tool answers that the export could not be written.
+
 Under **casa v0.290.0 or later** the manifest's `casa.resultContract` is what
 lets any tool but `setup_bank_feed` run at all: casa refuses a call to a
 non-setup tool the declaration omits, before it runs. Every bank-feed tool but
