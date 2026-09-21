@@ -23,7 +23,7 @@ missing.
 
 The plugin forges and stores everything it can. The human step in
 **credential acquisition** is ferrying the intact sign-in URL out of the
-mailbox and passing it back — a copy/paste, not a click: mail connectors
+mailbox and passing it back — a copy/paste, not a click: some mail relays
 defang the link in transit, and clicking it in a browser consumes the
 single-use code without handing the plugin anything. "Software triggers a
 sign-in email *and* reads the mailbox for the code" is, unconsented, an
@@ -34,9 +34,16 @@ has already consented to mailbox access, an explicit per-send operator
 request ("use my mailbox for the sign-in") may delegate that single read —
 scoped to the provider's own sign-in mail for the configured account email,
 one body fetch, exactly one candidate or fall back to manual. The protocol,
-with every rule, lives in the bank-accounts skill; no code reads a mailbox
-in either case, and the server-side ladder is byte-identical with or
-without the delegation.
+with every rule, lives in the bank-accounts skill, and it binds whoever
+performs the mailbox read. On the usual install that is the resident
+assistant, not the specialist, and the assistant never loads the skill — so
+the sign-in step's own message carries the operative core too (issue #19):
+consent, the trade-off sentence, a matcher anchored on the named send's
+time, one fetch and one attempt, and the report afterwards. Consent covers
+the send that message names: the one setup makes after the delegation, or
+the single send already in flight inside the 15-minute window; a resend
+never inherits it. No code reads a mailbox in either case, and the
+server-side ladder is byte-identical with or without the delegation.
 
 **That is NOT the only human touch in the install.** "Exactly one human touch"
 would be false. The full install keeps: approving the callback consent DM, the
@@ -88,13 +95,15 @@ Phase 0 is what makes setup idempotent: a second run is a no-op.
 - **Account email**: from 1Password, else ask once.
 - **The copy/paste, or its delegated stand-in.** The default path is the
   manual ferry, and no CODE mailbox branch exists — see "the principle"
-  above, and the bank-accounts skill, which instructs the specialist never
-  to read that email on the operator's behalf except under the skill's own
-  delegated-ferry protocol: an explicit, per-send operator request, a
-  strictly matched single read, and this same manual flow as the fallback.
+  above, and the bank-accounts skill, which forbids reading that email on
+  the operator's behalf except under the skill's own delegated-ferry
+  protocol: an explicit, per-send operator request, a strictly matched
+  single read, and this same manual flow as the fallback. The protocol binds
+  whoever performs the read, and the sign-in message carries its core.
   1. plugin calls `sendOobCode`, at most one email per 15 minutes unless the
      operator asks for a resend.
-  2. plugin prints step-by-step instructions naming `bank_feed_signin`.
+  2. plugin prints step-by-step instructions naming `bank_feed_signin` and
+     the send's time, with the delegated-read rules appended.
   3. operator **copies** the intact URL out of their own mail client and pastes
      it back as `signin_link` (not a click — a browser visit consumes the
      single-use code without handing the plugin anything).
@@ -177,9 +186,11 @@ them fails closed.
 2. **Software reading the link from a mailbox is takeover-shaped, so it is
    opt-in per send, never a default.** "Trigger a sign-in email *and* read the
    mailbox for the code" is, unconsented, an account-takeover primitive; and
-   mail connectors defang the link in transit — they rewrite characters inside
-   the code, so what arrives through a connector is not what was sent. The
-   default therefore remains the human ferry. What issue #11 changed
+   some mail relays defang the link in transit — they rewrite characters
+   inside the code, so what arrives is not what was sent — while others
+   (casa-plugin-gmail, issue #19) deliver it byte-identical. The parser
+   refuses visible mangling either way. The default therefore remains the
+   human ferry. What issue #11 changed
    (2026-08-11): the operator may explicitly delegate the read, per send,
    under the skill's ferry protocol — a defanged code is still final there,
    falling back to the manual paste. There is still no code that reads a

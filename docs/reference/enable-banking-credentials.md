@@ -64,17 +64,22 @@ The design respects that instead of fighting it:
    wasted email, against a stranded setup if it is right. Copy the URL, or the
    `oobCode` out of it. (On a casa install with consented mailbox access, the
    operator may explicitly delegate this one read per send — the bank-accounts
-   skill's ferry protocol, issue #11; the fallback is this manual step,
-   unchanged.)
+   skill's ferry protocol, issue #11, whose operative rules the setup message
+   itself carries to whichever agent holds the mailbox tool, issue #19; the
+   fallback is this manual step, unchanged.)
 3. **The plugin exchanges the code and stores the token** — safe to automate.
 
-> **Do not relay the link through a mail connector.** Connectors defang
+> **A relayed link is checked, not trusted.** Some mail relays defang
 > authentication links in transit — observed live: the `oobCode` came through
 > with its leading characters dropped and `=` rewritten to `~`, i.e.
-> deliberately broken. Copy the intact URL, unopened, from your own mail
-> client — or, on an install where you have explicitly delegated the ferry
-> (issue #11), let the specialist read that one mail directly; a mangled code
-> there is final and falls back to this manual copy.
+> deliberately broken. Others deliver it intact: casa-plugin-gmail, on the
+> first live delegated ferry, delivered the link byte-identical to the one
+> sent (issue #19). So the default stays the intact URL, copied unopened from
+> your own mail client; on an install where you have explicitly delegated the
+> ferry, the agent holding the mailbox tool may read that one mail under the
+> rules the setup message carries. `bank_feed_signin` refuses a visibly
+> mangled code, and on a delegated read that refusal is final and falls back
+> to this manual copy.
 
 ## Step 1 — trigger the email
 

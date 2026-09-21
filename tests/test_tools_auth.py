@@ -3124,6 +3124,51 @@ class TestSetupCredentialRung(Base):
         call("setup_bank_feed")
         self.assertEqual(len(self.fb.sent), 2)
 
+    @staticmethod
+    def _utc(epoch_s):
+        return datetime.datetime.fromtimestamp(
+            epoch_s, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def test_the_fresh_send_stanza_carries_the_delegated_read_rules(self):
+        # Issue #19: on the natural install the mailbox tool belongs to an
+        # agent that never loads the skill, so the ferry's operative core
+        # has to travel in the stanza itself — and the stanza must stop
+        # forbidding the route the skill permits.
+        self._no_refresh()
+        out = call("setup_bank_feed")
+        flat = " ".join(out.split())
+        for needle in ("Delegated read", "explicitly asks",
+                       "in one sentence", "signing out all sessions",
+                       "The request covers only the email sent at "
+                       + self._utc(FROZEN_NOW),
+                       "delivered to op@example.com",
+                       "no earlier than one minute before",
+                       "enablebanking.com", "Zero or several candidates",
+                       "at most one mail body", "one attempt",
+                       "by its received time", "resend=true"):
+            self.assertIn(needle, flat)
+        for gone in ("through a connector", "must not do",
+                     "IN YOUR OWN MAIL CLIENT"):
+            self.assertNotIn(gone, flat)
+
+    def test_the_in_flight_stanza_anchors_the_rules_on_the_original_send(self):
+        # Consent may cover the send already on its way, and the matcher's
+        # lower bound is THAT send's time, not the time of this call: a
+        # stanza stamped "now" would exclude the very mail it covers.
+        self._no_refresh()
+        call("setup_bank_feed")
+        tools_auth._meta_set(self.raw, "setup.oob_sent_at",
+                             str(FROZEN_NOW - 300))
+        out = call("setup_bank_feed")
+        flat = " ".join(out.split())
+        self.assertEqual(len(self.fb.sent), 1)
+        self.assertIn("already sent to op@example.com at "
+                      + self._utc(FROZEN_NOW - 300), flat)
+        self.assertIn("The request covers only the email sent at "
+                      + self._utc(FROZEN_NOW - 300), flat)
+        self.assertNotIn(self._utc(FROZEN_NOW), flat)
+        self.assertNotIn("through a connector", flat)
+
     def test_no_email_anywhere_asks_for_it_and_sends_nothing(self):
         self._no_refresh()
         self.vault.values.pop(FakeVault.REF_EMAIL, None)

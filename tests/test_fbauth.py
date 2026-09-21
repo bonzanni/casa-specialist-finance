@@ -79,7 +79,7 @@ class TestParseSigninLink(Base):
         self.assertEqual(fbauth.parse_signin_link(" " + CODE + "\n"), CODE)
 
     def test_a_defanged_link_is_refused_with_the_copy_instruction(self):
-        # One shape a mail connector's defang takes: `=` rewritten to `~`.
+        # One observed defang shape: leading characters dropped, `=` → `~`.
         mangled = LINK.replace("oobCode=" + CODE,
                                "oobCode=" + CODE[3:] + "~x")
         with self.assertRaises(fbauth.DefangedLink) as ctx:

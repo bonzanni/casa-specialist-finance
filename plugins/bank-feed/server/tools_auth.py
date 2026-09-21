@@ -1437,13 +1437,14 @@ def _credential_rung(c, lines, args):
         recently = False
     if recently and not args.get("resend"):
         lines.append(
-            "3. Credential: a sign-in email was already sent to %s in the "
-            "last 15 minutes. Find 'Sign in to Enable Banking' in that "
-            "mailbox, COPY the full link from your own mail client "
-            "(do not click it, and do not relay it through a connector — "
-            "both destroy the single-use code), and run bank_feed_signin "
-            "with signin_link=<the copied URL>. Use resend=true for a "
-            "fresh email. Stopping." % _safe(email))
+            "3. Credential: a sign-in email was already sent to %s at %s, "
+            "within the last 15 minutes. Find 'Sign in to Enable Banking' "
+            "in that mailbox, COPY the full link (do not click it — a "
+            "browser visit consumes the single-use code), and run "
+            "bank_feed_signin with signin_link=<the copied URL>. Use "
+            "resend=true for a fresh email. %s Stopping."
+            % (_safe(email), _stamp(float(sent_at)),
+               _ferry_rules(email, float(sent_at))))
         return False
     try:
         FB.send_signin_email(email)
@@ -1457,16 +1458,56 @@ def _credential_rung(c, lines, args):
         lines.append("3. Credential: the sign-in email could not be sent "
                      "(%s). Stopping." % _safe(type(exc).__name__))
         return False
-    _meta_set(c, "setup.oob_sent_at", str(_now_s()))
+    sent_at = _now_s()
+    _meta_set(c, "setup.oob_sent_at", str(sent_at))
     lines.append(
         "3. Credential: a 'Sign in to Enable Banking' email was just sent "
-        "to %s. This is the one human step software must not do: open "
-        "that email IN YOUR OWN MAIL CLIENT, COPY the full sign-in URL "
-        "(do not click it — a browser visit consumes the single-use "
-        "code), and run bank_feed_signin with signin_link=<the copied "
-        "URL> within the hour. Everything after that paste is "
-        "automatic. Stopping until then." % _safe(email))
+        "to %s at %s. COPY the full sign-in URL out of that email (do not "
+        "click it — a browser visit consumes the single-use code) and run "
+        "bank_feed_signin with signin_link=<the copied URL> within the "
+        "hour. By default the operator does this by hand, in their own "
+        "mail client. %s Everything after that paste is automatic. "
+        "Stopping until then."
+        % (_safe(email), _stamp(sent_at), _ferry_rules(email, sent_at)))
     return False
+
+
+def _stamp(epoch_s: float) -> str:
+    return _dt.datetime.fromtimestamp(
+        epoch_s, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _ferry_rules(email: str, sent_at: float) -> str:
+    """The delegated-ferry protocol's operative core, in the sign-in stanza
+    itself (issue #19).
+
+    The skill's protocol binds the specialist, but on the natural install
+    the mailbox tool belongs to the resident assistant, which never loads
+    the skill. This stanza is the one text that reaches whichever agent
+    performs the read, so the rules travel in it: consent, the trade-off
+    sentence, the strict matcher anchored on THIS send's time, one fetch and
+    one attempt, and the post-attempt report. Keep it in step with section
+    10 of `skills/bank-accounts/SKILL.md`."""
+    return (
+        "Delegated read, for whichever agent holds a mailbox tool: only "
+        "if the operator explicitly asks, in this conversation, to have "
+        "their mailbox used for the sign-in may an agent read this one "
+        "email instead. Before reading, tell the operator in one sentence "
+        "that this removes the human hand from issuing a durable "
+        "credential, revocable by signing out all sessions in the Enable "
+        "Banking control panel. The request covers only the email sent at "
+        "%s: accept exactly one mail delivered to %s, received no earlier "
+        "than one minute before that time, subject 'Sign in to Enable "
+        "Banking', from a sender in the provider's own domains "
+        "(enablebanking.com, or its Firebase sender). Zero or several "
+        "candidates, or any doubt, means the manual copy instead. Fetch "
+        "at most one mail body, pass its sign-in URL exactly as "
+        "signin_link, and make one attempt; any failure ends the "
+        "delegation, with no second read. Afterwards, tell the operator "
+        "which mail was used, by its received time. A request covers one "
+        "email and one attempt: an email sent with resend=true, or after "
+        "an attempt already made, needs the operator to ask again."
+        % (_stamp(sent_at), _safe(email)))
 
 
 def _reconcile(args: dict) -> str:
@@ -2015,8 +2056,10 @@ def setup_bank_feed(args: dict) -> str:
                         "stored in the vault's username field thereafter."},
               "signin_link": {"type": "string", "description":
                               "The full 'Sign in to Enable Banking' URL, "
-                              "COPIED (not clicked) from the operator's own "
-                              "mail client. Single-use, expires in ~1 h."},
+                              "COPIED (not clicked) from that email — by "
+                              "the operator, or by a mailbox read they "
+                              "delegated under the setup message's rules. "
+                              "Single-use, expires in ~1 h."},
               "resend": {"type": "boolean", "description":
                          "Send a fresh sign-in email even if one was sent "
                          "in the last 15 minutes."}}})
