@@ -1880,6 +1880,31 @@ class TestRuleApplicationInApplyPlan(Base):
         self.assertEqual(stats["auto_tagged"], 1)     # ≥1 non-workflow tag
         self.assertEqual(stats["needs_classification"], 0)
 
+    def test_foreign_only_insert_still_needs_classification(self):
+        # Issue #31: another workflow's `owner::name` tag rides the supersede
+        # migration (it is about the transaction), but it is not
+        # classification — the replacement is neither auto-tagged nor out of
+        # the queue.
+        plan = ingest.reconcile(
+            [], [row("2026-02-05", ref="R1", status="PDNG")], IV,
+            CAP_STABLE)
+        apply.apply_plan(self.conn, "acc1", plan)
+        old_id = self._all()[0]["row_id"]
+        self.conn.execute(
+            "INSERT INTO transaction_tags(row_id, tag, added_at)"
+            " VALUES (?,'acct::matched','t')", (old_id,))
+        plan2 = ingest.reconcile(
+            self._all(), [row("2026-02-05", ref="R1", status="BOOK")],
+            IV, CAP_STABLE)
+        stats = apply.apply_plan(self.conn, "acc1", plan2)
+        self.assertEqual(stats["superseded"], 1)
+        new_id = stats["inserted_row_ids"][0]
+        self.assertEqual([r[0] for r in self.conn.execute(
+            "SELECT tag FROM transaction_tags WHERE row_id=?", (new_id,))],
+            ["acct::matched"])
+        self.assertEqual(stats["auto_tagged"], 0)
+        self.assertEqual(stats["needs_classification"], 1)
+
 
 class TestIncarnationFence(Base):
     """Issue #8, the apply-layer primitives: every late write refuses when

@@ -79,6 +79,19 @@ alone is enough:
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
 | `export_history` | Write the whole local ledger to a file under the plugin's data directory. |
 
+### Tags another workflow owns
+
+A tag written `owner::name` belongs to another workflow (a plugin that mirrors
+accounting decisions, say). It is never a classification: a row that carries only such
+tags stays in the classification queue, `spend_by_tag` neither groups by them nor
+counts them as tagged unless they are named in `tags`, and `list_tags` lists them apart.
+They have their own per-row budget — 16 per owner, 64 in all — so neither side can
+fill a row the other needs. `rename_tag` refuses them on either side, and rules cannot
+mint them, because a workflow that maintains a fixed vocabulary would otherwise keep
+asserting a tag it had retracted under its old name. `delete_tag` is allowed; the owner
+reasserts whatever it still holds. They follow their transaction through a supersession,
+as notes do, and are erased with it. A single `:` is not a separator and is refused.
+
 ## Setup and authorization
 
 | Tool | Does |

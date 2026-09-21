@@ -25,10 +25,13 @@ from __future__ import annotations
 import datetime as _dt
 import re
 
+import rules
 import tools_read
 from tools_read import register
 
-TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# Same pattern as rules.TAG_RE (asserted equal by test). An optional
+# `owner::` prefix marks another workflow's tag (issue #31).
+TAG_RE = re.compile(r"^(?:[a-z][a-z0-9-]{0,15}::)?[a-z0-9][a-z0-9-]{0,31}$")
 TAG_RULE = ("tags must be 1-32 characters of a-z, 0-9 or '-', starting with "
             "a letter or digit (they are lowercased and trimmed first)")
 MAX_TAGS_PER_CALL = 16
@@ -48,6 +51,13 @@ _ROW_IDS_SCHEMA = {"type": "array", "items": {"type": "integer"},
 def _now() -> str:
     # Same clock and format apply.py stamps first_seen/last_seen with.
     return _dt.datetime.now().isoformat()
+
+
+def _invalid_tag(raw_value) -> str:
+    """Refusal text for a tag outside the grammar. Deliberately silent about
+    the `owner::` form: it must not nudge a classifier that wrote
+    'food:groceries' into minting a namespace for hierarchy."""
+    return "invalid tag %r: %s. Nothing was changed." % (raw_value, TAG_RULE)
 
 
 def _normalize_tags(raw):
@@ -72,8 +82,7 @@ def _normalize_tags(raw):
                         % (t,))
         norm = t.strip().lower()
         if not TAG_RE.fullmatch(norm):
-            return [], ("invalid tag %r: %s. Nothing was changed."
-                        % (t, TAG_RULE))
+            return [], _invalid_tag(t)
         if norm not in seen:
             seen.add(norm)
             out.append(norm)
@@ -181,8 +190,11 @@ def _echo(rows):
           "Attach short classification tags to cached transactions "
           "(1-100 #row_id handles from list_transactions). Tags are "
           "normalized: lowercase, a-z 0-9 and '-', max 32 chars, at most "
-          "32 per transaction. All-or-nothing: one refusing row refuses "
-          "the whole call and nothing is written. Idempotent per row.",
+          "32 per transaction. A tag written owner::name belongs to "
+          "another workflow: it is not a classification, and has its own "
+          "budget (16 per owner, 64 per transaction). All-or-nothing: one "
+          "refusing row refuses the whole call and nothing is written. "
+          "Idempotent per row.",
           {"type": "object", "properties": {
               "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA},
            "required": ["row_ids", "tags"]})
@@ -206,11 +218,9 @@ def tag_transaction(args: dict) -> str:
                 "SELECT tag FROM transaction_tags WHERE row_id=?",
                 (row["row_id"],))}
             existing_by_row[row["row_id"]] = existing
-            if len(existing | set(tags)) > MAX_TAGS_PER_ROW:
-                problems.append(
-                    "row #%d already carries %d tags and this call "
-                    "would push it past the cap of %d"
-                    % (row["row_id"], len(existing), MAX_TAGS_PER_ROW))
+            why = rules.cap_problem(existing, tags)
+            if why is not None:
+                problems.append("row #%d %s" % (row["row_id"], why))
         if problems:
             c.execute("ROLLBACK")
             return "; ".join(problems) + " Nothing was changed."
@@ -343,8 +353,7 @@ def _one_tag(value):
                       "changed." % (value,))
     norm = value.strip().lower()
     if not TAG_RE.fullmatch(norm):
-        return None, ("invalid tag %r: %s. Nothing was changed."
-                      % (value, TAG_RULE))
+        return None, _invalid_tag(value)
     return norm, None
 
 
@@ -390,7 +399,8 @@ def _rewrite_rule_tags(c, old, new):
           "edit). If the new name is already in use the call refuses "
           "unless merge is true; merging folds the two tags together "
           "IRREVERSIBLY (no record remains of which rows carried the old "
-          "name).",
+          "name). Refused for owner::name tags on either side: those belong "
+          "to another workflow.",
           {"type": "object", "properties": {
               "old": {"type": "string"}, "new": {"type": "string"},
               "merge": {"type": "boolean"}},
@@ -405,6 +415,16 @@ def rename_tag(args: dict) -> str:
     if old == new:
         return ("old and new normalize to the same tag %r. Nothing was "
                 "changed." % old)
+    # Checked on the NAMES, before any lookup: moving a tag into, out of or
+    # within another workflow's namespace would change what that workflow
+    # asserts behind its back (issue #31) — including onto an unused name.
+    for name in (old, new):
+        ns = rules.tag_namespace(name)
+        if ns is not None:
+            return ("%r belongs to the '%s' workflow's namespace; rename_tag "
+                    "only edits the classification vocabulary. Change it "
+                    "through the workflow that owns it. Nothing was changed."
+                    % (name, ns))
     merge = args.get("merge", False)
     if not isinstance(merge, bool):
         # Only a JSON boolean enables the irreversible path. isinstance,
@@ -496,6 +516,10 @@ def delete_tag(args: dict) -> str:
     reply = ("Deleted tag %r from %d row(s) (%s). This classification is "
              "gone; there is no record of which rows carried it."
              % (tag, total, ", ".join(parts) or "none"))
+    ns = rules.tag_namespace(tag)
+    if ns is not None:
+        reply += (" It belonged to the '%s' workflow, which will reassert it "
+                  "wherever it still holds." % ns)
     if rules_changed or rules_deleted:
         reply += (" Removed from %d rule(s); %d rule(s) were left "
                   "tagless and deleted."

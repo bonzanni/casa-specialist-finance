@@ -966,12 +966,14 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
         for rid in stats["inserted_row_ids"]:
             tags = [t[0] for t in conn.execute(
                 "SELECT tag FROM transaction_tags WHERE row_id=?", (rid,))]
-            # auto_tagged means ≥1 non-workflow tag — NOT classification_state,
-            # whose precedence lets a migrated awaiting-operator marker hide a
-            # content tag. needs_classification is the final-state workable
-            # count, NOT new-minus-tagged: a parked/terminal insert is neither
-            # bucket, so the sync trailer can never contradict the queue line.
-            if any(t not in rules.WORKFLOW_TAGS for t in tags):
+            # auto_tagged means ≥1 classification tag (neither a workflow
+            # marker nor another workflow's `owner::name`) — NOT
+            # classification_state, whose precedence lets a migrated
+            # awaiting-operator marker hide a content tag.
+            # needs_classification is the final-state workable count, NOT
+            # new-minus-tagged: a parked/terminal insert is neither bucket, so
+            # the sync trailer can never contradict the queue line.
+            if any(rules.is_classification_tag(t) for t in tags):
                 stats["auto_tagged"] += 1
             if rules.classification_state(tags) == "workable":
                 stats["needs_classification"] += 1

@@ -310,6 +310,12 @@ standing conventions applied when circumstances call for them.
 6. **Administrative/anomaly conventions** (operator-triggered):
    `invoice-missing`, `tax-deductible`, `disputed`, `fraud-suspect`,
    `duplicate-suspect`.
+7. **Other workflows' tags** — anything written `owner::name` (e.g.
+   `acct::matched`). Another plugin owns and reconciles them. They are
+   not classifications: a row carrying only these is still in your queue
+   and still needs its chain. Never write, untag, rename or delete them,
+   never mint one, and never count them as evidence of a category.
+   `list_tags` lists them apart for exactly this reason.
 
 ## Notes as cross-turn memory
 

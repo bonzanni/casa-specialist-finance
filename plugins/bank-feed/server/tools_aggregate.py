@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import apply
 import money
+import rules
 import tools_read
 from tools_read import register
 
@@ -121,7 +122,11 @@ def spend_by_tag(args: dict) -> str:
             where.append("t.direction=?")
             params.append(str(args["direction"]).upper())
         clause = " AND ".join(where)
-        tag_where, tag_params = "", []
+        # Another workflow's `owner::name` tag is not a spend category
+        # (issue #31): by default it neither forms a group nor takes a row out
+        # of the untagged bucket. Named explicitly in `tags`, it is grouped.
+        own_only = " AND instr(tt.tag, '%s') = 0" % rules.NAMESPACE_SEP
+        tag_where, tag_params = own_only, []
         if tag_filter:
             tag_where = (" AND tt.tag IN (%s)"
                          % ",".join("?" * len(tag_filter)))
@@ -136,8 +141,9 @@ def spend_by_tag(args: dict) -> str:
         untagged = list(c.execute(
             "SELECT t.currency, %s, COUNT(*) FROM transactions t"
             " WHERE %s AND NOT EXISTS (SELECT 1 FROM transaction_tags tt"
-            " WHERE tt.row_id = t.row_id)"
-            " GROUP BY t.currency" % (_SIGNED_SUM, clause), params))
+            " WHERE tt.row_id = t.row_id%s)"
+            " GROUP BY t.currency" % (_SIGNED_SUM, clause, own_only),
+            params))
         # ROW count per stored currency, each row once — the unusable- currency
         # disclosure must count transactions, not tag-group memberships: one
         # bad-currency row with two tags would otherwise report "2 row(s)".
