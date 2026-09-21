@@ -235,7 +235,18 @@ handle is how the annotation tools address a transaction.
   every other filter. The index is lexical — YOU supply the semantics:
   expand a fuzzy request ("anything about the renovation") into 2–3
   queries (`renovation OR builder OR bouwbedrijf`) and merge the results
-  yourself. Each hit shows the matching note excerpt.
+  yourself. Each hit shows the best-matching note excerpt with its date
+  and how many notes came after it. A hit with newer notes is not the
+  row's current word: `get_transaction` before you report it.
+- **Tags carry state, notes carry the story.** What is true now lives in
+  a tag you set and clear as it changes: `awaiting-receipt` while a
+  receipt is outstanding, `untag_transaction` once it arrives. "What is
+  still open?" is a `tags_any` query, never a reading of prose. Notes
+  stay true about their own moment, so an old note may contradict a new
+  one; the latest reflects the outcome. A note that reverses an earlier
+  one says so ("found it after all — the receipt came by post").
+- **Tags written `owner::name` belong to another workflow** and are that
+  workflow's state: never set or clear them.
 - **Vocabulary tools act everywhere at once**: `rename_tag` renames a tag
   across the whole ledger (renaming onto an existing tag merges them and
   requires `merge: true` — irreversible, say so before you do it);

@@ -1064,14 +1064,20 @@ def list_transactions(args: dict) -> str:
         snips: dict = {}
         if notes_q is not None and ids:
             # Best-ranked matching note per shown row; bm25 ascending is
-            # best-first. snippet() emits raw note text: fence at render.
-            for rid, snip in c.execute(
-                    "SELECT n.row_id, snippet(notes_fts, 0, '', '', '…', 10)"
+            # best-first, ties to the newest. snippet() emits raw note text:
+            # fence at render. The best match need not be the latest word,
+            # so each hit carries its date and how many notes on the row
+            # (matching or not) came after it.
+            for rid, snip, when, newer in c.execute(
+                    "SELECT n.row_id, snippet(notes_fts, 0, '', '', '…', 10),"
+                    " n.created_at, (SELECT COUNT(*) FROM transaction_notes m"
+                    " WHERE m.row_id = n.row_id AND m.note_id > n.note_id)"
                     " FROM notes_fts JOIN transaction_notes n"
                     " ON n.note_id = notes_fts.rowid"
                     " WHERE notes_fts MATCH ? AND n.row_id IN (%s)"
-                    " ORDER BY bm25(notes_fts)" % marks, [notes_q] + ids):
-                snips.setdefault(rid, snip)
+                    " ORDER BY bm25(notes_fts), n.note_id DESC" % marks,
+                    [notes_q] + ids):
+                snips.setdefault(rid, (snip, when, newer))
         reasons = (_reason_counts(c, clause, params, "needs_review=1")
                    if int(review or 0) else [])
         holes_by_account = [(a, apply.holes(c, a["account_id"], date_from,
@@ -1112,10 +1118,15 @@ def list_transactions(args: dict) -> str:
         if notes_by_row.get(r["row_id"]):
             n = notes_by_row[r["row_id"]]
             extra += "  [%d note%s]" % (n, "" if n == 1 else "s")
-        if snips.get(r["row_id"]) is not None:
+        if r["row_id"] in snips:
             # A snippet is note text — hostile-quoting prose, full note
-            # fence.
-            extra += "  note match: " + _untrusted_note(snips[r["row_id"]])
+            # fence. created_at is ours but unconstrained: neutralized.
+            snip, when, newer = snips[r["row_id"]]
+            extra += "  note match (%s, %s): %s" % (
+                _neutralized((when or "?")[:10]),
+                "latest note" if not newer else "%d newer note%s" % (
+                    newer, "" if newer == 1 else "s"),
+                _untrusted_note(snip))
         lines.append("  #%d  %s  %s %s  %s  %s  %s  %s%s" % (
             r["row_id"],
             _untrusted(r.get("booking_date")), _signed(r),
@@ -1270,8 +1281,12 @@ def get_transaction(args: dict) -> str:
         lines.append("Other workflows' tags (not classifications): "
                      + ", ".join(_neutralized(t) for t in foreign))
     if total:
-        lines.append("Notes%s:" % (" (latest 20 of %d)" % total
-                                   if total > 20 else " (%d)" % total))
+        # The journal is append-only, so a correction coexists with what it
+        # corrects; the header says which one wins, for a skimming reader.
+        lines.append("Notes%s, oldest first — where they conflict, the "
+                     "latest reflects the outcome:"
+                     % (" (latest 20 of %d)" % total if total > 20
+                        else " (%d)" % total))
         for n in notes:
             # The note BODY can quote anything — note fence, full cap. The
             # author is enum-validated at WRITE time, but "safe because of a

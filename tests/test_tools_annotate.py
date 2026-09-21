@@ -333,6 +333,31 @@ class TestGetTransaction(Base):
         out = call("get_transaction", row_id=self.rid)
         self.assertLess(out.index("first"), out.index("second"))
 
+    def test_journal_header_says_the_latest_note_is_the_outcome(self):
+        # An append-only journal holds contradictions by design; the header
+        # is what tells a skimming reader which one is current.
+        call("add_note", row_ids=[self.rid], note="Invoice not found",
+             author="agent")
+        call("add_note", row_ids=[self.rid], note="Matches invoice XYZ",
+             author="agent")
+        lines = call("get_transaction", row_id=self.rid).splitlines()
+        header = [l for l in lines if l.startswith("Notes (")]
+        self.assertEqual(header, [
+            "Notes (2), oldest first — where they conflict, the latest "
+            "reflects the outcome:"])
+        # The header precedes the journal it describes.
+        self.assertLess(lines.index(header[0]),
+                        [i for i, l in enumerate(lines)
+                         if "Invoice not found" in l][0])
+
+    def test_journal_header_cue_survives_the_cap(self):
+        for i in range(21):
+            call("add_note", row_ids=[self.rid], note="note %d" % i,
+                 author="agent")
+        out = call("get_transaction", row_id=self.rid)
+        self.assertIn("Notes (latest 20 of 21), oldest first — where they "
+                      "conflict, the latest reflects the outcome:", out)
+
 
 class TestListTags(Base):
     def setUp(self):

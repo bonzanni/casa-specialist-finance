@@ -32,7 +32,10 @@ transaction, so a concurrent `apply_plan()` cannot supersede the row between the
 and the write and strand the annotation on a row whose annotations have already
 migrated.
 
-Note search is a full-text index maintained alongside the notes table. Aggregation lives
+Note search is a full-text index maintained alongside the notes table. The best-ranked
+match is not necessarily the latest word on a row, so each hit carries the matched note's
+date and how many notes follow it, and the journal header says the latest note reflects
+the outcome. Aggregation lives
 in `tools_aggregate.py`, and `spend_by_tag` is explicitly a **lens, not a ledger**: a
 row carrying several tags appears in several groups, so groups overlap and never sum to
 an account total. Every call says so. Sums are per currency and never converted; a
