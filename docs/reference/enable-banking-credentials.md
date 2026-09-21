@@ -49,9 +49,9 @@ token** is; treat it like a password.
 ## The flow, and why it is split the way it is
 
 An agent that both triggers a sign-in email *and* reads the mailbox for the
-code is, mechanically, an account-takeover tool — so the safe machinery (this
-harness, and mail connectors) correctly refuses to let software do both halves.
-The design respects that instead of fighting it:
+code is, mechanically, an account-takeover tool — so software does not do both
+halves unless the operator explicitly delegates the read, one send at a time
+(step 2). The design is built around that split:
 
 1. **The plugin triggers the email** — safe to automate. `sendOobCode` can only
    deliver a code that signs into *the same address it was sent to*; you cannot

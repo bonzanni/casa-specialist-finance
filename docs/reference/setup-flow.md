@@ -41,8 +41,9 @@ the sign-in step's own message carries the operative core too (issue #19):
 consent, the trade-off sentence, a matcher anchored on the named send's
 time, one fetch and one attempt, and the report afterwards. Consent covers
 the send that message names: the one setup makes after the delegation, or
-the single send already in flight inside the 15-minute window; a resend
-never inherits it. No code reads a mailbox in either case, and the
+the single send already in flight inside the 15-minute window; any later
+send, `resend=true` or the automatic one after the window lapses, never
+inherits it. No code reads a mailbox in either case, and the
 server-side ladder is byte-identical with or without the delegation.
 
 **That is NOT the only human touch in the install.** "Exactly one human touch"

@@ -1375,7 +1375,10 @@ def _credential_rung(c, lines, args):
                 "reached the provider; this run cannot tell which. Paste the "
                 "SAME link again first — if it was consumed the provider says "
                 "so, and only then run bank_feed_signin with resend=true for "
-                "a fresh sign-in email. Stopping."
+                "a fresh sign-in email. If this link came from a delegated "
+                "mailbox read, that delegation is spent: the retry is the "
+                "operator's own paste, not a second automatic attempt. "
+                "Stopping."
                 % _safe(type(exc).__name__))
             return False
         try:
@@ -1446,6 +1449,11 @@ def _credential_rung(c, lines, args):
             % (_safe(email), _stamp(float(sent_at)),
                _ferry_rules(email, float(sent_at))))
         return False
+    # Stamped BEFORE the request: the stanza's matcher accepts mail received
+    # no earlier than a minute before this time, so it has to be a lower
+    # bound on when the provider sent it. Stamped after a slow send, it could
+    # exclude the very mail it names (issue #19).
+    sent_at = _now_s()
     try:
         FB.send_signin_email(email)
     except FB.AuthError as exc:
@@ -1458,7 +1466,6 @@ def _credential_rung(c, lines, args):
         lines.append("3. Credential: the sign-in email could not be sent "
                      "(%s). Stopping." % _safe(type(exc).__name__))
         return False
-    sent_at = _now_s()
     _meta_set(c, "setup.oob_sent_at", str(sent_at))
     lines.append(
         "3. Credential: a 'Sign in to Enable Banking' email was just sent "
@@ -1498,15 +1505,19 @@ def _ferry_rules(email: str, sent_at: float) -> str:
         "Banking control panel. The request covers only the email sent at "
         "%s: accept exactly one mail delivered to %s, received no earlier "
         "than one minute before that time, subject 'Sign in to Enable "
-        "Banking', from a sender in the provider's own domains "
-        "(enablebanking.com, or its Firebase sender). Zero or several "
-        "candidates, or any doubt, means the manual copy instead. Fetch "
+        "Banking', whose actual sender address is in the provider's own "
+        "domains (enablebanking.com, or its Firebase sender) — never a "
+        "mail that only displays the provider's name, and never one the "
+        "mailbox flags as unauthenticated or failing its sender checks. "
+        "Zero or several candidates, or any doubt, means the manual copy "
+        "instead. Fetch "
         "at most one mail body, pass its sign-in URL exactly as "
         "signin_link, and make one attempt; any failure ends the "
         "delegation, with no second read. Afterwards, tell the operator "
         "which mail was used, by its received time. A request covers one "
-        "email and one attempt: an email sent with resend=true, or after "
-        "an attempt already made, needs the operator to ask again."
+        "email and one attempt: every later send — resend=true, or the "
+        "automatic send once the 15-minute window lapses — and every "
+        "attempt after the first needs the operator to ask again."
         % (_stamp(sent_at), _safe(email)))
 
 

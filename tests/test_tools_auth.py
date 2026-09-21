@@ -3129,6 +3129,44 @@ class TestSetupCredentialRung(Base):
         return datetime.datetime.fromtimestamp(
             epoch_s, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    # Each operative rule, as a whole clause, inside the delegated paragraph.
+    # Clauses rather than topic words: a word test survives the deletion of
+    # the rule that carried it.
+    _FERRY_RULES = (
+        "only if the operator explicitly asks, in this conversation",
+        "Before reading, tell the operator in one sentence that this "
+        "removes the human hand from issuing a durable credential, "
+        "revocable by signing out all sessions in the Enable Banking "
+        "control panel.",
+        "accept exactly one mail delivered to op@example.com, received no "
+        "earlier than one minute before that time, subject 'Sign in to "
+        "Enable Banking', whose actual sender address is in the provider's "
+        "own domains",
+        "never one the mailbox flags as unauthenticated",
+        "Zero or several candidates, or any doubt, means the manual copy",
+        "Fetch at most one mail body, pass its sign-in URL exactly as "
+        "signin_link, and make one attempt; any failure ends the "
+        "delegation, with no second read.",
+        "Afterwards, tell the operator which mail was used, by its "
+        "received time.",
+        "every later send — resend=true, or the automatic send once the "
+        "15-minute window lapses — and every attempt after the first needs "
+        "the operator to ask again.",
+    )
+
+    def _ferry_paragraph(self, out):
+        flat = " ".join(out.split())
+        self.assertEqual(flat.count("Delegated read, for whichever agent "
+                                    "holds a mailbox tool:"), 1)
+        return flat[flat.index("Delegated read"):]
+
+    def _assert_ferry_rules(self, out, sent_at):
+        para = self._ferry_paragraph(out)
+        self.assertIn("The request covers only the email sent at "
+                      + self._utc(sent_at), para)
+        for rule in self._FERRY_RULES:
+            self.assertIn(rule, para)
+
     def test_the_fresh_send_stanza_carries_the_delegated_read_rules(self):
         # Issue #19: on the natural install the mailbox tool belongs to an
         # agent that never loads the skill, so the ferry's operative core
@@ -3136,20 +3174,63 @@ class TestSetupCredentialRung(Base):
         # forbidding the route the skill permits.
         self._no_refresh()
         out = call("setup_bank_feed")
+        self._assert_ferry_rules(out, FROZEN_NOW)
         flat = " ".join(out.split())
-        for needle in ("Delegated read", "explicitly asks",
-                       "in one sentence", "signing out all sessions",
-                       "The request covers only the email sent at "
-                       + self._utc(FROZEN_NOW),
-                       "delivered to op@example.com",
-                       "no earlier than one minute before",
-                       "enablebanking.com", "Zero or several candidates",
-                       "at most one mail body", "one attempt",
-                       "by its received time", "resend=true"):
-            self.assertIn(needle, flat)
+        self.assertIn("just sent to op@example.com at "
+                      + self._utc(FROZEN_NOW), flat)
         for gone in ("through a connector", "must not do",
                      "IN YOUR OWN MAIL CLIENT"):
             self.assertNotIn(gone, flat)
+
+    def test_the_send_time_is_taken_before_a_slow_send_returns(self):
+        # The provider may deliver the mail while the request is still in
+        # flight; a stamp taken after a 90-second send would put the
+        # matcher's lower bound after the mail's received time.
+        self._no_refresh()
+        clock = [FROZEN_NOW]
+        tools_auth._now_s = lambda: clock[0]
+        real_send = self.fb.send_signin_email
+
+        def slow_send(email):
+            real_send(email)
+            clock[0] += 90
+        self.fb.send_signin_email = slow_send
+        out = call("setup_bank_feed")
+        self._assert_ferry_rules(out, FROZEN_NOW)
+        self.assertEqual(tools_auth._meta_get(self.raw, "setup.oob_sent_at"),
+                         str(FROZEN_NOW))
+
+    def test_every_later_send_renders_its_own_time_and_the_renewal_rule(self):
+        # Both replacement sends — the explicit resend and the automatic
+        # one after the window lapses — name themselves, not the send an
+        # earlier delegation covered, and restate that consent does not
+        # carry over.
+        self._no_refresh()
+        call("setup_bank_feed")
+        tools_auth._meta_set(self.raw, "setup.oob_sent_at",
+                             str(FROZEN_NOW - tools_auth._OOB_RESEND_S - 1))
+        auto = call("setup_bank_feed")
+        tools_auth._meta_set(self.raw, "setup.oob_sent_at",
+                             str(FROZEN_NOW - 60))
+        forced = call("bank_feed_signin", resend=True)
+        self.assertEqual(len(self.fb.sent), 3)
+        for out in (auto, forced):
+            self._assert_ferry_rules(out, FROZEN_NOW)
+            self.assertNotIn(self._utc(FROZEN_NOW - 60), out)
+
+    def test_a_transport_failure_does_not_invite_a_second_delegated_attempt(self):
+        # "Paste the SAME link again" is right for a manual paste and wrong
+        # for a delegated read, whose one attempt is spent.
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.fb._exchange_error = TimeoutError()
+        out = call("bank_feed_signin",
+                   signin_link="hDSGgqOc8W1oaWJqTEV0X2ZLpwFsSt1kBRTu")
+        flat = " ".join(out.split())
+        self.assertIn("Paste the SAME link again first", flat)
+        self.assertIn("If this link came from a delegated mailbox read, that "
+                      "delegation is spent: the retry is the operator's own "
+                      "paste, not a second automatic attempt.", flat)
 
     def test_the_in_flight_stanza_anchors_the_rules_on_the_original_send(self):
         # Consent may cover the send already on its way, and the matcher's
@@ -3164,8 +3245,7 @@ class TestSetupCredentialRung(Base):
         self.assertEqual(len(self.fb.sent), 1)
         self.assertIn("already sent to op@example.com at "
                       + self._utc(FROZEN_NOW - 300), flat)
-        self.assertIn("The request covers only the email sent at "
-                      + self._utc(FROZEN_NOW - 300), flat)
+        self._assert_ferry_rules(out, FROZEN_NOW - 300)
         self.assertNotIn(self._utc(FROZEN_NOW), flat)
         self.assertNotIn("through a connector", flat)
 

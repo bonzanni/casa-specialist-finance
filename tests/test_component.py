@@ -1693,7 +1693,18 @@ class TestSkill(unittest.TestCase):
         self.assertEqual(len(consent), 1)
         self.assertIn("the single most recent send still inside the "
                       "15-minute resend window", consent[0])
-        self.assertIn("NEVER inherits consent", consent[0])
+        self.assertIn("Any LATER send — `resend: true`, whatever the reason, "
+                      "or the automatic send once that window lapses — NEVER "
+                      "inherits consent", consent[0])
+
+    def test_ferry_forbids_unauthenticated_mail_and_a_second_attempt(self):
+        bullets = self._bullets(10)
+        match = [b for b in bullets if b.startswith("**Match strictly")]
+        once = [b for b in bullets if b.startswith("**One body fetch")]
+        self.assertEqual((len(match), len(once)), (1, 1))
+        self.assertIn("that the mailbox flags as unauthenticated", match[0])
+        self.assertIn("a redemption failure of any kind", once[0])
+        self.assertIn("that retry is the operator's own paste", once[0])
 
 
 class CasaCompatibilityContract(unittest.TestCase):

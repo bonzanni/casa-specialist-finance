@@ -296,8 +296,9 @@ exactly the manual flow above.
   the one the setup message names by its send time. That is the email
   setup sends after the delegation — or, when the operator delegates while
   a sign-in email is already on its way, the single most recent send still
-  inside the 15-minute resend window. A resend — `resend: true`, whatever
-  the reason — NEVER inherits consent; ask again. Never infer consent from
+  inside the 15-minute resend window. Any LATER send — `resend: true`,
+  whatever the reason, or the automatic send once that window lapses —
+  NEVER inherits consent; ask again. Never infer consent from
   the mailbox tool merely existing, and never carry it across
   conversations.
 - **State the trade-off before using it**, in one sentence: reading the
@@ -320,8 +321,11 @@ exactly the manual flow above.
   `signin_link` — copied, never clicked, never trimmed. Some mail relays
   have been observed rewriting characters inside the code; others deliver
   it byte-identical. `bank_feed_signin` refuses a visibly mangled code. A
-  mangled code, a redemption failure, or no match consumes the delegation:
-  fall back to the manual instructions, and do not retry mailbox reads.
+  mangled code, a redemption failure of any kind, or no match consumes the
+  delegation: fall back to the manual instructions, and do not retry
+  mailbox reads or re-submit the link yourself — even where the setup
+  message suggests pasting the same link again, that retry is the
+  operator's own paste.
 - **Report what was read.** After the attempt, tell the operator which
   mail was used, by its received time. If they had another sign-in link
   in flight for the same account, that is how they learn it may now be
