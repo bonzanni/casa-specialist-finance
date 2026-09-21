@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "plugins/bank-feed/server"))
@@ -13,6 +14,7 @@ import flows            # noqa: E402
 import ingest           # noqa: E402
 import provenance       # noqa: E402
 import store            # noqa: E402
+import tools_refresh    # noqa: E402
 
 FIX = pathlib.Path(__file__).resolve().parent / "fixtures"
 TODAY = dt.date(2026, 8, 3)
@@ -873,6 +875,10 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
     rows are flagged, and nothing else about the plan changes."""
 
     REASON = "duplicate_across_window_edge"
+    # An unrelated booking on TODAY. It is what makes the real refresh window
+    # (newest active booking minus seven days) start on 27 July, one day after
+    # the booking the issue re-dates.
+    ANCHOR = raw_tx("2026-08-03", amount="3.00", ref="A1", remittance="koffie")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -891,6 +897,27 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
     def _run(self, txs, floor_days=90):
         flows.backfill(FakeAIS([(txs, None)]), self.conn, ACCOUNT, "s1",
                        floor_days=floor_days, incarnation="")
+
+    def _window(self):
+        """`tools_refresh._refresh_window_days`, on the same clock as
+        `flows._today`: it counts from `date.today()`, which the backfill here
+        does not."""
+        class Pinned(dt.date):
+            @classmethod
+            def today(cls):
+                return TODAY
+        real = tools_refresh._dt
+        tools_refresh._dt = types.SimpleNamespace(**dict(vars(dt), date=Pinned))
+        try:
+            return tools_refresh._refresh_window_days(self.conn, "acc1")
+        finally:
+            tools_refresh._dt = real
+
+    def _refresh(self, txs):
+        """A routine refresh, with the window `sync` itself would ask for."""
+        floor_days = self._window()
+        self._run(txs + [self.ANCHOR], floor_days=floor_days)
+        return floor_days
 
     @staticmethod
     def _tx(date, amount="10.00", status="BOOK", ref="R1"):
@@ -913,10 +940,13 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
             "INSERT INTO transaction_notes(row_id, author, note, created_at)"
             " VALUES (?, 'user', 'invoice 42', '2026-07-29T00:00:00')",
             (pending,))
-        self._run([self._tx("2026-07-26", ref=ref)])
+        self._run([self._tx("2026-07-26", ref=ref), self.ANCHOR])
         booked = self.conn.execute(
-            "SELECT row_id FROM transactions WHERE state='active'").fetchall()
+            "SELECT row_id FROM transactions WHERE state='active'"
+            " AND booking_date='2026-07-26'").fetchall()
         self.assertEqual(len(booked), 1, self._rows())
+        self.assertEqual(len([r for r in self._rows()
+                              if r["state"] == "active"]), 2, self._rows())
         self.assertEqual(self.conn.execute(
             "SELECT superseded_by FROM transactions WHERE row_id=?",
             (pending,)).fetchone()[0], booked[0][0])
@@ -924,10 +954,12 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
 
     def _assert_both_flagged(self, booked):
         active = [r for r in self._rows() if r["state"] == "active"]
-        self.assertEqual(len(active), 2, active)
-        for r in active:
-            self.assertEqual((r["needs_review"], r["review_reason"]),
-                             (1, self.REASON), r)
+        self.assertEqual(len(active), 3, active)
+        self.assertEqual(
+            sorted((r["booking_date"], r["needs_review"], r["review_reason"])
+                   for r in active),
+            [("2026-07-26", 1, self.REASON), ("2026-07-28", 1, self.REASON),
+             ("2026-08-03", 0, None)])
         # The annotations stay where the supersession put them.
         self.assertEqual([tuple(r) for r in self.conn.execute(
             "SELECT row_id, note FROM transaction_notes")],
@@ -938,21 +970,22 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
         # so only the reference ties it to the live row.
         observe(self.conn)
         booked = self._book_before_the_window()
-        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self.assertEqual(
+            self._refresh([self._tx("2026-07-28", amount="11.00")]), 7)
         self._assert_both_flagged(booked)
 
     def test_identical_content_without_a_reference_is_flagged(self):
         # Untrusted account, no reference at all: content is the only tie.
         booked = self._book_before_the_window(ref=None)
-        self._run([self._tx("2026-07-28", ref=None)], floor_days=7)
+        self.assertEqual(self._refresh([self._tx("2026-07-28", ref=None)]), 7)
         self._assert_both_flagged(booked)
 
     def test_the_next_refresh_adds_nothing(self):
         observe(self.conn)
         self._book_before_the_window()
-        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self._refresh([self._tx("2026-07-28", amount="11.00")])
         before = self._rows()
-        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self._refresh([self._tx("2026-07-28", amount="11.00")])
         self.assertEqual(self._rows(), before)
 
     def test_a_standing_flag_on_the_edge_row_keeps_its_reason(self):
@@ -961,13 +994,13 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
         self.conn.execute(
             "UPDATE transactions SET needs_review=1,"
             " review_reason='amount_changed' WHERE row_id=?", (booked,))
-        self._run([self._tx("2026-07-28", amount="11.00")], floor_days=7)
+        self._refresh([self._tx("2026-07-28", amount="11.00")])
         self.assertEqual(self.conn.execute(
             "SELECT review_reason FROM transactions WHERE row_id=?",
             (booked,)).fetchone()[0], "amount_changed")
         inserted = self.conn.execute(
             "SELECT needs_review, review_reason FROM transactions"
-            " WHERE state='active' AND row_id<>?", (booked,)).fetchone()
+            " WHERE state='active' AND booking_date='2026-07-28'").fetchone()
         self.assertEqual(tuple(inserted), (1, self.REASON))
 
     def test_an_unrelated_payment_near_the_edge_is_not_flagged(self):
@@ -975,10 +1008,10 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
         booked = self._book_before_the_window()
         other = raw_tx("2026-07-28", amount="55.00", ref="R9",
                        remittance="iets anders")
-        self._run([other], floor_days=7)
+        self.assertEqual(self._refresh([other]), 7)
         self.assertEqual(
             [(r["needs_review"], r["review_reason"]) for r in self._rows()
-             if r["state"] == "active"], [(0, None), (0, None)])
+             if r["state"] == "active"], [(0, None)] * 3)
         self.assertEqual(self.conn.execute(
             "SELECT needs_review FROM transactions WHERE row_id=?",
             (booked,)).fetchone()[0], 0)
@@ -1001,7 +1034,8 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
         self._run([raw_tx("2026-07-21", amount="20.00", ref="W1"),
                    raw_tx("2026-07-29", amount="3.00", ref="X1",
                           remittance="koffie")])
-        window = 7 + (TODAY - dt.date(2026, 7, 29)).days   # the refresh's own
+        window = self._window()
+        self.assertEqual(window, 12)          # the window starts 22 July
         self._run([raw_tx("2026-07-28", amount="20.00", ref="W2"),
                    raw_tx("2026-07-29", amount="3.00", ref="X1",
                           remittance="koffie")], floor_days=window)
