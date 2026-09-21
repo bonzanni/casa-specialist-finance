@@ -261,12 +261,20 @@ the tool for it — the only place these arguments exist. Use it only when
 - it asks for the sign-in link → `bank_feed_signin` with `signin_link`;
 - the link expired or was consumed → `bank_feed_signin` with `resend: true`.
 
-Never invent any of the three. When it asks for the link, the operator must
-COPY the full "Sign in to Enable Banking" URL out of their own mail client
-and paste it back — never click it (a browser visit consumes the single-use
-code), and never relay it through a mail connector (connectors defang the
-code in transit). Pass exactly the pasted text as `signin_link`; that call
-runs the rest of setup itself, so there is nothing to re-run afterwards.
+Never invent any of the three. When it asks for the link, the operator
+COPIES the full "Sign in to Enable Banking" URL out of their own mail client
+and pastes it back — never clicks it (a browser visit consumes the
+single-use code). That manual copy is the default; the delegated ferry
+below is the one alternative. Pass exactly the pasted text as
+`signin_link`; that call runs the rest of setup itself, so there is
+nothing to re-run afterwards.
+
+Relay the setup message's sign-in paragraph WHOLE — including its
+"Delegated read" rules — to whoever you report to. You never hold a
+mailbox tool yourself on the usual install; the agent that does is the one
+that will read the mail if the operator delegates, and that message is the
+only text of this protocol it ever receives. Trimming it to "paste the
+link" leaves the mailbox reader with no rules at all.
 
 Never read that email on the operator's behalf — with ONE exception, the
 delegated ferry below. Never echo tokens, codes, mail bodies, or key
@@ -274,38 +282,50 @@ material into the conversation.
 
 ### The delegated mailbox ferry (opt-in, per send)
 
-On an install where the operator has already consented to mailbox access
-(a Gmail-capable tool is available to you), the operator may delegate the
-one copy/paste step: reading the sign-in email and passing its link on,
-instead of doing it by hand. Every rule here is load-bearing; without a
-delegation the default is exactly the manual flow above.
+These rules bind **whoever performs the mailbox read** — you, if a
+Gmail-capable tool is available to you, and otherwise the agent that holds
+one (usually the resident assistant), which learns them from the setup
+message you relayed. The operator may delegate the one copy/paste step:
+reading the sign-in email and passing its link on, instead of doing it by
+hand. Every rule here is load-bearing; without a delegation the default is
+exactly the manual flow above.
 
 - **Consent is explicit, operator-originated, and per email send.** Only
   an operator statement in this conversation like "use my mailbox for the
   sign-in" delegates the ferry, and it covers AT MOST ONE sign-in email:
-  the one whose send this run itself triggered after the delegation. A
-  resend — `resend: true`, whatever the reason — NEVER inherits consent;
-  ask again. Never infer consent from the mailbox tool merely existing,
-  and never carry it across conversations.
+  the one the setup message names by its send time. That is the email
+  setup sends after the delegation — or, when the operator delegates while
+  a sign-in email is already on its way, the single most recent send still
+  inside the 15-minute resend window. Any LATER send — `resend: true`,
+  whatever the reason, or the automatic send once that window lapses —
+  NEVER inherits consent; ask again. Never infer consent from
+  the mailbox tool merely existing, and never carry it across
+  conversations.
 - **State the trade-off before using it**, in one sentence: reading the
   sign-in mail automatically removes the human hand from the issuance of
   a durable credential; the operator can revoke it afterwards by signing
   out all sessions in the Enable Banking control panel.
 - **Match strictly, and refuse ambiguity — never guess.** A candidate
-  mail must be: delivered to the account email named to
-  `bank_feed_signin`; received AFTER the send this run triggered; the
-  provider's own sign-in mail — subject "Sign in to Enable Banking", with
-  a sender address in the provider's own domains (enablebanking.com, or
-  its Firebase sender), never a mail that merely displays the provider's
-  name over a foreign address or that the mailbox flags as
-  unauthenticated. If ZERO candidates arrive in a short wait, or MORE
-  THAN ONE matches, or anything is in doubt: fall back to the manual
-  copy/paste instructions and do not search again.
+  mail must be: delivered to the account email the setup message names;
+  received no earlier than one minute before the covered send's time (the
+  minute absorbs clock difference, nothing more); the provider's own
+  sign-in mail — subject "Sign in to Enable Banking", with a sender
+  address in the provider's own domains (enablebanking.com, or its
+  Firebase sender), never a mail that merely displays the provider's name
+  over a foreign address or that the mailbox flags as unauthenticated. If
+  ZERO candidates arrive in a short wait, or MORE THAN ONE matches, or
+  anything is in doubt: fall back to the manual copy/paste instructions
+  and do not search again.
 - **One body fetch, one attempt.** Retrieve at most one mail body per
   delegation. Extract the full sign-in URL and pass it EXACTLY as
-  `signin_link` — copied, never clicked, never trimmed. A mangled code, a
-  redemption failure, or no match consumes the delegation: fall back to
-  the manual instructions, and do not retry mailbox reads.
+  `signin_link` — copied, never clicked, never trimmed. Some mail relays
+  have been observed rewriting characters inside the code; others deliver
+  it byte-identical. `bank_feed_signin` refuses a visibly mangled code. A
+  mangled code, a redemption failure of any kind, or no match consumes the
+  delegation: fall back to the manual instructions, and do not retry
+  mailbox reads or re-submit the link yourself — even where the setup
+  message suggests pasting the same link again, that retry is the
+  operator's own paste.
 - **Report what was read.** After the attempt, tell the operator which
   mail was used, by its received time. If they had another sign-in link
   in flight for the same account, that is how they learn it may now be

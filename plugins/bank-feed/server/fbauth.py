@@ -42,9 +42,10 @@ IDTK_ALLOW = {
 }
 TOKEN_ALLOW = {("POST", r"^/v1/token$")}
 
-# The oobCode alphabet: URL-safe base64. Mail connectors defang links in
-# transit -- dropping leading characters and rewriting `=` -- so anything
-# outside this set is a mangled link, not a code.
+# The oobCode alphabet: URL-safe base64. Some mail relays have been observed
+# defanging links in transit -- dropping leading characters and rewriting `=`
+# -- while others (casa-plugin-gmail, issue #19) deliver them byte-identical.
+# Either way, anything outside this set is a mangled link, not a code.
 _CODE_RX = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
 # Mint 5 minutes before Firebase's 3600 s expiry: never serve a token that
@@ -131,8 +132,8 @@ def parse_signin_link(text: str) -> str:
     """The oobCode from a pasted sign-in URL, or the bare code itself.
 
     Raises DefangedLink when the code is visibly mangled; the message
-    repeats the copy-not-click instruction because a defanged paste means
-    the operator relayed the link through a connector."""
+    repeats the copy-not-click instruction, because a defanged paste means
+    something between the email and this call rewrote the link."""
     text = text.strip()
     code = text
     if "://" in text or "?" in text:
@@ -140,15 +141,17 @@ def parse_signin_link(text: str) -> str:
         codes = urllib.parse.parse_qs(query).get("oobCode") or []
         if not codes:
             raise DefangedLink(
-                "that link carries no oobCode parameter — paste the full "
-                "'Sign in to Enable Banking' URL, copied from your own "
-                "mail client without clicking it")
+                "that link carries no oobCode parameter. Copy the full "
+                "'Sign in to Enable Banking' URL by hand from your own mail "
+                "client, without clicking it — a delegated mailbox read "
+                "that produced this is spent, and is not retried")
         code = codes[0]
     if not _CODE_RX.match(code):
         raise DefangedLink(
-            "the code in that link is mangled (defanged in transit). Copy "
-            "the URL straight from your own mail client — do not click "
-            "it, and do not relay it through a mail connector")
+            "the code in that link is mangled (rewritten in transit). Copy "
+            "the URL by hand from your own mail client, without clicking "
+            "it — a delegated mailbox read that produced this is spent, "
+            "and is not retried")
     return code
 
 

@@ -79,16 +79,23 @@ class TestParseSigninLink(Base):
         self.assertEqual(fbauth.parse_signin_link(" " + CODE + "\n"), CODE)
 
     def test_a_defanged_link_is_refused_with_the_copy_instruction(self):
-        # One shape a mail connector's defang takes: `=` rewritten to `~`.
+        # One observed defang shape: leading characters dropped, `=` → `~`.
         mangled = LINK.replace("oobCode=" + CODE,
                                "oobCode=" + CODE[3:] + "~x")
         with self.assertRaises(fbauth.DefangedLink) as ctx:
             fbauth.parse_signin_link(mangled)
         self.assertIn("mail client", str(ctx.exception))
+        self.assertIn("a delegated mailbox read that produced this is spent, "
+                      "and is not retried", str(ctx.exception))
 
     def test_a_url_without_a_code_is_refused(self):
-        with self.assertRaises(fbauth.DefangedLink):
+        # Both refusals end a delegated read: either can be the product of
+        # one, and "paste it again" alone reads as an invitation to re-fetch.
+        with self.assertRaises(fbauth.DefangedLink) as ctx:
             fbauth.parse_signin_link("https://enablebanking.com/cp/?lang=en")
+        self.assertIn("by hand from your own mail client", str(ctx.exception))
+        self.assertIn("a delegated mailbox read that produced this is spent, "
+                      "and is not retried", str(ctx.exception))
 
 
 class TestExchangeLink(Base):

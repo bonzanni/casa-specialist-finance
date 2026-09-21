@@ -1676,6 +1676,37 @@ class TestSkill(unittest.TestCase):
         self.assertIn("lead with the one about bank consents", section)
 
 
+    def test_the_ferry_binds_whoever_reads_the_mailbox(self):
+        # Issue #19: the protocol addressed only the specialist, which on
+        # the natural install holds no mailbox tool. It must bind the reader
+        # and tell the specialist to relay the stanza that carries it.
+        section = self._section(10)
+        self.assertIn("These rules bind **whoever performs the mailbox read**",
+                      section)
+        self.assertIn("Relay the setup message's sign-in paragraph WHOLE",
+                      section)
+        self.assertNotIn("connectors defang", section)
+
+    def test_ferry_consent_covers_the_in_flight_send_but_never_a_resend(self):
+        consent = [b for b in self._bullets(10)
+                   if b.startswith("**Consent is explicit")]
+        self.assertEqual(len(consent), 1)
+        self.assertIn("the single most recent send still inside the "
+                      "15-minute resend window", consent[0])
+        self.assertIn("Any LATER send — `resend: true`, whatever the reason, "
+                      "or the automatic send once that window lapses — NEVER "
+                      "inherits consent", consent[0])
+
+    def test_ferry_forbids_unauthenticated_mail_and_a_second_attempt(self):
+        bullets = self._bullets(10)
+        match = [b for b in bullets if b.startswith("**Match strictly")]
+        once = [b for b in bullets if b.startswith("**One body fetch")]
+        self.assertEqual((len(match), len(once)), (1, 1))
+        self.assertIn("that the mailbox flags as unauthenticated", match[0])
+        self.assertIn("a redemption failure of any kind", once[0])
+        self.assertIn("that retry is the operator's own paste", once[0])
+
+
 class CasaCompatibilityContract(unittest.TestCase):
     """The copied constants cite a published contract, not a private symbol.
 
