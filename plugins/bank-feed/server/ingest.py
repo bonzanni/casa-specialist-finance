@@ -104,6 +104,13 @@ and the read tools can report the breakdown by name:
                                data, not of the code -- a corpus can be almost
                                entirely one or almost entirely the other -- so
                                do not size either from a sample.
+  duplicate_across_window_edge -- a fresh insert shares its content or its
+                               reference, within AMOUNT_ONLY_MATCH_WINDOW_DAYS,
+                               with an ACTIVE row dated just before the
+                               caller's window (`edge`). Probably one payment
+                               the bank re-dated into the window. Carried on
+                               the insert AND flagged on the edge row, unless
+                               that row is already under review.
   direction_or_currency_changed -- a reference match rewrote `direction` or
                                `currency`: the magnitude matched, so
                                corroboration scored it 1.0, but a DBIT->CRDT
@@ -537,9 +544,19 @@ def _best_matching(fetched_items, stored_items, window, blocked=frozenset()):
 
 def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
               match_window_days: int = MATCH_WINDOW_DAYS,
-              allocated: dict | None = None) -> Plan:
+              allocated: dict | None = None,
+              edge: list | None = None) -> Plan:
     """`stored` must contain rows in EVERY state — passing only state='active'
     rows lets a tombstoned occurrence be reissued (rule 4).
+
+    `edge` is the ACTIVE rows dated just before the caller's window (issue
+    #32), and it is DISCLOSURE ONLY. An edge row never enters rule 1, rule 2,
+    rule 3 or occurrence allocation: its own restatement is never in the fetch,
+    so as a match candidate it would always be free to absorb a DIFFERENT
+    payment -- next week's identical standing order by content, or a distinct
+    payment by a reused reference. Both shapes were built and lost a payment.
+    What an edge row does is name a fresh insert that looks like it: see the
+    insert pass below.
 
     `allocated` is `apply.occurrence_allocations(conn, account_id, keys)`: the
     DURABLE high-water occurrence per identity cluster. Omitting it is safe
@@ -1114,17 +1131,61 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
                                   "reason": "unresolved_cluster"})
 
     # ---- inserts: everything still unmatched ------------------------------
+    # An insert that looks like an ACTIVE row just before the window is
+    # probably that row re-dated by the bank into it (issue #32): the booking
+    # the ledger holds is out of view, so nothing above could match it. The
+    # insert still happens -- matching it was the mechanism that lost payments
+    # -- but both rows are flagged, so the double count is disclosed.
+    #
+    # Same content, or the same reference, within AMOUNT_ONLY_MATCH_WINDOW_DAYS:
+    # the bound that separates a correction from a recurrence everywhere else
+    # in this module. MATCH_WINDOW_DAYS would flag every weekly standing order
+    # the bank posts a day or two late, since its previous occurrence then sits
+    # exactly a week back, just outside the window. The reference is compared
+    # whatever the account's trust: this decides a flag, never a match. An
+    # amount-corrected re-date with no reference is not caught.
+    edge_rows = [dict(e) for e in (edge or ())]
+    for e in edge_rows:
+        if not e.get("identity_key"):
+            e["identity_key"] = identity_key(e)
+    edge_flagged = set()
+
+    def _near(a, b) -> bool:
+        # Provider text, unvalidated: a date that does not parse is near
+        # nothing. A disclosure must never be what makes an insert raise.
+        try:
+            return _days(a, b) <= AMOUNT_ONLY_MATCH_WINDOW_DAYS
+        except (TypeError, ValueError):
+            return False
+
+    def _edge_twins(f, ident):
+        ref = f.get("provider_ref")
+        return [e for e in edge_rows
+                if (e["identity_key"] == ident
+                    or (ref and e.get("provider_ref") == ref))
+                and _near(e["booking_date"], f["booking_date"])]
+
     for fi, f in enumerate(fetched):
         if fi in matched_fetched:
             continue
         ident = identity_key(f)
+        twins = _edge_twins(f, ident)
         if fi in ref_reuse_fi:
             needs_review, reason = True, "provider_ref_reuse"
         elif ident in unresolved:
             needs_review, reason = True, "windowed_ambiguous"
+        elif twins:
+            needs_review, reason = True, "duplicate_across_window_edge"
         else:
             needs_review, reason = False, None
         emit_insert(f, "inserted", 1.0, needs_review, reason)
+        for e in twins:
+            # A row already under review keeps the reason it has: apply's flag
+            # ASSIGNS review_reason, and the standing one may be about money.
+            if not e.get("needs_review") and e["row_id"] not in edge_flagged:
+                edge_flagged.add(e["row_id"])
+                flags.append({"row_id": e["row_id"],
+                              "reason": "duplicate_across_window_edge"})
 
     # ---- rule 3: tombstone only well inside the proven interval -----------
     inner_start = (_date(start) + _dt.timedelta(days=match_window_days)).isoformat()

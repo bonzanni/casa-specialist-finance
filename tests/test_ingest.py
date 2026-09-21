@@ -643,6 +643,84 @@ class TestWeeklyStandingOrderWindow(unittest.TestCase):
         self.assertEqual([f["reason"] for f in plan.flags], ["provider_ref_reuse"])
 
 
+
+class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
+    """Issue #32. `edge` is the active rows dated just before the caller's
+    window. They FLAG a fresh insert that looks like one of them and are
+    never matched: an edge row's own restatement is never in the fetch, so as
+    a candidate it would absorb a different payment."""
+
+    REASON = "duplicate_across_window_edge"
+    WINDOW = ("2026-07-27", "2026-08-04")
+
+    @staticmethod
+    def _decisions(plan):
+        """Everything a plan decides EXCEPT what it discloses."""
+        strip = ("needs_review", "reason")
+        return ([{k: v for k, v in i.items() if k not in strip}
+                 for i in plan.inserts],
+                [{k: v for k, v in u.items() if k not in strip}
+                 for u in plan.updates],
+                plan.tombstones)
+
+    def test_a_content_twin_is_inserted_and_both_are_flagged(self):
+        edge = [row("2026-07-26", rid=5)]
+        fetched = [row("2026-07-28")]
+        plan = ingest.reconcile([], fetched, self.WINDOW, UNSTABLE, edge=edge)
+        self.assertEqual(len(plan.inserts), 1)
+        self.assertEqual((plan.inserts[0]["needs_review"],
+                          plan.inserts[0]["reason"]), (True, self.REASON))
+        self.assertEqual(plan.flags, [{"row_id": 5, "reason": self.REASON}])
+        self.assertEqual(plan.updates, [])
+
+    def test_a_reference_twin_with_a_corrected_amount_is_flagged(self):
+        edge = [row("2026-07-26", amount=1000, ref="R1", rid=5)]
+        fetched = [row("2026-07-28", amount=1100, ref="R1")]
+        plan = ingest.reconcile([], fetched, self.WINDOW, STABLE, edge=edge)
+        self.assertEqual(plan.inserts[0]["reason"], self.REASON)
+        self.assertEqual(plan.flags, [{"row_id": 5, "reason": self.REASON}])
+
+    def test_the_edge_changes_nothing_but_the_disclosure(self):
+        stored = [row("2026-07-29", amount=300, rem="koffie", rid=7)]
+        fetched = [row("2026-07-29", amount=300, rem="koffie"),
+                   row("2026-07-28", ref="R1"),
+                   row("2026-07-29", amount=1100, ref="R1")]
+        edge = [row("2026-07-26", ref="R1", rid=5)]
+        for cap in (STABLE, UNSTABLE):
+            bare = ingest.reconcile(stored, fetched, self.WINDOW, cap)
+            seen = ingest.reconcile(stored, fetched, self.WINDOW, cap,
+                                    edge=edge)
+            self.assertEqual(self._decisions(seen), self._decisions(bare))
+            self.assertEqual(bare.flags, [])
+            # Both inserts are within three days of the edge row; it is
+            # flagged once.
+            self.assertEqual(seen.flags, [{"row_id": 5, "reason": self.REASON}])
+            self.assertEqual([i["reason"] for i in seen.inserts],
+                             [self.REASON, self.REASON])
+
+    def test_a_week_apart_is_a_recurrence_not_a_re_date(self):
+        edge = [row("2026-07-23", rid=5)]
+        plan = ingest.reconcile([], [row("2026-07-27")], self.WINDOW,
+                                UNSTABLE, edge=edge)
+        self.assertEqual(plan.flags, [])
+        self.assertFalse(plan.inserts[0]["needs_review"])
+
+    def test_a_standing_review_reason_is_not_overwritten(self):
+        edge = [dict(row("2026-07-26", rid=5), needs_review=1,
+                     review_reason="amount_changed")]
+        plan = ingest.reconcile([], [row("2026-07-28")], self.WINDOW,
+                                UNSTABLE, edge=edge)
+        self.assertEqual(plan.flags, [])
+        self.assertEqual(plan.inserts[0]["reason"], self.REASON)
+
+    def test_a_malformed_date_is_near_nothing(self):
+        edge = [row("2026-07-2x", rid=5)]
+        plan = ingest.reconcile([], [row("2026-07-28")], self.WINDOW,
+                                UNSTABLE, edge=edge)
+        self.assertEqual(plan.flags, [])
+        self.assertEqual(len(plan.inserts), 1)
+
+
 class TestUnresolvedClusterDisclosure(unittest.TestCase):
     """TestOversizedCluster's own fixture happens to
     pair every row, so the unresolved_cluster flag branch never executes

@@ -134,6 +134,25 @@ fetches asked and got nothing, so a renewal is **not expected** to fill it unles
 now serves more. Only the rest is worth a renewal, and even there it **may** close the gap.
 Nothing says a renewal "cannot": a bank can return rows older than it was asked for.
 
+### A booking re-dated across the window's lower edge
+
+A routine refresh reconciles against the stored rows dated inside its window. When the
+bank re-dates a payment from just before the window to inside it, the row the ledger
+holds is out of view, nothing matches the fetched booking, and it is inserted as a
+second active row (issue #32).
+
+Matching it to the out-of-window row was built and cut: that row's own restatement is
+never in the fetch, so as a match candidate it is always free to absorb a different
+payment, whether next week's identical standing order or a distinct payment under a
+reused reference. The insert is **disclosed** instead. `backfill` also loads the active
+rows dated up to `AMOUNT_ONLY_MATCH_WINDOW_DAYS` before the window and passes them to
+`reconcile()` as `edge`. They are used for nothing but this check. A fresh insert with
+the same content or the same provider reference as one of them, within that bound, is
+flagged `duplicate_across_window_edge`, and so is the edge row, unless the edge row is
+already under review for another reason. The bound is the one that separates a
+correction from a recurrence everywhere else: a week would flag every weekly standing
+order the bank posts late. An amount-corrected re-date with no reference is not caught.
+
 ## Applying a plan
 
 Four rules govern `apply_plan()`:

@@ -875,6 +875,16 @@ def backfill(ais, conn, account: dict, session_id: str,
     stored = [dict(r) for r in conn.execute(
         "SELECT * FROM transactions WHERE account_id=? AND booking_date >= ?"
         " AND booking_date < ?", (aid, requested_from, end))]
+    # ACTIVE rows dated just before the window (issue #32). A booking the bank
+    # re-dates from here into the window cannot be matched -- the row that
+    # would match it is out of view -- so reconcile uses these only to FLAG
+    # such an insert and the row it duplicates. Never as match candidates.
+    edge_from = (dt.date.fromisoformat(requested_from) - dt.timedelta(
+        days=ingest.AMOUNT_ONLY_MATCH_WINDOW_DAYS)).isoformat()
+    edge = [dict(r) for r in conn.execute(
+        "SELECT * FROM transactions WHERE account_id=? AND state='active'"
+        " AND booking_date >= ? AND booking_date < ?",
+        (aid, edge_from, requested_from))]
     aspsp = _aspsp_of(conn, account)
     # MEASURE BEFORE RECONCILE. The run that carries the counter-evidence
     # must not itself rewrite history under the premise it just refuted: a
@@ -962,7 +972,7 @@ def backfill(ais, conn, account: dict, session_id: str,
     reconcile_interval = (end, end)
 
     plan = ingest.reconcile(stored, fetched, reconcile_interval, capability,
-                            allocated=allocated)
+                            allocated=allocated, edge=edge)
 
     def _evidence_and_revalidate(c):
         """Inside apply_plan's BEGIN IMMEDIATE, before any plan row lands.
@@ -1032,7 +1042,8 @@ def backfill(ais, conn, account: dict, session_id: str,
             current = provenance.capability(c, aspsp, aid)
             if not ingest.ref_trusted(current):
                 return ingest.reconcile(stored, fetched, reconcile_interval,
-                                        current, allocated=allocated)
+                                        current, allocated=allocated,
+                                        edge=edge)
         return None
 
     try:
