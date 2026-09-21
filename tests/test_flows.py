@@ -751,6 +751,118 @@ class TestBackfill(unittest.TestCase):
         self.assertGreater(revived[0]["occurrence"], original["occurrence"])
 
 
+class TestSupersessionLineageUnderConcurrency(unittest.TestCase):
+    """Issue #30, driven through the real backfill on two connections to one
+    database. A pending row carries annotations; one run books it while
+    another run's plan, built before that, is still waiting for the lock.
+    The ledger must end with ONE active booking, the pending row's
+    `superseded_by` must reach it, and the annotations must be on it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        path = pathlib.Path(self.tmp.name) / "f.sqlite"
+        self.conn = store.open_db(path)
+        self.other = store.open_db(path)
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency, aspsp)"
+            " VALUES ('acc1','uid-1','s1','EUR','Revolut')")
+        observe(self.conn)
+        self._run(self.conn, "2026-07-28", "10.00", "PDNG")
+        self.pending = self.conn.execute(
+            "SELECT row_id FROM transactions").fetchone()[0]
+        self.conn.execute(
+            "INSERT INTO transaction_tags(row_id, tag, added_at)"
+            " VALUES (?, 'acct-matched', '2026-07-29T00:00:00')",
+            (self.pending,))
+        self.conn.execute(
+            "INSERT INTO transaction_notes(row_id, author, note, created_at)"
+            " VALUES (?, 'user', 'invoice 42', '2026-07-29T00:00:00')",
+            (self.pending,))
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.other.close()
+        self.conn.close()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _run(conn, date, amount, status, floor_days=90):
+        tx = raw_tx(date, amount=amount, ref="R1")
+        tx["status"] = status
+        flows.backfill(FakeAIS([([tx], None)]), conn, ACCOUNT, "s1",
+                       floor_days=floor_days, incarnation="")
+
+    def _interleave(self, first, second):
+        """`second` runs to completion on the other connection after `first`
+        has built its plan and before it takes the write lock."""
+        real = ingest.reconcile
+        fired = []
+
+        def spy(*args, **kw):
+            if not fired:
+                fired.append(True)
+                ingest.reconcile = real
+                try:
+                    self._run(self.other, *second)
+                finally:
+                    ingest.reconcile = spy
+            return real(*args, **kw)
+
+        ingest.reconcile = spy
+        try:
+            self._run(self.conn, *first)
+        finally:
+            ingest.reconcile = real
+        self.assertTrue(fired, "the interleaving never happened")
+
+    def _assert_lineage_reaches_the_annotations(self):
+        active = [tuple(r) for r in self.conn.execute(
+            "SELECT row_id FROM transactions WHERE state='active'")]
+        self.assertEqual(len(active), 1, active)
+        booked = active[0][0]
+        self.assertEqual(self.conn.execute(
+            "SELECT superseded_by FROM transactions WHERE row_id=?",
+            (self.pending,)).fetchone()[0], booked)
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT row_id, tag FROM transaction_tags")],
+            [(booked, "acct-matched")])
+        self.assertEqual([tuple(r) for r in self.conn.execute(
+            "SELECT row_id, note FROM transaction_notes")],
+            [(booked, "invoice 42")])
+        return booked
+
+    def test_a_run_that_planned_before_another_booked_the_row(self):
+        # The issue's sequence: B books at EUR 10 and moves the annotations;
+        # A, planned against the pending row, reaches the lock afterwards.
+        # A is refused whole: it holds the older bank answer.
+        with self.assertRaises(apply.StalePlan):
+            self._interleave(first=("2026-07-28", "11.00", "BOOK"),
+                             second=("2026-07-28", "10.00", "BOOK"))
+        booked = self._assert_lineage_reaches_the_annotations()
+        self.assertEqual(self.conn.execute(
+            "SELECT amount_minor FROM transactions WHERE row_id=?",
+            (booked,)).fetchone()[0], 1000)
+        # A's next sync fetches again and reconciles against B's booking.
+        self._run(self.conn, "2026-07-28", "11.00", "BOOK")
+        self.assertEqual(self._assert_lineage_reaches_the_annotations(), booked)
+        self.assertEqual(self.conn.execute(
+            "SELECT amount_minor FROM transactions WHERE row_id=?",
+            (booked,)).fetchone()[0], 1100)
+
+    def test_a_successor_dated_before_the_window_keeps_the_lineage(self):
+        # B's booking is dated before A's narrow window starts. A is refused
+        # all the same, so the stale answer never lands and the pending row
+        # is not superseded a second time.
+        with self.assertRaises(apply.StalePlan):
+            # A different amount, so A's insert passes UNIQUE and it is the
+            # supersede guard, not the constraint, that refuses the plan.
+            self._interleave(first=("2026-07-28", "11.00", "BOOK", 7),
+                             second=("2026-07-26", "10.00", "BOOK"))
+        self._assert_lineage_reaches_the_annotations()
+
+
 class TestCompleteRenewal(unittest.TestCase):
     """Driven through the entry point `tools_auth` actually calls.
     Renewal must COMPLETE — the resident is asked, they tap, the system keeps

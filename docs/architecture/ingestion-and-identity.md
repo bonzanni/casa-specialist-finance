@@ -136,7 +136,7 @@ Nothing says a renewal "cannot": a bank can return rows older than it was asked 
 
 ## Applying a plan
 
-Three rules govern `apply_plan()`:
+Four rules govern `apply_plan()`:
 
 - **A plan lands whole or not at all.** A half-applied page set would leave coverage
   attesting to rows that are not in the ledger.
@@ -146,6 +146,13 @@ Three rules govern `apply_plan()`:
   flag names a row id read at some earlier point; a row deleted underneath the plan in
   between makes that write affect nothing. Such an entry counts as nothing, rather than
   being reported as a change that did not happen.
+- **A row is superseded once.** A supersede only lands on a row that is still active
+  and has no successor; a plan that names one another run has already superseded or
+  tombstoned raises `StalePlan` and rolls back whole. Otherwise the second writer
+  repoints `superseded_by` past the row that received the annotations (issue #30).
+  The losing run is refused rather than replanned, because it also holds the older
+  bank answer; `sync` reports it as failed with the ledger unchanged, and the next
+  sync fetches again.
 
 ## Money
 
