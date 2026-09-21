@@ -1675,6 +1675,24 @@ class TestSkill(unittest.TestCase):
         self.assertIn("Read them as a to-do list", section)
         self.assertIn("lead with the one about bank consents", section)
 
+    def test_annotations_keep_state_in_tags_and_the_story_in_notes(self):
+        # Issue #3: an append-only journal holds contradictions by design, so
+        # current state must not live in prose, and a stale search hit must
+        # send the reader to the journal. Per bullet, one rule each.
+        bullets = self._bullets(9)
+        state = [b for b in bullets if b.startswith("**Tags carry state")]
+        foreign = [b for b in bullets if "`owner::name`" in b]
+        search = [b for b in bullets if b.startswith("**`notes_match`")]
+        self.assertEqual((len(state), len(foreign), len(search)), (1, 1, 1))
+        self.assertIn("never a reading of prose", state[0])
+        self.assertIn("the latest reflects the outcome", state[0])
+        self.assertIn("A note that reverses an earlier one says so", state[0])
+        # The example must not be invoice-match state: that is
+        # quarterly-accounting's acct:: vocabulary, not the specialist's.
+        self.assertNotIn("invoice", state[0].lower())
+        self.assertIn("never set or clear them", foreign[0])
+        self.assertIn("A hit with newer notes is not the row's current word",
+                      search[0])
 
     def test_the_ferry_binds_whoever_reads_the_mailbox(self):
         # Issue #19: the protocol addressed only the specialist, which on
