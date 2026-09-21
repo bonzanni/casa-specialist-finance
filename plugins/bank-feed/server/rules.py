@@ -28,10 +28,15 @@ MAX_TAGS_PER_ROW = 32          # parity-tested against tools_annotate
 
 # Same pattern as tools_annotate.TAG_RE — asserted equal by test, not
 # imported: this module must not drag the tool layer into apply.py.
-TAG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# An optional `owner::` prefix marks a tag another workflow owns (issue #31).
+# ':' was never admitted before, so no stored tag changes meaning.
+TAG_RE = re.compile(r"^(?:[a-z][a-z0-9-]{0,15}::)?[a-z0-9][a-z0-9-]{0,31}$")
 TAG_RULE = ("tags must be 1-32 characters of a-z, 0-9 or '-', starting "
             "with a letter or digit (they are lowercased and trimmed "
             "first)")
+NAMESPACE_SEP = "::"
+MAX_TAGS_PER_NAMESPACE = 16    # per row, per owner
+MAX_NAMESPACED_PER_ROW = 64    # per row, all owners together
 
 _WS = re.compile(r"\s+")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -254,6 +259,11 @@ def validate_rule(args: dict):
                 problems.append("%r is a reserved workflow tag — rules "
                                 "must not mint workflow state" % norm)
                 break
+            if tag_namespace(norm) is not None:
+                problems.append("%r belongs to another workflow's "
+                                "namespace — rules mint classification "
+                                "tags only" % norm)
+                break
             if norm not in seen:
                 seen.add(norm)
                 out.append(norm)
@@ -395,7 +405,7 @@ def apply_to_rows(conn, row_ids, now: str) -> dict:
         union = set(initial)
         for r in matching:
             union |= set(r["tags"].split())
-        if len(union) > MAX_TAGS_PER_ROW:
+        if cap_problem(initial, union) is not None:
             out["skipped_overcap"].append(rid)
             for r in matching:
                 rep = out["per_rule"][r["rule_id"]]
@@ -419,16 +429,72 @@ def apply_to_rows(conn, row_ids, now: str) -> dict:
     return out
 
 
+def tag_namespace(tag):
+    """The owning workflow of an `owner::name` tag, else None."""
+    if NAMESPACE_SEP in tag:
+        return tag.split(NAMESPACE_SEP, 1)[0]
+    return None
+
+
+def is_classification_tag(tag) -> bool:
+    """Content classification: neither a workflow marker nor another
+    workflow's `owner::name` assertion. Tests '::', not ':' — a stray
+    single-colon value (never writable) keeps exactly its old meaning."""
+    return NAMESPACE_SEP not in tag and tag not in WORKFLOW_TAGS
+
+
+# The SQL rendering of is_classification_tag over `tt.tag`, parity-tested
+# against the Python predicate. Literals come from module constants, never
+# from input.
+CLASSIFICATION_TAG_SQL = (
+    "(instr(tt.tag, '%s') = 0 AND tt.tag NOT IN (%s))"
+    % (NAMESPACE_SEP, ",".join("'%s'" % t for t in WORKFLOW_TAGS)))
+
+
+def cap_problem(existing, adding):
+    """-> None, or why adding `adding` to a row carrying `existing` breaks a
+    per-row budget.
+
+    Two budgets: MAX_TAGS_PER_ROW over un-namespaced tags (workflow markers
+    included, as before), and MAX_TAGS_PER_NAMESPACE per owner plus
+    MAX_NAMESPACED_PER_ROW over all owners — so neither side can starve the
+    other. Only a budget the call actually adds to is checked: a row already
+    over one budget (a supersede can merge two rows' tags) must not block
+    writes to the other."""
+    existing = set(existing)
+    new = set(adding) - existing
+    union = existing | new
+    if any(tag_namespace(t) is None for t in new):
+        plain = [t for t in existing if tag_namespace(t) is None]
+        if len(plain) + sum(tag_namespace(t) is None for t in new) \
+                > MAX_TAGS_PER_ROW:
+            return ("already carries %d tags and this would push it past "
+                    "the cap of %d" % (len(plain), MAX_TAGS_PER_ROW))
+    touched = {tag_namespace(t) for t in new} - {None}
+    for ns in sorted(touched):
+        n = sum(tag_namespace(t) == ns for t in union)
+        if n > MAX_TAGS_PER_NAMESPACE:
+            return ("would carry %d '%s::' tags, past the cap of %d per "
+                    "namespace" % (n, ns, MAX_TAGS_PER_NAMESPACE))
+    if touched:
+        n = sum(tag_namespace(t) is not None for t in union)
+        if n > MAX_NAMESPACED_PER_ROW:
+            return ("would carry %d namespaced tags, past the cap of %d"
+                    % (n, MAX_NAMESPACED_PER_ROW))
+    return None
+
+
 def classification_state(tags) -> str:
     """The ONE precedence predicate: terminal > parked >
     classified > workable. Every consumer (queue_totals, batch buckets,
-    untagged_only) derives from this, so the definitions cannot drift."""
+    untagged_only) derives from this, so the definitions cannot drift.
+    Another workflow's `owner::name` tag counts toward none of the four."""
     tags = set(tags)
     if "unclassifiable" in tags:
         return "terminal"
     if "awaiting-operator" in tags:
         return "parked"
-    if tags - set(WORKFLOW_TAGS):
+    if any(is_classification_tag(t) for t in tags):
         return "classified"
     return "workable"
 
