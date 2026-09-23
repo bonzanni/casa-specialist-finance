@@ -30,9 +30,14 @@ operation produced no copy.
 **The erasure goes through the index, so a crash cannot outlive it.** `delete_all_data`
 mints an erasure id and appends `erase <op> pending` as the **last statement before its
 ledger `COMMIT`** — the only order with no gap. A failure *above* it rolls the ledger back
-with nothing recorded, so "nothing was erased" still covers the copies. A failed *write* of
-the `append` refuses the whole call: with no durable record nothing would ever finish the
-file erasure. A failed *flush* is a different outcome — the line landed and the next
+with nothing recorded, so "nothing was erased" still covers the copies. The `append` is
+whole or absent (see the event index in the parent document): a failed *write* leaves no
+byte of the record and refuses the whole call before the `COMMIT` — with no durable record
+nothing would ever finish the file erasure — and a torn record whose bytes cannot be cut
+back (`written=None`) refuses the same way, saying the ledger was rolled back and the index
+may hold a partial record the next settlement removes, never "nothing was erased". A torn
+`pending` can therefore no longer sit under a committed ledger erasure, to be cut as a torn
+tail and take the erasure's only recovery record with it. A failed *flush* is a different outcome — the line landed and the next
 settlement acts on it — so the reply says the copies are still going, never "nothing was
 erased". A failure of the `COMMIT` rolls the ledger back with the record already durable;
 holding an erasure id discriminates that case exactly, the `append` being the last statement
@@ -57,7 +62,8 @@ unlinks whatever came back and flushes again.
 **The terminal record's two failures are not the same event**, exactly as the `pending`
 record's are not — and both happen only *after* the sweep above has already unlinked every
 file and flushed the directory, never before. A failed *write* of `erase <op> committed`
-raises `backups.ErasureRecordUnwritten`: the line never landed, so the erasure is still
+raises `backups.ErasureRecordUnwritten` (carrying `written`, False or None, and the counts of
+what the sweep removed): the line never landed as a record, so the erasure is still
 `pending` in the index and a settlement that reads the file right now redoes the (idempotent)
 sweep — but every copy is already gone, so `delete_all_data` says every copy was erased and
 the directory flushed, and that the index record confirming it could not be *written*, never
@@ -70,6 +76,25 @@ that one line unflushed, not as a refusal. Only an actual crash before the kerne
 writeback catches up can lose that unflushed line; if that happens, the record is gone from
 what any later settlement reads, the erasure reads `pending` again exactly as the write
 failure does, and the same idempotent sweep and re-append are what finish it.
+
+## The session rows go with a second sweep
+
+The banks are asked to withdraw their consents after the first sweep, outside every lock,
+so another process can take a backup while they answer — and that copy holds the `sessions`
+rows, bank-session identifiers, that the erasure destroys a moment later. So the rows the
+provider proved gone are destroyed in their own transaction (`_destroy_proven_handles`):
+`BEGIN IMMEDIATE`, settle, delete the proven rows, append `erase <op> pending` as the last
+statement before the `COMMIT`, then sweep the copies under the still-held index handle and
+append `erase <op> committed`. A copy taken before that `COMMIT` is in the directory when
+the sweep runs; one taken after it copies a ledger without the rows. When the delete removes
+no row, no record is written and no sweep runs: nothing was destroyed, so no copy can hold
+what the ledger lost. If the settlement or the `pending` append fails, the delete rolls back
+and the rows stay — a copy cannot then hold an identifier the ledger no longer has — and the
+reply's WARNING says the rows were kept, why, and that `delete_all_data` again clears them. A
+crash after the `COMMIT` leaves the `pending` record for the next settlement. A failure of the
+sweep itself is a line after the erasure naming what went and what is left, never a raise.
+That settlement also completes any erasure still pending — the first sweep's, when it stopped
+— and the reply says what it removed, below the warning that it had stopped.
 
 ## Presence is three-state
 
@@ -96,7 +121,11 @@ counted by weight: a whole copy is restorable, so it carries the alarm; a `.part
 in the index and `restore` refuses anything that is not, so it gets its own clause naming the
 pages it still holds; an unflushed directory is neither, and is stated as what it is rather
 than as a count of files. `ErasureIncomplete.describe()` is what the callers that changed
-nothing themselves print — settlement removed copies, so "Nothing was changed." is false. The
+nothing themselves print — settlement removed copies, so "Nothing was changed." is false.
+The same holds when settlement completed an erasure and something *else* refused afterwards:
+`refusal_text` names what it removed, and `delete_all_data`, whose own settlement can complete
+an earlier erasure and then fail on the record closing it, says the copies went and the
+record follows at the next settlement, never "Nothing was erased". The
 `WARNING` is reported, never raised: the ledger is already gone, and raising would discard
 the only account of it.
 

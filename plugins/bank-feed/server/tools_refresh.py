@@ -526,49 +526,71 @@ def _fetch_resource(c, account_id: str, resource: str, account: dict,
     ais = tools_auth._ais()
     if resource == "balances":
         returned = []
-        for entry in ais.balances(account.get("uid")):
-            amount = entry.get("balance_amount") or {}
-            currency = amount.get("currency") or account.get("currency") or "EUR"
-            # `balance_type` and `reference_date` are provider text and this is
-            # their writer. The read side is already fenced/neutralised;
-            # neutralising here as well means the ledger itself never holds a
-            # value that could forge a line, so a future reader that forgets is
-            # not the only thing standing between a bank payload and the
-            # operator. `_neutralized` also clips, and a balance type longer
-            # than that is not a balance type.
-            balance_type = (tools_read._neutralized(entry.get("balance_type"))
-                            or "UNKNOWN")
-            c.execute(
-                # Guarded (issue #8): an unguarded upsert re-created balance
-                # rows for an erased account from a response fetched before
-                # the erasure, or wrote the OLD life's figures over a
-                # re-linked NEW life's.
-                "INSERT INTO balances(account_id, balance_type, amount_minor,"
-                " currency, reference_date, fetched_at)"
-                " SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM accounts"
-                " WHERE account_id=? AND incarnation=?)"
-                " ON CONFLICT(account_id, balance_type) DO UPDATE SET"
-                " amount_minor=excluded.amount_minor,"
-                " currency=excluded.currency,"
-                " reference_date=excluded.reference_date,"
-                " fetched_at=excluded.fetched_at",
-                (account_id, balance_type,
-                 money.to_minor(str(amount.get("amount")), currency), currency,
-                 tools_read._neutralized(entry.get("reference_date")) or None,
-                 now, account_id, incarnation))
-            returned.append(balance_type)
-        _reconcile_balance_types(c, account_id, returned, incarnation)
-        # LAST, and that ordering is the safety property: every intermediate
-        # state is honest. A crash after the upserts but before the delete
-        # leaves an extra row AND no success stamp, so the freshness note goes
-        # on showing the previous sync's age rather than vouching for a set
-        # this run never finished reconciling.
-        cur = c.execute("UPDATE sync_state SET last_success_at=?,"
-                        " completeness='complete', last_error=NULL,"
-                        " next_retry_after=NULL WHERE account_id=?"
-                        " AND resource=? AND EXISTS (SELECT 1 FROM accounts"
-                        " WHERE account_id=? AND incarnation=?)",
-                        (now, account_id, resource, account_id, incarnation))
+        # Fetched whole BEFORE anything is written, so no bank call runs
+        # inside the write below.
+        entries = list(ais.balances(account.get("uid")))
+        # THE RESOURCE'S BALANCE WRITE IS ALL OR NOTHING. The connection is
+        # autocommit, so each upsert used to commit on its own: an entry that
+        # raised (an amount `money.to_minor` refuses) after a valid one had
+        # been upserted left the cache half-updated while `sync` replied that
+        # "the previous cached answer is unchanged". One savepoint around the
+        # upserts, the reconciliation and the success stamp, rolled back on
+        # any exception, makes that sentence true.
+        c.execute("SAVEPOINT balances_write")
+        try:
+            for entry in entries:
+                amount = entry.get("balance_amount") or {}
+                currency = amount.get("currency") or account.get("currency") or "EUR"
+                # `balance_type` and `reference_date` are provider text and this is
+                # their writer. The read side is already fenced/neutralised;
+                # neutralising here as well means the ledger itself never holds a
+                # value that could forge a line, so a future reader that forgets is
+                # not the only thing standing between a bank payload and the
+                # operator. `_neutralized` also clips, and a balance type longer
+                # than that is not a balance type.
+                balance_type = (tools_read._neutralized(entry.get("balance_type"))
+                                or "UNKNOWN")
+                c.execute(
+                    # Guarded (issue #8): an unguarded upsert re-created balance
+                    # rows for an erased account from a response fetched before
+                    # the erasure, or wrote the OLD life's figures over a
+                    # re-linked NEW life's.
+                    "INSERT INTO balances(account_id, balance_type, amount_minor,"
+                    " currency, reference_date, fetched_at)"
+                    " SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM accounts"
+                    " WHERE account_id=? AND incarnation=?)"
+                    " ON CONFLICT(account_id, balance_type) DO UPDATE SET"
+                    " amount_minor=excluded.amount_minor,"
+                    " currency=excluded.currency,"
+                    " reference_date=excluded.reference_date,"
+                    " fetched_at=excluded.fetched_at",
+                    (account_id, balance_type,
+                     money.to_minor(str(amount.get("amount")), currency), currency,
+                     tools_read._neutralized(entry.get("reference_date")) or None,
+                     now, account_id, incarnation))
+                returned.append(balance_type)
+            _reconcile_balance_types(c, account_id, returned, incarnation)
+            # LAST, and inside the savepoint rather than after it: a stamp
+            # that fails after the balances are committed (the write lock held
+            # past the busy timeout) would leave the new figures stored under
+            # a reply saying the cached answer is unchanged. Here the balances
+            # and the stamp land together or not at all. And every
+            # intermediate state stays honest: an extra row is never stamped
+            # fresh, because nothing is visible until the RELEASE.
+            cur = c.execute("UPDATE sync_state SET last_success_at=?,"
+                            " completeness='complete', last_error=NULL,"
+                            " next_retry_after=NULL WHERE account_id=?"
+                            " AND resource=? AND EXISTS (SELECT 1 FROM accounts"
+                            " WHERE account_id=? AND incarnation=?)",
+                            (now, account_id, resource, account_id, incarnation))
+            # The RELEASE of the outermost savepoint is the COMMIT; if it
+            # fails the savepoint is still open, and is rolled back below.
+            c.execute("RELEASE balances_write")
+        except BaseException:
+            if c.in_transaction:
+                c.execute("ROLLBACK TO balances_write")
+                c.execute("RELEASE balances_write")
+            raise
         if not cur.rowcount:
             # The fence fired: with a live account this row exists — the
             # guarded attempt stamp above created it — so zero rows means

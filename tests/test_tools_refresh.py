@@ -1331,6 +1331,52 @@ class TestBalanceIngestion(Base):
             "SELECT balance_type, amount_minor FROM balances"
             " ORDER BY balance_type")]
 
+    def test_a_refresh_that_raises_part_way_leaves_the_cache_as_it_was(self):
+        # The connection is autocommit, so each upsert committed on its own:
+        # a valid CLBD upserted, the next entry's amount refused, and `sync`
+        # then said "the previous cached answer is unchanged" over a cache
+        # that had changed. The resource's balance write is one savepoint.
+        self.account()
+        self._returns(("CLBD", "2026-08-01", "100.00"))
+        call("sync", account="acc1", resource="balances")
+        self.assertEqual(self._balances(), [("CLBD", 10000)])
+        self._returns(("CLBD", "2026-08-04", "200.00"),
+                      ("ITAV", "2026-08-04", "not-an-amount"))
+        out = call("sync", account="acc1", resource="balances")
+        self.assertIn("FAILED (MoneyError) — the previous cached answer is "
+                      "unchanged", out)
+        self.assertEqual(self._balances(), [("CLBD", 10000)])
+        self.assertFalse(self.raw.in_transaction)
+
+    def test_a_success_stamp_that_fails_leaves_the_balances_as_they_were(self):
+        # The stamp runs after the balances. Committed apart from them, a stamp
+        # that failed (the write lock held past the busy timeout) left the new
+        # figures stored under "the previous cached answer is unchanged".
+        import sqlite3
+        self.account()
+        self._returns(("CLBD", "2026-08-01", "100.00"))
+        call("sync", account="acc1", resource="balances")
+        self._returns(("CLBD", "2026-08-04", "200.00"))
+        inner = tools_read.CONN
+
+        class StampFails:
+            def execute(self, sql, *a, **k):
+                if "SET last_success_at" in sql:
+                    raise sqlite3.OperationalError("database is locked")
+                return inner.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+        tools_read.CONN = StampFails()
+        try:
+            out = call("sync", account="acc1", resource="balances")
+        finally:
+            tools_read.CONN = inner
+        self.assertIn("FAILED (OperationalError) — the previous cached answer "
+                      "is unchanged", out)
+        self.assertEqual(self._balances(), [("CLBD", 10000)])
+        self.assertFalse(self.raw.in_transaction)
+
     def test_a_type_the_bank_stops_returning_is_dropped(self):
         # Upsert-only means an orphaned type outlives the fetch
         # that stopped mentioning it, and _select_balance's preference ladder

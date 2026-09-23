@@ -286,14 +286,18 @@ def _fenced_write(c, workflow, expected, validate, write):
                 state, handle = backups.settle(c, paths)
                 if expected != state.generation:
                     c.execute("ROLLBACK")
-                    return ("the ledger was restored since this pass began (restore "
-                            "generation is %d, the pass expected %d) — re-read the "
-                            "ledger before writing. Nothing was changed."
-                            % (state.generation, expected))
+                    return backups.settled_refusal(
+                        "the ledger was restored since this pass began (restore "
+                        "generation is %d, the pass expected %d) — re-read the "
+                        "ledger before writing. Nothing was changed."
+                        % (state.generation, expected), state)
             refusal, ctx = validate(c)
             if refusal:
                 c.execute("ROLLBACK")
-                return refusal
+                # A settlement that completed an interrupted erasure removed
+                # copies before this refusal; its "Nothing was changed." would
+                # be false of the directory.
+                return backups.settled_refusal(refusal, state)
             if workflow is not None and (workflow not in state.registrations
                                          or workflow in state.broken):
                 # A REGISTRATION WHOSE COPY IS GONE RE-MINTS HERE. Refusing
@@ -326,8 +330,14 @@ def _fenced_write(c, workflow, expected, validate, write):
                 _orphan_quietly(paths, handle, minted)
             # An ErasureIncomplete out of `settle` above is not "nothing was
             # changed": that settlement unlinked copies before it refused, and
-            # the text for what it did travels with the exception.
-            return backups.refusal_text(exc)
+            # the text for what it did travels with the exception — or with
+            # the settled state, when the refusal came after it. A mint whose
+            # copy was already renamed into place says so: the copy exists,
+            # and only this write did not run.
+            text = backups.refusal_text(exc, state)
+            if exc.placed is not None:
+                text += " The write itself did not run."
+            return text
         except Exception:
             # SQLite auto-rolls-back on SQLITE_FULL/IOERR: a bare ROLLBACK
             # after one of those would itself raise "cannot rollback -- no

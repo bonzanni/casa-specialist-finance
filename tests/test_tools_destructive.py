@@ -2427,8 +2427,15 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         call("delete_all_data")
         records = [l.split()[1:] for l in paths.index.read_text().splitlines()[1:]]
         erases = [r for r in records if r[0] == "erase"]
-        self.assertEqual([r[2] for r in erases], ["pending", "committed"])
+        # TWO operations, each recorded before it happens: the ledger's
+        # erasure, and the sweep that goes with destroying the session rows
+        # the bank proved gone (a copy taken while the bank answered holds
+        # them).
+        self.assertEqual([r[2] for r in erases],
+                         ["pending", "committed", "pending", "committed"])
         self.assertEqual(erases[0][1], erases[1][1])          # one operation
+        self.assertEqual(erases[2][1], erases[3][1])          # and another
+        self.assertNotEqual(erases[0][1], erases[2][1])
         self.assertEqual(records[-1][0], "erase")
 
     def test_an_erasure_that_fails_before_its_commit_records_no_erase_at_all(self):
@@ -2552,7 +2559,12 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
                       "backup file beside it could not be removed", out)
         self.assertIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
         self.assertNotIn("backup file(s) were erased too", out)
-        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 2)
+        # The settlement opening the session-row sweep re-prepares the
+        # directory (0700) and completes the pending erasure in the same
+        # call; the reply says what it removed, after the warning.
+        self.assertIn("Settlement then completed the pending erasure of the "
+                      "backup copies: it removed 2 backup copy(ies)", out)
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 0)
 
     def test_an_index_append_that_fails_after_its_unlink_still_gets_its_record(self):
         # THE UNLINK AND ITS AUDIT RECORD ARE TWO EVENTS, and only the second
@@ -2585,9 +2597,12 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # what this failure cannot say.
         self.assertIn("the erasure of the backup files stopped part way", out)
         self.assertIn("this call cannot say which of them are still there", out)
-        self.assertEqual(self._prunes(paths), [])
-        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 1)
-        listing = call("list_backups")            # settles the pending erasure
+        # The settlement that opens the session-row sweep, later in the same
+        # call, completes the stalled erasure — and the reply says so, below
+        # the warning that it had stalled.
+        self.assertIn("Settlement then completed the pending erasure of the "
+                      "backup copies: it removed 1 backup copy(ies)", out)
+        listing = call("list_backups")
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
         # EXACTLY ONE `prune` PER INDEXED COPY, including the one whose file
         # was already gone before this settlement looked: inside an authorised
@@ -2740,7 +2755,13 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # Driven, not reasoned about: the directory really is empty.
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
         self.assertNotIn("stopped part way", out)
-        self.assertNotIn("WARNING — the local ledger IS erased", out)
+        self.assertNotIn("WARNING — the local ledger IS erased, but at least "
+                         "one backup file", out)
+        # The same full disk refuses the settlement that opens the
+        # session-row sweep, so the proven-gone row is KEPT, and said so.
+        self.assertIn("1 session row(s) belonging to consents ALREADY PROVEN "
+                      "GONE were kept", out)
+        self.assertEqual(self.count("sessions"), 1)
         self.assertIn("Every backup copy was erased and the directory "
                       "flushed, but the index record confirming it could "
                       "not be written (the backup index could not be "
@@ -2796,3 +2817,336 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertEqual(self.count("transactions"), 1)
         # Proves the ledger lock really was released: a write tool works.
         self.assertRegex(call("backup", reason="manual"), r"Backup [0-9a-f]{16}")
+
+
+def _torn_write(match, cut_fails=False, nth=1):
+    """An `os.write` double: the `nth` buffer containing `match` lands HALF
+    and reports it, and the continuation raises ENOSPC — the shape a full
+    disk gives a real write. With `cut_fails` the ftruncate that would cut the
+    half back off raises EIO too."""
+    real_write, real_trunc = os.write, os.ftruncate
+    state = {"seen": 0, "torn": False, "done": False, "cut": False}
+
+    def write(fd, data):
+        if state["torn"] and not state["done"]:
+            state["done"] = True
+            raise OSError(errno.ENOSPC, "No space left on device")
+        if match in data and not state["torn"]:
+            state["seen"] += 1
+            if state["seen"] == nth:
+                state["torn"] = True
+                return real_write(fd, data[:len(data) // 2])
+        return real_write(fd, data)
+
+    def ftruncate(fd, size):
+        if cut_fails and state["torn"] and not state["cut"]:
+            state["cut"] = True
+            raise OSError(errno.EIO, "Input/output error")
+        return real_trunc(fd, size)
+    return write, ftruncate
+
+
+BACKUP_IN_ANOTHER_PROCESS = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import backups, store
+c = store.open_db(sys.argv[2]); paths = backups.paths_for(sys.argv[2])
+c.execute("BEGIN IMMEDIATE")
+_, h = backups.settle(c, paths)
+b = backups.take_backup(c, paths, h, "manual")
+c.execute("COMMIT")
+backups.finish_backup(paths, h, b, committed=True)
+h.close()
+held = sys.argv[3].encode() in paths.backup_file(b.op_id).read_bytes()
+print(b.op_id, "holds-session" if held else "no-session")
+'''
+
+#: The REAL `delete_all_data`, in a process that dies right after the COMMIT
+#: that destroys the proven session rows and records the second sweep — before
+#: that sweep runs. The revocation pass takes a backup first, in-process, the
+#: way a second caller would during the bank calls.
+DESTROY_AND_DIE = r'''
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import apply, backups, store, tools_read, tools_destructive
+tools_read.CONN = store.open_db(sys.argv[2])
+paths = backups.paths_for(sys.argv[2])
+def withdraw(c):
+    rows = [dict(r) for r in c.execute("SELECT session_id, aspsp_name,"
+            " valid_until FROM sessions WHERE closed_at IS NULL")]
+    o = store.open_db(sys.argv[2])
+    o.execute("BEGIN IMMEDIATE")
+    _, h = backups.settle(o, paths)
+    b = backups.take_backup(o, paths, h, "manual")
+    o.execute("COMMIT")
+    backups.finish_backup(paths, h, b, committed=True)
+    h.close(); o.close()
+    print(b.op_id, flush=True)
+    for r in rows:
+        apply.record_revocation(c, r["session_id"], revoked=True)
+    return [dict(r, failure=None) for r in rows], []
+tools_destructive._withdraw_open_consents = withdraw
+real = backups.erase_backups
+calls = []
+def erase(*a, **k):
+    calls.append(1)
+    if len(calls) == 2:
+        os._exit(0)
+    return real(*a, **k)
+backups.erase_backups = erase
+tools_destructive.delete_all_data({})
+'''
+
+ERASE_AND_DIE = r'''
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import backups, store, tools_read, tools_destructive
+tools_read.CONN = store.open_db(sys.argv[2])
+def die(*a, **k):
+    os._exit(0)
+backups.erase_backups = die
+tools_destructive.delete_all_data({})
+'''
+
+
+class TestTheEraseRecordIsWholeOrAbsent(DestructiveBase):
+    """`erase <op> pending` is the last statement before the ledger COMMIT. A
+    torn one used to be cut as a torn tail by the next settlement, losing the
+    record of an erasure whose ledger half had committed. Whole or absent,
+    it refuses the call BEFORE the COMMIT instead."""
+
+    def _copies(self):
+        self.session()
+        self.account()
+        self.tx()
+        self.assertRegex(call("backup", reason="manual"), r"Backup [0-9a-f]{16}")
+        return backups.paths_for(tools_read.ledger_path(self.raw))
+
+    def _erases(self, paths):
+        return [l for l in paths.index.read_text().splitlines()
+                if l.split()[1:2] == ["erase"]]
+
+    def test_a_torn_pending_record_cut_back_refuses_before_the_commit(self):
+        paths = self._copies()
+        before = paths.index.read_bytes()
+        write, trunc = _torn_write(b" erase ")
+        with mock.patch.object(backups.os, "write", write), \
+                mock.patch.object(backups.os, "ftruncate", trunc):
+            out = call("delete_all_data")
+        self.assertIn("Nothing was erased", out)
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual(self.count("accounts"), 1)
+        self.assertEqual(paths.index.read_bytes(), before)
+        self.assertEqual(self.ais.deleted, [])
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 1)
+
+    def test_a_torn_pending_record_that_cannot_be_cut_refuses_and_says_so(self):
+        paths = self._copies()
+        write, trunc = _torn_write(b" erase ", cut_fails=True)
+        with mock.patch.object(backups.os, "write", write), \
+                mock.patch.object(backups.os, "ftruncate", trunc):
+            out = call("delete_all_data")
+        # `written is None`: "Nothing was erased" is a claim about an index
+        # this call may have left a partial line in.
+        self.assertNotIn("Nothing was erased", out)
+        self.assertIn("The ledger was not erased: its erasure was rolled "
+                      "back. The index may hold a partial record of the "
+                      "backup erasure; the next settlement", out)
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual(self.ais.deleted, [])
+        self.assertFalse(tools_read.CONN.in_transaction)
+        # The next settlement cuts the partial line and reads clean; the
+        # ledger was never erased, so its copies stay.
+        listing = call("list_backups")
+        self.assertIn("Restore generation: 0", listing)
+        self.assertEqual(self._erases(paths), [])
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 1)
+
+
+class TestACopyTakenWhileTheBanksAnswerDoesNotSurvive(DestructiveBase):
+    """The banks are asked outside every lock, after the first sweep. A backup
+    another process takes then copies the `sessions` rows — bank-session
+    identifiers — that the erasure destroys a moment later."""
+
+    def _files_holding(self, needle):
+        """Every file under the data directory holding `needle`, except the
+        live ledger's own write-ahead log: its stale frames are the ledger's
+        concern (they hold what the ledger held before the erasure, with or
+        without any backup), not a copy's, and this class is about copies."""
+        hits = []
+        for p in self.root.rglob("*"):
+            if p.name == "f.sqlite-wal":
+                continue
+            if p.is_file() and needle.encode() in p.read_bytes():
+                hits.append(p.name)
+        return hits
+
+    def test_a_backup_another_process_takes_during_the_revocations_is_erased(self):
+        self.session()
+        self.account()
+        self.tx()
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        real = self.ais.delete_session
+        taken = []
+
+        def delete_session(sid):
+            out = subprocess.run(
+                [sys.executable, "-c", BACKUP_IN_ANOTHER_PROCESS,
+                 str(SERVER_DIR), str(self.root / "f.sqlite"), SESSION_ID],
+                capture_output=True, text=True, check=True).stdout.split()
+            taken.append(out)
+            return real(sid)
+        self.ais.delete_session = delete_session
+        out = call("delete_all_data")
+        # The copy really was taken inside the window, and really held the id.
+        self.assertEqual(len(taken), 1)
+        self.assertEqual(taken[0][1], "holds-session")
+        self.assertIn("Withdrawn at the bank: 1 consent(s)", out)
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertEqual(list(paths.backups_dir.glob("*.sqlite")), [])
+        self.assertIn("1 backup copy(ies) and 0 partial copy(ies) found after "
+                      "the banks were asked were erased too", out)
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+    def test_a_second_pending_record_that_fails_keeps_the_rows(self):
+        self.session()
+        self.account()
+        self.tx()
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        real = self.ais.delete_session
+
+        def delete_session(sid):
+            subprocess.run(
+                [sys.executable, "-c", BACKUP_IN_ANOTHER_PROCESS,
+                 str(SERVER_DIR), str(self.root / "f.sqlite"), SESSION_ID],
+                capture_output=True, text=True, check=True)
+            return real(sid)
+        self.ais.delete_session = delete_session
+        real_write = os.write
+        seen = []
+
+        def write(fd, data):
+            if b" erase " in data and data.rstrip().endswith(b"pending"):
+                seen.append(1)
+                if len(seen) == 2:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        # The row the bank proved gone is KEPT: destroying it without the
+        # sweep record would leave the copy holding an identifier the ledger
+        # no longer has.
+        self.assertEqual(self.count("sessions"), 1)
+        self.assertIn("1 session row(s) belonging to consents ALREADY PROVEN "
+                      "GONE were kept: the backup index could not settle or "
+                      "record the sweep of the backup copies that has to go "
+                      "with them "
+                      "(the backup index could not be written: ENOSPC)", out)
+        self.assertIn("Run delete_all_data again to clear them.", out)
+        self.assertNotIn("their local rows went with the rest", out)
+        self.assertFalse(tools_read.CONN.in_transaction)
+        # No settlement leaves a copy holding a DELETED id: none was deleted.
+        call("list_backups")
+        live = {r[0] for r in self.raw.execute("SELECT session_id FROM sessions")}
+        for copy in paths.backups_dir.glob("*.sqlite"):
+            if SESSION_ID.encode() in copy.read_bytes():
+                self.assertIn(SESSION_ID, live)
+        # And the retry clears both the rows and the copy.
+        call("delete_all_data")
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertEqual(list(paths.backups_dir.glob("*.sqlite")), [])
+
+    def test_a_crash_after_the_row_commit_is_finished_by_the_next_settlement(self):
+        self.session()
+        self.account()
+        self.tx()
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        out = subprocess.run(
+            [sys.executable, "-c", DESTROY_AND_DIE, str(SERVER_DIR),
+             str(self.root / "f.sqlite")],
+            capture_output=True, text=True, timeout=120)
+        copy = out.stdout.split()[0]
+        # The state the crash leaves: rows destroyed and committed, the copy
+        # taken during the revocations still on disk, its sweep recorded.
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertTrue(paths.backup_file(copy).is_file())
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["erase", "pending"])
+        call("list_backups")                       # the next settlement
+        self.assertFalse(paths.backup_file(copy).exists())
+        self.assertEqual(list(paths.backups_dir.glob("*.sqlite")), [])
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["erase", "committed"])
+
+
+class TestRecoveryThatErasedCopiesIsNotNothing(DestructiveBase):
+    def test_a_recovery_whose_terminal_record_fails_says_the_copies_went(self):
+        # An erasure died between its ledger COMMIT and its sweep. This call's
+        # settlement completes it — unlinks the copy — and only the record
+        # closing it fails. "Nothing was erased" would be false of the copy
+        # this very call removed.
+        self.session()
+        self.account()
+        self.tx()
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        bid = call("backup", reason="manual").split()[1]
+        self.raw.execute("UPDATE sessions SET closed_at='t'")
+        subprocess.run([sys.executable, "-c", ERASE_AND_DIE, str(SERVER_DIR),
+                        str(self.root / "f.sqlite")],
+                       check=False, capture_output=True, timeout=60)
+        crashed = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([crashed[1], crashed[3]], ["erase", "pending"])
+        target = ("erase %s committed" % crashed[2]).encode()
+        real_write = os.write
+
+        def write(fd, data):
+            if target in data:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        self.assertFalse(paths.backup_file(bid).exists())
+        self.assertNotIn("Nothing was erased", out)
+        self.assertIn("An erasure recorded earlier was completed by this "
+                      "call's settlement: every backup copy is gone (1 "
+                      "removed now), but the index record confirming it could "
+                      "not be written (the backup index could not be written: "
+                      "ENOSPC); it will be written at the next settlement", out)
+        self.assertFalse(tools_read.CONN.in_transaction)
+        call("list_backups")
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[2], last[3]],
+                         ["erase", crashed[2], "committed"])
+
+
+class TestARetryAfterAnInterruptedErasure(DestructiveBase):
+    def test_a_retry_whose_own_record_fails_names_what_settlement_erased(self):
+        # The retry's settlement completes the interrupted erasure (removes
+        # the copy) and THEN its own pending record fails. "Nothing was
+        # erased" would be false of the copy that settlement removed.
+        self.session()
+        self.account()
+        self.tx()
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        bid = call("backup", reason="manual").split()[1]
+        self.raw.execute("UPDATE sessions SET closed_at='t'")
+        subprocess.run([sys.executable, "-c", ERASE_AND_DIE, str(SERVER_DIR),
+                        str(self.root / "f.sqlite")],
+                       check=False, capture_output=True, timeout=60)
+        crashed = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([crashed[1], crashed[3]], ["erase", "pending"])
+        real_write = os.write
+
+        def write(fd, data):
+            if (b" erase " in data and data.rstrip().endswith(b"pending")
+                    and crashed[2].encode() not in data):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        self.assertFalse(paths.backup_file(bid).exists())
+        self.assertNotIn("Nothing was erased", out)
+        self.assertIn("the backup index could not be written: ENOSPC. The "
+                      "ledger was not erased. Settlement first completed an "
+                      "interrupted erasure and removed 1 backup copy(ies).", out)
+        self.assertFalse(tools_read.CONN.in_transaction)

@@ -39,7 +39,16 @@ flush that fails after its write leaves a line the next reader acts on, so
 irreversible honour it — a restore's terminal one (`backups.RestoreResult.index_error`)
 and both of an erasure's — so none of them reports "nothing happened" over a readable
 line. A `backup`'s `pending` record does not have to: no copy was placed, so nothing was
-changed, and settlement writes that operation's `aborted` line. No field may contain
+changed, and settlement writes that operation's `aborted` line.
+
+**An append is whole or absent.** A write can land a prefix of a line and report it; the
+next append would complete it into a malformed line every settlement refuses. So the size
+is taken first, the write loops until every byte lands, and a failure cuts the file back to
+that size and flushes it: `written=False`, the record does not exist. If the cut fails too,
+the `IndexHandle` refuses every later append and the failure carries `written=None` — the
+index may end in a partial record, which the next settlement cuts as a torn tail. Callers
+word None like a readable line and act on it like an absent one. The header is written the
+same way, cut back to empty on a failure. No field may contain
 whitespace — operation ids are hex, timestamps are `strftime("%Y%m%dT%H%M%SZ", gmtime())`,
 reasons are a closed set plus a charset-constrained workflow string
 (`backups.WORKFLOW_RE`) — which is what makes a line-oriented durable record safe to
@@ -65,7 +74,7 @@ reason — what it removes is every copy there is, so a field on either line is 
 and once its `pending` record is durable, settlement always completes it: a terminal that
 could cancel one would let a crash leave a restorable whole-ledger copy behind.
 
-**Reading it fails closed.** A line that does not parse — an unknown kind, a malformed id,
+**Reading it fails closed.** A line that does not parse — not UTF-8, an unknown kind, a malformed id,
 a second `pending` or a second terminal for one operation — makes the whole index unreadable,
 and an unreadable index refuses every backup, restore and workflow-bearing write. `backups._parse` never guesses a generation it cannot compute.
 
@@ -125,7 +134,11 @@ which counts committed *restores*. A copy that cannot be unlinked leaves the `pe
 and makes settlement itself refuse — fail closed, as an unreadable index does, rather than
 answer normally while copies of a supposedly erased ledger sit beside it. The refusal carries the
 state settlement built, so `list_backups`, which changes nothing, still renders the listing
-rather than hiding the residue.
+rather than hiding the residue. What completing an erasure removed is carried too
+(`LedgerState.settled`, or `BackupError.settled` when settlement then refuses), so a call that
+refuses after it — a restore of an id that erasure just removed — says "This call did not
+run; settlement first completed an interrupted erasure and removed N backup copy(ies).",
+never "Nothing was changed." (`backups.refusal_text`).
 
 Exactly one terminal record is ever appended per operation id — a process finding one
 already present appends nothing — and since every appender holds the ledger writer lock
@@ -227,9 +240,10 @@ inside one `BEGIN IMMEDIATE`, condensed:
 A failure on that final append is **carried, not raised**: the `COMMIT` has already
 replaced every ordinary table, so leaving as a `BackupError` put the tool's own "Nothing was
 changed." in charge of reporting a restore that had happened. `RestoreResult.index_error`
-carries the message instead and `restore_backup` prints "The restore is complete; its index
-record could not be written… — it settles at the next listing" — literally true: the
-`pending` record plus the committed
+carries the message, and `index_written` which failure it was: a failed flush is "was written
+but could not be flushed … it is readable now"; a failed write is "could not be written… — it
+settles at the next listing"; a partial line is "may be partially written; the next
+settlement recovers it". The last two are literally true: the `pending` record plus the committed
 `meta.backup_restore_op` marker settle the operation `committed` at the next settlement,
 so the generation is right either way.
 

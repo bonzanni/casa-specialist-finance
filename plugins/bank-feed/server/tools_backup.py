@@ -70,9 +70,9 @@ def backup(args: dict) -> str:
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
     c.execute("BEGIN IMMEDIATE")
-    handle = None
+    handle = state = None
     try:
-        _, handle = backups.settle(c, paths)
+        state, handle = backups.settle(c, paths)
         b = backups.take_backup(c, paths, handle, reason)
         c.execute("COMMIT")
     except backups.BackupError as exc:
@@ -84,10 +84,11 @@ def backup(args: dict) -> str:
             c.execute("ROLLBACK")
         if handle is not None:
             handle.close()
-        # An ErasureIncomplete out of `settle` is not "nothing was changed":
-        # the settlement this call triggered removed copies on its way to
-        # refusing, and the text for that lives with the exception.
-        return backups.refusal_text(exc)
+        # Neither an ErasureIncomplete out of `settle` nor a refusal after a
+        # settlement that completed an erasure is "nothing was changed": the
+        # settlement this call triggered removed copies, and the text for
+        # that lives with the exception and the settled state.
+        return backups.refusal_text(exc, state)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -160,6 +161,8 @@ def list_backups(args: dict) -> str:
                     "INDEXED copy is listed below — a copy in flight never "
                     "reached the index and has no row.\n%s"
                     % (exc.residue(), render_listing(exc.state)))
+        if exc.settled is not None:
+            return "%s. %s" % (exc, backups.settled_sentence(exc.settled))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is
@@ -196,7 +199,7 @@ def restore_backup(args: dict) -> str:
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
     c.execute("BEGIN IMMEDIATE")
-    handle = None
+    handle = state = None
     try:
         state, handle = backups.settle(c, paths)
         r = backups.restore(c, paths, handle, state, backup_id,
@@ -204,7 +207,10 @@ def restore_backup(args: dict) -> str:
     except backups.BackupError as exc:
         if c.in_transaction:
             c.execute("ROLLBACK")
-        return backups.refusal_text(exc)
+        # `state` is the settlement's: when it completed an interrupted
+        # erasure the copies it removed are gone whatever refused next — the
+        # restore of an id that erasure just removed is the ordinary case.
+        return backups.refusal_text(exc, state)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -226,9 +232,21 @@ def restore_backup(args: dict) -> str:
         # The restore committed and only its terminal index record did not
         # land. Saying "nothing was changed" here — which is what a
         # BackupError out of that append used to produce — would be the one
-        # untrue sentence this whole subsystem exists to avoid.
-        lines.append("The restore is complete; its index record could not be "
-                     "written (%s) — it settles at the next listing."
-                     % r.index_error)
+        # untrue sentence this whole subsystem exists to avoid. The three
+        # outcomes of the append are three different states of the index:
+        # a line that is readable now, a line that is absent, and a line
+        # that may stand part-written until a settlement cuts it.
+        if r.index_written is True:
+            lines.append("The restore is complete; its index record was "
+                         "written but could not be flushed (%s); it is "
+                         "readable now." % r.index_error)
+        elif r.index_written is None:
+            lines.append("The restore is complete; its index record may be "
+                         "partially written (%s); the next settlement "
+                         "recovers it." % r.index_error)
+        else:
+            lines.append("The restore is complete; its index record could "
+                         "not be written (%s) — it settles at the next "
+                         "listing." % r.index_error)
     lines.append(STALE_LINE)
     return "\n".join(lines)
