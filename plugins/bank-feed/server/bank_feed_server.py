@@ -127,7 +127,7 @@ def main() -> None:
     # was not.
     for _mod in ("tools_read", "tools_auth", "tools_refresh",
                  "tools_destructive", "tools_annotate", "tools_aggregate",
-                 "tools_rules"):
+                 "tools_rules", "tools_backup"):
         if importlib.util.find_spec(_mod) is None:
             continue                                     # not shipped yet -- acceptable
         __import__(_mod)                                 # populates TOOLS; any failure here is fatal

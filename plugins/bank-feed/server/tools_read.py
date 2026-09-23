@@ -100,6 +100,13 @@ CONN: sqlite3.Connection | None = None
 # the read tools can perform the inline refresh without importing the module
 # that performs it (which imports this one). None means "no refresher wired" —
 # the tools still answer from cache and still label the answer stale.
+#
+# The contract, because a seam nobody can see both sides of drifts: it is
+# called as `REFRESHER(c, account_id, resource, out=<dict>)`; it RETURNS a
+# bool, True only for a refresh that completed (that return value, never a
+# timestamp, is what credits "refreshed inline just now"); and it sets
+# `out["erased"] = True` when the account's ledger life changed under the run,
+# which is what the freshness note reports instead of a refresh.
 REFRESHER = None
 
 
@@ -127,6 +134,12 @@ def conn() -> sqlite3.Connection:
             raise
         CONN = opened
     return CONN
+
+
+def ledger_path(c: sqlite3.Connection) -> str:
+    """The open ledger's own file path, as SQLite itself reports it — the ONE
+    spelling `backups.paths_for` is built from (issue #39)."""
+    return c.execute("PRAGMA database_list").fetchone()[2]
 
 
 def register(name: str, description: str, schema: dict | None = None, *,
@@ -503,6 +516,11 @@ def _freshness(c, account_ids, resource: str) -> list:
     """Per-resource age; inline refresh past STALENESS_S."""
     out = []
     for account_id in account_ids:
+        # Per account, unconditionally, and BEFORE the staleness condition:
+        # initialised inside it, a fresh first account raised
+        # `UnboundLocalError` at the append below, and a fresh second account
+        # inherited the first account's `erased` flag and its notice.
+        res_out, returned = {}, False
         row = _sync_row(c, account_id, resource)
         stamp = _parse_ts(row.get("last_success_at")) if row else None
         age = (_now() - stamp).total_seconds() if stamp else None
@@ -510,7 +528,10 @@ def _freshness(c, account_ids, resource: str) -> list:
         refreshed, error, exit_hint = False, None, ""
         if (age is None or age > STALENESS_S) and REFRESHER is not None:
             try:
-                REFRESHER(c, account_id, resource)
+                # The same outcome `sync` consumes, through the same seam: the
+                # refresher reports a crossed life in `out`, and it reports
+                # actual success in its RETURN VALUE. Both are read below.
+                returned = REFRESHER(c, account_id, resource, out=res_out)
             except Exception as exc:            # noqa: BLE001 — class only
                 # Never the message: it can carry a provider body.
                 error = type(exc).__name__
@@ -551,11 +572,20 @@ def _freshness(c, account_ids, resource: str) -> list:
             # would produce "STALE, cache age 10h 0m (refreshed inline just
             # now)", a self-contradiction. Branch on the age actually having
             # moved, not on the call merely surviving.
-            refreshed = age is not None and (age_before is None
-                                             or age < age_before)
+            #
+            # AND NOT ON THE TIMESTAMP ALONE. A restore puts a `sync_state`
+            # row back from the backup, stamp and all, so the age moved for a
+            # refresh that kept nothing it fetched — reproduced as
+            # "refreshed inline just now" over a restored row. Success is
+            # credited from the refresher's own return value; the moved age
+            # is kept as the second half, for the refresher that returns True
+            # having written nothing.
+            refreshed = bool(returned) and age is not None and (
+                age_before is None or age < age_before)
         out.append({"account_id": account_id, "age_s": age,
                     "refreshed": refreshed, "error": error,
                     "exit_hint": exit_hint,
+                    "life_changed": bool(res_out.get("erased")),
                     "completeness": (row or {}).get("completeness")})
     return out
 
@@ -565,13 +595,25 @@ def _freshness_note(accounts, fresh) -> str:
     parts = []
     for f in fresh:
         name = _label(by_id.get(f["account_id"], {"account_id": f["account_id"]}))
+        # Decided BEFORE the `never synced` branch returns: a restore that put
+        # no `sync_state` row back is exactly the case with no timestamp, and
+        # deciding it after the `continue` lost the notice on the one account
+        # that had nothing else to say. OUR literal, so the parentheses it
+        # opens are ours to balance — unlike an `exit_hint`, which is why that
+        # one goes through `_clause_safe` and this does not.
+        life = (" (the account's ledger life changed during this refresh — "
+                "restored or erased; run sync)" if f.get("life_changed") else "")
         if f["age_s"] is None:
-            parts.append("%s: never synced" % name)
+            parts.append("%s: never synced%s" % (name, life))
             continue
         state = "fresh" if f["age_s"] <= STALENESS_S else "STALE"
         note = "%s: %s, cache age %s" % (name, state, _fmt_age(f["age_s"]))
-        if f["refreshed"]:
+        # Never both: a run whose life changed kept nothing, so "refreshed
+        # inline just now" beside the notice would be the claim the notice
+        # exists to withdraw.
+        if f["refreshed"] and not life:
             note += " (refreshed inline just now)"
+        note += life
         if f["error"]:
             note += " (inline refresh FAILED: %s%s)" % (f["error"],
                                                         f.get("exit_hint") or "")
@@ -670,7 +712,7 @@ def list_accounts(args: dict) -> str:
         # nothing, as `flows.history_floor` defines.
         floor = flows.history_floor(c, a["account_id"])
         lines.append(
-            "  %s  %s  %s  %s  %s%scategory=%s  included=%s" % (
+            "  %s  %s  %s  %s  %s%scategory=%s  included=%s%s" % (
                 a["account_id"], _untrusted(a.get("name")),
                 _neutralized(a.get("iban_masked")),
                 _untrusted(a.get("currency")) if a.get("currency") else "?",
@@ -679,7 +721,19 @@ def list_accounts(args: dict) -> str:
                 % (_neutralized(floor[1]), _neutralized(floor[0]))
                 if floor is not None else "",
                 a.get("category") or "unlabelled",
-                "yes" if a.get("included") else "no"))
+                "yes" if a.get("included") else "no",
+                # Derived from the binding itself, never from a stored flag:
+                # an account with no live session IS one that needs
+                # re-linking. This was the one read tool that rendered an
+                # unbound account identically to a live one, so a restore's
+                # own reply was the only place the fact was ever said — and
+                # that goes stale the moment the operator scrolls past it.
+                # `tools_rules` already prints this idiom for a rule whose
+                # account is gone. Falsy, not `is None`: the refresh path
+                # refuses on `not session_id`, so an empty string is unbound
+                # there and must not render as linked here.
+                "  not linked — re-link needed"
+                if not a.get("session_id") else ""))
     lines.append("account_id is a keyed HMAC of IBAN+currency and is the "
                  "durable handle other tools take.")
     if any("fetched_back_to=" in line for line in lines):

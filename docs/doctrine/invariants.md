@@ -8,6 +8,10 @@ Every invariant is defined in exactly one file and referenced by id elsewhere.
 
 | Id | Statement | Defined in |
 |---|---|---|
+| `INV-BACKUP-001` | the ledger writer lock is taken before the index lock at every site. | [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md) |
+| `INV-BACKUP-002` | the restore generation is derived from the index and never from the ledger. | [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md) |
+| `INV-BACKUP-003` | sessions, attempts and meta are never taken from a backup. | [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md) |
+| `INV-BACKUP-004` | no string rendered from a refresh outcome names a destructive tool. | [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md) |
 | `INV-PUB-001` | a fact belongs in this repository only if it is verifiable from the public commit alone. | [`doctrine/publishing.md`](../doctrine/publishing.md) |
 | `INV-PUB-002` | doctrine states the mechanism, never the incident. | [`doctrine/publishing.md`](../doctrine/publishing.md) |
 | `INV-PUB-003` | when a claim cannot be checked from the commit, stop and ask — do not guess, and do not paraphrase around it. | [`doctrine/publishing.md`](../doctrine/publishing.md) |

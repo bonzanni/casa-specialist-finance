@@ -1449,8 +1449,10 @@ class TestBalanceIngestion(Base):
         # The raise is deliberately permanent — nothing deletes the cached rows
         # and every later read re-raises — so for an account that LEGITIMATELY
         # stops having balances the operator is left with a class name and no
-        # stated exit. `forget_local_account` is one, and naming it is what
-        # keeps this a fail-closed refusal rather than a wedged account.
+        # stated exit. The exit is two READS — sync's outcome and
+        # consent_status — because a report rendered outside the write lock
+        # may be one restore stale, and a stale remedy that named an erasure
+        # erased a healthy account.
         self.account()
         self._returns(("CLBD", "2026-05-01", "5000.00"))
         call("sync", account="acc1", resource="balances")
@@ -1458,7 +1460,9 @@ class TestBalanceIngestion(Base):
         with self.assertRaises(tools_refresh.NoBalancesReturned) as caught:
             tools_refresh._refresh_resource(self.conn, "acc1", "balances",
                                             automatic=False)
-        self.assertIn("forget_local_account", str(caught.exception))
+        self.assertIn("run sync and read its outcome", str(caught.exception))
+        self.assertIn("consent_status", str(caught.exception))
+        self.assertNotIn("forget_local_account", str(caught.exception))
 
     def test_sync_tells_the_operator_how_to_leave_the_state(self):
         # A message nothing prints is a column written and never read. The read
@@ -1472,13 +1476,15 @@ class TestBalanceIngestion(Base):
         out = call("sync", account="acc1", resource="balances")
         self.assertIn("FAILED (NoBalancesReturned)", out)
         self.assertIn(tools_refresh.NO_BALANCES_EXIT, out)
-        self.assertIn("forget_local_account", out)
-        # And it says what that costs, because the exit erases local history.
-        self.assertIn("Bank access is not touched", out)
+        self.assertIn("consent_status", out)
+        # And it says whose decision the erasure is, without naming the tool
+        # that performs it.
+        self.assertIn("the operator's decision", out)
+        self.assertNotIn("forget_local_account", out)
         # Still ONE line per account/resource: the remedy is appended to the
         # failure, not printed as a second line the reader could act on alone.
         self.assertEqual(len([ln for ln in out.splitlines()
-                              if "forget_local_account" in ln]), 1)
+                              if "consent_status" in ln]), 1)
 
     def test_the_read_tools_tell_the_operator_how_to_leave_it_too(self):
         # `sync` must not be the ONLY place the exit reaches the operator,
@@ -1502,7 +1508,8 @@ class TestBalanceIngestion(Base):
             out = call(tool)
             self.assertIn("FAILED: NoBalancesReturned", out, tool)
             self.assertIn(tools_refresh.NO_BALANCES_EXIT, out, tool)
-            self.assertIn("forget_local_account", out, tool)
+            self.assertIn("consent_status", out, tool)
+            self.assertNotIn("forget_local_account", out, tool)
             # The figure is still shown with its own real age — the remedy is
             # appended to the failure, it does not replace the answer.
             self.assertIn("STALE", out, tool)
@@ -1705,9 +1712,15 @@ class TestErasureFence(Base):
             "SELECT COUNT(*) FROM coverage").fetchone()[0], 0)
 
     def test_a_failed_fetch_on_an_erased_account_records_no_failure_row(self):
-        """The resurrection through the error path: the exception must still
-        propagate, but the failure note — `_ensure_sync_row`'s INSERT
-        included — must not recreate sync_state for the erased account."""
+        """The resurrection through the error path: the failure note —
+        `_ensure_sync_row`'s INSERT included — must not recreate sync_state
+        for the erased account.
+
+        The exception itself no longer propagates: the terminal life check
+        finalises the exception path too, and a failure that belongs to a
+        life that no longer exists is not this ledger's failure to report. It
+        is reported as the life change it is, through `out`.
+        """
         self.account()
 
         def erasing_then_failing(uid):
@@ -1715,9 +1728,10 @@ class TestErasureFence(Base):
             raise OSError("connection reset")
 
         self.ais.balances = erasing_then_failing
-        with self.assertRaises(OSError):
-            tools_refresh._refresh_resource(self.conn, "acc1", "balances",
-                                            automatic=False)
+        out = {}
+        self.assertFalse(tools_refresh._refresh_resource(
+            self.conn, "acc1", "balances", automatic=False, out=out))
+        self.assertIs(out.get("erased"), True)
         self.assertEqual(self.raw.execute(
             "SELECT COUNT(*) FROM sync_state").fetchone()[0], 0)
 
@@ -1949,3 +1963,217 @@ class TestErasureFencePinsEveryGuard(Base):
         self.assertEqual(self.raw.execute(
             "SELECT COUNT(*) FROM balances WHERE account_id='acc1'"
             ).fetchone()[0], 0)
+
+
+class TestRefreshAcrossARestore(Base):
+    """A refresh whose account changed life underneath it says so, and
+    never names a tool that erases or revokes.
+
+    The rows are already right — every write in the run is incarnation-fenced
+    (issue #8). What was wrong was the REPORT: a restore keeps the binding
+    live, and the erasure text sent the operator to re-link an account that
+    never lost its consent, or to erase a healthy one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.account()                      # acc1, linked, as every sync test has
+
+    def relife(self):
+        # What a restore does to the account: a fresh incarnation, binding kept.
+        self.raw.execute("UPDATE accounts SET incarnation=lower(hex(randomblob(8)))")
+
+    def test_the_terminal_check_reports_restored_on_the_success_path(self):
+        self.use_recording_backfill()
+        recorder = flows.backfill
+
+        def during(*a, **k):
+            r = recorder(*a, **k)
+            self.relife()
+            return r
+        flows.backfill = during
+        out = call("sync", account="acc1", resource="transactions")
+        self.assertIn("RESTORED — the account's ledger life changed during this refresh; "
+                      "nothing the fetch returned was kept. Run sync again.", out)
+        self.assertNotIn("transactions: refreshed", out)
+        for name in ("forget_local_account", "unlink_bank", "purge", "delete_all_data"):
+            self.assertNotIn(name, out)
+
+    def test_the_terminal_check_reports_restored_on_the_exception_path(self):
+        # The exception must be RAISED (the fenced count sees the old life),
+        # and the life must change BEFORE the terminal check: so the empty
+        # response raises NoBalancesReturned as today, and the restore lands
+        # inside failure recording. Killing the exception-side finalisation
+        # renders "FAILED (NoBalancesReturned)" here — the regression in
+        # which a check on the RETURN alone let the raise walk past it —
+        # which is what makes this a mutation test and not a wish.
+        self.raw.execute("INSERT INTO balances(account_id, balance_type, amount_minor,"
+                         " currency) VALUES ('acc1', 'CLBD', 100, 'EUR')")
+        self.ais.balances = lambda uid: []
+        real_note = tools_refresh._note_failure
+
+        def relife_then_note(c, account_id, resource, exc, incarnation):
+            self.relife()
+            real_note(c, account_id, resource, exc, incarnation)
+        self.addCleanup(setattr, tools_refresh, "_note_failure", real_note)
+        tools_refresh._note_failure = relife_then_note
+        out = call("sync", account="acc1", resource="balances")
+        self.assertIn("RESTORED", out)
+        self.assertNotIn("NoBalancesReturned", out)
+        self.assertNotIn("forget_local_account", out)
+
+    def test_with_the_life_unchanged_the_exception_renders_as_today(self):
+        self.raw.execute("INSERT INTO balances(account_id, balance_type, amount_minor,"
+                         " currency) VALUES ('acc1', 'CLBD', 100, 'EUR')")
+        self.ais.balances = lambda uid: []
+        out = call("sync", account="acc1", resource="balances")
+        self.assertIn("NoBalancesReturned", out)
+        self.assertIn("consent_status", out)
+
+    def test_a_restore_that_left_no_binding_says_a_re_link_is_needed(self):
+        # The other half of the RESTORED line, and the one the operator has
+        # to act on: a restore whose backup predates the link puts the row
+        # back with no session. `needs-relink` is read off that row, and the
+        # line still names no tool that erases or revokes — link_bank is the
+        # remedy for an ABSENT binding, and this one is present but unbound.
+        self.use_recording_backfill()
+        recorder = flows.backfill
+
+        def during(*a, **k):
+            r = recorder(*a, **k)
+            self.relife()
+            self.raw.execute("UPDATE accounts SET session_id=NULL")
+            return r
+        flows.backfill = during
+        line = [ln for ln in call("sync", account="acc1",
+                                  resource="transactions").splitlines()
+                if "RESTORED" in ln][0]
+        self.assertIn("This account is not linked — a re-link is needed.", line)
+        self.assertNotIn("link_bank", line)
+
+    def test_a_genuine_erasure_keeps_the_erasure_text(self):
+        real = flows.backfill
+
+        def during(ais, conn, account, session_id, **k):
+            conn.execute("DELETE FROM accounts WHERE account_id=?", (account["account_id"],))
+            return {"inserted": 0, "capped": False, "completeness": "complete", "erased": True}
+        flows.backfill = during
+        self.addCleanup(setattr, flows, "backfill", real)
+        out = call("sync", account="acc1", resource="transactions")
+        self.assertIn("erased locally", out)
+
+    def test_a_restored_run_contributes_no_counts_to_the_batch(self):
+        # The rows this fetch inserted did not survive the life change, so
+        # counting them in the Classification line contradicts the RESTORED
+        # line above it in the same reply.
+        real = flows.backfill
+
+        def during(ais, conn, account, session_id, **k):
+            self.relife()
+            return {"inserted": 2, "capped": False, "completeness": "complete",
+                    "new_row_ids": [1, 2], "auto_tagged": 1,
+                    "needs_classification": 1}
+        flows.backfill = during
+        self.addCleanup(setattr, flows, "backfill", real)
+        out = call("sync", account="acc1", resource="transactions")
+        self.assertIn("RESTORED", out)
+        self.assertNotIn("Classification:", out)
+
+    #: The names no rendered string may carry (INV-BACKUP-004).
+    DESTRUCTIVE_NAMES = ("forget_local_account", "unlink_bank", "purge",
+                         "delete_all_data")
+
+    @staticmethod
+    def rendered_strings(source):
+        """Every string a module's literals can PRODUCE, docstrings excluded,
+        with concatenation CONSTANT-FOLDED -> [(lineno, text)].
+
+        Folding is the whole strength of the sweep. Checking each `ast.Constant`
+        on its own passes `"forget_" + "local_account"` — neither operand
+        carries the name, and the rendered string does — which is exactly the
+        shape a rendering slips through as. `+` over string operands (nested,
+        recursively) and an f-string's constant parts are folded and checked as
+        one string. A docstring that discusses a tool is not a rendering, so
+        docstrings are skipped — `async def` ones too, not only `def`.
+        """
+        import ast
+        tree = ast.parse(source)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)) \
+                    and node.body and isinstance(node.body[0], ast.Expr) \
+                    and isinstance(node.body[0].value, ast.Constant):
+                docstrings.add(id(node.body[0].value))
+
+        def fold(node):
+            """-> the string this node renders, or None if it is not one."""
+            if isinstance(node, ast.Constant):
+                return node.value if isinstance(node.value, str) else None
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                # A non-foldable operand is an UNKNOWN run of text, not a
+                # reason to abandon the literals around it -- exactly the
+                # treatment `JoinedStr` below gives an interpolation. Folding
+                # to None here let `"delete_all_" + x + "data"` past the sweep
+                # while the f-string spelling of the very same rendering was
+                # caught, so which shape a renderer happened to use decided
+                # whether INV-BACKUP-004 was checked at all.
+                left, right = fold(node.left), fold(node.right)
+                return (left or "") + (right or "")
+            if isinstance(node, ast.JoinedStr):
+                # The interpolations are unknown, but the literal parts around
+                # them are rendered verbatim -- and a name spelled across two
+                # of them is caught by joining them.
+                return "".join(v.value for v in node.values
+                               if isinstance(v, ast.Constant)
+                               and isinstance(v.value, str))
+            return None
+
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Constant, ast.BinOp, ast.JoinedStr)) \
+                    and id(node) not in docstrings:
+                text = fold(node)
+                if text:
+                    out.append((node.lineno, text))
+        return out
+
+    def test_the_sweep_itself_catches_a_split_name_and_an_f_string(self):
+        # The sweep's own strength, pinned: without the folding above, the
+        # first three of these four shapes render a destructive tool's name and
+        # the sweep reports the module clean. `d` is the shape the fold used to
+        # miss — a `+` chain with a non-string operand in the middle, whose
+        # f-string spelling (`b`) was already caught: two spellings of one
+        # rendering, and only one of them was checked.
+        source = ('def f(x):\n'
+                  '    """A docstring may discuss forget_local_account."""\n'
+                  '    a = "forget_" + "local" + "_account"\n'
+                  '    b = f"then run delete_all_{x}data now"\n'
+                  '    c = "run unlink_bank"\n'
+                  '    d = "then run delete_all_" + x + "data now"\n'
+                  '    return a, b, c, d\n')
+        found = [t for _, t in self.rendered_strings(source)]
+        self.assertIn("forget_local_account", found)
+        self.assertEqual(sum("delete_all_data" in t for t in found), 2,
+                         "the f-string AND the `+` chain, both folded: %r" % found)
+        self.assertIn("run unlink_bank", found)
+        self.assertFalse(any("docstring" in t for t in found),
+                         "a docstring is not a rendering")
+
+    def test_no_rendered_string_in_either_module_names_a_destructive_tool(self):
+        # Both renderers: sync's lines live in tools_refresh, the freshness
+        # note and the read tools' exits in tools_read: a sweep over one of
+        # the two modules leaves the other free to name an erasure.
+        # Never loosen this by module or by line.
+        import inspect
+        for module in (tools_refresh, tools_read):
+            for lineno, text in self.rendered_strings(inspect.getsource(module)):
+                for name in self.DESTRUCTIVE_NAMES:
+                    self.assertNotIn(name, text,
+                                     "%s line %d renders %s" % (module.__name__,
+                                                                lineno, name))
+
+    def test_no_balances_exit_names_sync_and_consent_status_only(self):
+        self.assertIn("run sync", tools_refresh.NO_BALANCES_EXIT)
+        self.assertIn("consent_status", tools_refresh.NO_BALANCES_EXIT)
+        self.assertNotIn("forget_local_account", tools_refresh.NO_BALANCES_EXIT)

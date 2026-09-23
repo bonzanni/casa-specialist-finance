@@ -174,7 +174,7 @@ class TestPluginManifest(unittest.TestCase):
             "casa.resultContract.tools must be exactly the live tools/list "
             "minus the setup tool: a served tool missing here is refused by "
             "casa before it runs, a declared tool nothing serves is a lie")
-        self.assertEqual(len(contract["tools"]), 31)
+        self.assertEqual(len(contract["tools"]), 34)
         for name, entry in contract["tools"].items():
             if name == "link_bank":
                 continue
@@ -195,7 +195,7 @@ class TestPluginManifest(unittest.TestCase):
         proc.stdin.flush()
         return json.loads(proc.stdout.readline())
 
-    def test_protected_tools_are_exactly_the_six_protected_tools(self):
+    def test_protected_tools_are_exactly_the_seven_protected_tools(self):
         manifest = json.loads(PLUGIN_JSON.read_text())
         protected = manifest["casa"]["protectedTools"]
         names = {p if isinstance(p, str) else p["name"] for p in protected}
@@ -208,13 +208,16 @@ class TestPluginManifest(unittest.TestCase):
         # accept_app_reregistration is the ONLY key to the vanished-app gate --
         # no model-suppliable argument may authorize a registration that
         # orphans every bank session, so casa's own operator-confirmation hook
-        # has to gate it. collect_authorization is EXCLUDED deliberately:
-        # casa's nudge dispatches carry no operator sender, and a protected
-        # call from such a turn is denied outright -- protecting it would
-        # deadlock every link. setup_bank_feed is also excluded.
+        # has to gate it. restore_backup (issue #39) replaces the ENTIRE
+        # ledger's rows in place from a caller-supplied backup id -- inference
+        # alone, same as every other member here. collect_authorization is
+        # EXCLUDED deliberately: casa's nudge dispatches carry no operator
+        # sender, and a protected call from such a turn is denied outright --
+        # protecting it would deadlock every link. setup_bank_feed is also
+        # excluded.
         self.assertEqual(names, {"unlink_bank", "purge", "forget_local_account",
                                  "delete_all_data", "label_account",
-                                 "accept_app_reregistration"})
+                                 "accept_app_reregistration", "restore_backup"})
         self.assertNotIn("collect_authorization", names)
         self.assertNotIn("setup_bank_feed", names)
         for p in protected:

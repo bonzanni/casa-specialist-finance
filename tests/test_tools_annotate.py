@@ -1,16 +1,20 @@
 # tests/test_tools_annotate.py
 """Annotation write tools: normalization, bounds, state rules, journal."""
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "plugins/bank-feed/server"))
 
+import backups  # noqa: E402
 import bank_feed_server  # noqa: E402
 import store  # noqa: E402
 import tools_read  # noqa: E402
 import tools_annotate  # noqa: E402  (registration side effect)
+import tools_backup  # noqa: E402,F401  (registers backup/list_backups)
 
 
 def call(name, **args):
@@ -743,3 +747,202 @@ class TestTaxonomyOpsPropagateToRules(Base):
             "SELECT tags FROM tag_rules ORDER BY rule_id")]
         self.assertEqual(left, ["groceries"])
         self.assertIn("rule", reply)
+
+
+class TestWorkflowArguments(Base):
+    def setUp(self):
+        super().setUp()
+        self.account("acc1")
+        self.rid = self.tx()
+        self.paths = backups.paths_for(pathlib.Path(self.dir.name) / "f.sqlite")
+
+    def gen(self):
+        return int(call("list_backups").splitlines()[0].split(":")[1])
+
+    def test_a_namespaced_tag_write_without_workflow_is_refused(self):
+        for tool in ("tag_transaction", "untag_transaction"):
+            out = call(tool, row_ids=[self.rid], tags=["acct::matched"])
+            self.assertIn("belongs to another workflow", out)
+            self.assertIn("workflow", out)
+            self.assertIn("Nothing was changed", out)
+        self.assertEqual(self.tags_of(self.rid), [])
+
+    def test_workflow_requires_expected_generation_and_vice_versa(self):
+        out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                   workflow="acct@1.0.0")
+        self.assertIn("expected_generation", out); self.assertIn("Nothing was changed", out)
+        out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                   expected_generation=0)
+        self.assertIn("workflow", out); self.assertIn("Nothing was changed", out)
+        for bad in (True, -1, "0", 1.5):
+            out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                       workflow="acct@1.0.0", expected_generation=bad)
+            self.assertIn("Nothing was changed", out, repr(bad))
+        out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                   workflow="Acct 1", expected_generation=0)
+        self.assertIn("workflow", out); self.assertIn("Nothing was changed", out)
+
+    def test_a_workflow_write_refused_by_an_incomplete_erasure_says_what_went(self):
+        # The fence settles before it validates, so a settlement that unlinks
+        # whole-ledger copies and cannot unlink them all raises INTO this
+        # tool's refusal branch. "Nothing was changed" was false about that
+        # settlement, and it was the only sentence the operator got.
+        call("add_note", row_ids=[self.rid], note="first", author="agent",
+             workflow="acct@1.0.0", expected_generation=0)
+        call("backup", reason="manual")
+        doomed = sorted(p.name for p in self.paths.backups_dir.glob("*.sqlite"))[0]
+        with open(self.paths.index, "a") as f:
+            f.write("%s erase abcdefabcdefabcd pending\n" % backups.now_ts())
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def selective(p, *a, **k):
+            if p.name == doomed:
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = selective
+        out = call("add_note", row_ids=[self.rid], note="second", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertNotIn("Nothing was changed", out)
+        self.assertIn("settlement removed 1 backup copy(ies) and 0 partial(s)", out)
+        self.assertIn("This call did not run.", out)
+        self.assertEqual(
+            self.conn.execute("SELECT count(*) FROM transaction_notes WHERE"
+                              " note='second'").fetchone()[0], 0)
+
+    def test_the_first_write_of_a_workflow_mints_an_install_backup_before_the_write(self):
+        out = call("add_note", row_ids=[self.rid], note="first", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertIn("Note added", out)
+        self.assertRegex(out, r"Restore point minted for acct@1\.0\.0: backup [0-9a-f]{16}")
+        listing = call("list_backups")
+        self.assertIn("install:acct@1.0.0  committed", listing)
+        self.assertIn("acct@1.0.0 -> ", listing)
+        bid = [l for l in listing.splitlines() if "install:" in l][0].split()[0]
+        copy = sqlite3.connect(str(self.paths.backup_file(bid)))
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.execute("SELECT count(*) FROM transaction_notes").fetchone()[0], 0)
+
+    def test_the_second_write_does_not_mint_again(self):
+        call("add_note", row_ids=[self.rid], note="first", author="agent",
+             workflow="acct@1.0.0", expected_generation=0)
+        out = call("add_note", row_ids=[self.rid], note="second", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertNotIn("Restore point minted", out)
+        self.assertEqual(call("list_backups").count("install:acct@1.0.0"), 1)
+
+    def test_a_generation_mismatch_rolls_everything_back_and_mints_nothing(self):
+        # expected_generation=3 is a lie a stale pass would tell: the actual
+        # restore generation this fresh ledger reports is 0, and the two
+        # values differing is exactly what the refusal is about.
+        self.assertEqual(self.gen(), 0)
+        out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                   workflow="acct@1.0.0", expected_generation=3)
+        self.assertIn("the ledger was restored since this pass began", out)
+        self.assertIn("Nothing was changed", out)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM transaction_notes").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM workflow_registrations").fetchone()[0], 0)
+        self.assertFalse(self.paths.backups_dir.exists() and any(self.paths.backups_dir.iterdir()))
+
+    def test_a_refusal_mints_nothing(self):
+        out = call("tag_transaction", row_ids=[999], tags=["acct::x"],
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertIn("no transaction #999", out)
+        self.assertNotIn("install:", call("list_backups"))
+
+    def test_a_broken_registration_re_mints_at_that_workflows_next_write(self):
+        # Refusing here wedged the workflow for good: nothing in this tree
+        # deletes ONE registration, and re-minting was impossible precisely
+        # because the registration was still present -- so the remedy the
+        # refusal named ("restore it or delete its registration") did not
+        # exist. A missing copy is therefore treated exactly like an
+        # unregistered string: the write proceeds behind a fresh restore
+        # point, and the reply says what that point does not cover.
+        call("add_note", row_ids=[self.rid], note="x", author="agent",
+             workflow="acct@1.0.0", expected_generation=0)
+        first = [l for l in call("list_backups").splitlines()
+                 if "install:acct@1.0.0" in l][0].split()[0]
+        for f in self.paths.backups_dir.glob("*.sqlite"):
+            f.unlink()
+        out = call("add_note", row_ids=[self.rid], note="y", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertIn("Note added", out)
+        self.assertNotIn("Nothing was changed", out)
+        self.assertRegex(out, r"The earlier restore point for acct@1\.0\.0 was "
+                              r"missing; a new one was minted now \(backup "
+                              r"[0-9a-f]{16}\)\.")
+        self.assertIn("It does not undo acct@1.0.0's earlier writes.", out)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM transaction_notes").fetchone()[0], 2)
+        listing = call("list_backups")
+        self.assertEqual(listing.count("install:acct@1.0.0"), 2)
+        second = self.conn.execute(
+            "SELECT backup_id FROM workflow_registrations WHERE workflow=?",
+            ("acct@1.0.0",)).fetchone()[0]
+        self.assertNotEqual(second, first)
+        self.assertIn("acct@1.0.0 -> %s" % second, listing)
+        self.assertTrue(self.paths.backup_file(second).is_file())
+        # The re-mint replaced ONE row; it did not accumulate registrations.
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM workflow_registrations").fetchone()[0], 1)
+        out = call("add_note", row_ids=[self.rid], note="z", author="agent",
+                   workflow="other@1.0.0", expected_generation=0)
+        self.assertIn("Note added", out, "another workflow is unaffected")
+        self.assertIn("Restore point minted for other@1.0.0", out)
+
+    def test_a_write_with_a_workflow_is_refused_when_the_index_is_unreadable(self):
+        call("backup", reason="manual")
+        with open(self.paths.index, "a") as f:
+            f.write("garbage line\n")
+        out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0)
+        self.assertIn("unreadable", out); self.assertIn("Nothing was changed", out)
+        out = call("add_note", row_ids=[self.rid], note="plain", author="agent")
+        self.assertIn("Note added", out, "ordinary writes are unaffected")
+
+    def test_an_ordinary_namespaced_free_write_is_unchanged(self):
+        out = call("tag_transaction", row_ids=[self.rid], tags=["groceries"])
+        self.assertIn("Tagged 1 row", out)
+        self.assertFalse(self.paths.index.exists())
+
+    def test_a_retention_failure_after_the_mint_still_reports_the_note_and_the_backup(self):
+        # finish_backup(committed=True) runs AFTER the COMMIT: the note and
+        # the mint are both already durable by the time retention can fail,
+        # so the reply must say so rather than raise -- an uncaught
+        # BackupError here would surface as `error: BackupError` for a write
+        # that already committed, and add_note is not idempotent, so a
+        # naive retry would append a duplicate note.
+        with mock.patch.object(backups, "prune",
+                               side_effect=backups.BackupError("disk full")):
+            out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                       workflow="acct@1.0.0", expected_generation=0)
+        self.assertIn("Note added", out)
+        self.assertRegex(out, r"backup [0-9a-f]{16}")
+        self.assertIn("Retention could not prune: disk full", out)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM transaction_notes").fetchone()[0], 1)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM workflow_registrations WHERE workflow=?",
+            ("acct@1.0.0",)).fetchone()[0], 1)
+
+    def test_a_write_failure_after_the_mint_rolls_back_and_orphans_the_backup(self):
+        # write() runs strictly after the mint; if it raises, the whole
+        # transaction -- including the mint's registration INSERT -- must
+        # roll back, and the already-copied backup file is orphaned rather
+        # than kept alive unregistered. _now() is called only inside
+        # write(), never by validate/_echo, so patching it to always raise
+        # reaches exactly past the mint.
+        with mock.patch.object(tools_annotate, "_now",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                call("add_note", row_ids=[self.rid], note="x", author="agent",
+                     workflow="acct@1.0.0", expected_generation=0)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM transaction_notes").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM workflow_registrations").fetchone()[0], 0)
+        listing = call("list_backups")
+        self.assertNotIn("acct@1.0.0 -> ", listing)
+        lines = [l for l in listing.splitlines() if "install:acct@1.0.0" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("orphan", lines[0])

@@ -123,7 +123,8 @@ class TestQueue(LedgerCase):
     def test_foreign_tag_keeps_an_unclassified_row_in_the_queue(self):
         rid = self.row()
         self.assertEqual(rules.queue_totals(self.conn), (1, 0))
-        out = call("tag_transaction", row_ids=[rid], tags=["acct::matched"])
+        out = call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+                   workflow="owner@1", expected_generation=0)
         self.assertIn("Tagged 1 row", out)
         self.assertEqual(rules.queue_totals(self.conn), (1, 0))
         self.assertEqual(self.queue_ids(), {rid})
@@ -171,7 +172,8 @@ class TestCapacity(LedgerCase):
     def test_classification_budget_is_not_consumed_by_foreign_tags(self):
         rid = self.row()
         call("tag_transaction", row_ids=[rid],
-             tags=["acct::t%d" % i for i in range(16)])
+             tags=["acct::t%d" % i for i in range(16)],
+             workflow="owner@1", expected_generation=0)
         call("tag_transaction", row_ids=[rid], tags=["a%d" % i for i in range(16)])
         out = call("tag_transaction", row_ids=[rid],
                    tags=["b%d" % i for i in range(16)])
@@ -182,7 +184,8 @@ class TestCapacity(LedgerCase):
         rid = self.row()
         for i in range(32):
             self.store_tag(rid, "c%d" % i)
-        out = call("tag_transaction", row_ids=[rid], tags=["acct::matched"])
+        out = call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+                   workflow="owner@1", expected_generation=0)
         self.assertIn("Tagged 1 row", out)
         refused = call("tag_transaction", row_ids=[rid], tags=["one-more"])
         self.assertIn("Nothing was changed", refused)
@@ -190,21 +193,26 @@ class TestCapacity(LedgerCase):
     def test_per_namespace_cap(self):
         rid = self.row()
         call("tag_transaction", row_ids=[rid],
-             tags=["acct::t%d" % i for i in range(16)])
-        out = call("tag_transaction", row_ids=[rid], tags=["acct::extra"])
+             tags=["acct::t%d" % i for i in range(16)],
+             workflow="owner@1", expected_generation=0)
+        out = call("tag_transaction", row_ids=[rid], tags=["acct::extra"],
+                   workflow="owner@1", expected_generation=0)
         self.assertIn("Nothing was changed", out)
         self.assertIn("acct", out)
         # A different namespace has its own budget.
-        out = call("tag_transaction", row_ids=[rid], tags=["tax::q3"])
+        out = call("tag_transaction", row_ids=[rid], tags=["tax::q3"],
+                   workflow="owner@1", expected_generation=0)
         self.assertIn("Tagged 1 row", out)
 
     def test_total_namespaced_cap(self):
         rid = self.row()
         for ns in ("n1", "n2", "n3", "n4"):
             call("tag_transaction", row_ids=[rid],
-                 tags=["%s::t%d" % (ns, i) for i in range(16)])
+                 tags=["%s::t%d" % (ns, i) for i in range(16)],
+                 workflow="owner@1", expected_generation=0)
         self.assertEqual(len(self.tags_of(rid)), 64)
-        out = call("tag_transaction", row_ids=[rid], tags=["n5::t"])
+        out = call("tag_transaction", row_ids=[rid], tags=["n5::t"],
+                   workflow="owner@1", expected_generation=0)
         self.assertIn("Nothing was changed", out)
         self.assertIn("64", out)
 
@@ -215,14 +223,16 @@ class TestRename(LedgerCase):
         self.rid = self.row()
 
     def test_symptom_2_rename_out_of_a_namespace_refuses(self):
-        call("tag_transaction", row_ids=[self.rid], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[self.rid], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         for merge in (False, True):
             out = call("rename_tag", old="acct::matched",
                        new="invoice-confirmed", merge=merge)
             self.assertIn("Nothing was changed", out)
             self.assertIn("acct", out)
         # The owner's retraction still lands.
-        call("untag_transaction", row_ids=[self.rid], tags=["acct::matched"])
+        call("untag_transaction", row_ids=[self.rid], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         self.assertEqual(self.tags_of(self.rid), [])
 
     def test_rename_into_a_namespace_refuses_even_when_unused(self):
@@ -238,21 +248,24 @@ class TestRename(LedgerCase):
                                            ).fetchone()[0], rule_before)
 
     def test_rename_within_a_namespace_refuses(self):
-        call("tag_transaction", row_ids=[self.rid], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[self.rid], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         out = call("rename_tag", old="acct::matched", new="acct::confirmed")
         self.assertIn("Nothing was changed", out)
         self.assertEqual(self.tags_of(self.rid), ["acct::matched"])
 
     def test_classification_rename_unaffected(self):
         call("tag_transaction", row_ids=[self.rid],
-             tags=["ah", "acct::matched"])
+             tags=["ah", "acct::matched"],
+             workflow="owner@1", expected_generation=0)
         call("rename_tag", old="ah", new="groceries")
         self.assertEqual(self.tags_of(self.rid),
                          ["acct::matched", "groceries"])
 
     def test_delete_tag_on_a_namespaced_tag_is_allowed_and_named(self):
         call("tag_transaction", row_ids=[self.rid],
-             tags=["acct::matched", "food"])
+             tags=["acct::matched", "food"],
+             workflow="owner@1", expected_generation=0)
         out = call("delete_tag", tag="acct::matched")
         self.assertIn("acct", out)
         self.assertIn("reassert", out)
@@ -286,7 +299,8 @@ class TestRules(LedgerCase):
 class TestReads(LedgerCase):
     def test_list_tags_separates_other_workflows(self):
         rid = self.row()
-        call("tag_transaction", row_ids=[rid], tags=["food", "acct::matched"])
+        call("tag_transaction", row_ids=[rid], tags=["food", "acct::matched"],
+             workflow="owner@1", expected_generation=0)
         out = call("list_tags")
         head, _, tail = out.partition("Other workflows")
         self.assertIn("food", head)
@@ -297,14 +311,16 @@ class TestReads(LedgerCase):
 
     def test_list_tags_with_only_foreign_tags(self):
         rid = self.row()
-        call("tag_transaction", row_ids=[rid], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         out = call("list_tags")
         self.assertIn("acct::matched", out.partition("Other workflows")[2])
         self.assertNotIn("No tags yet", out)
 
     def test_list_transactions_shows_foreign_tags_apart(self):
         rid = self.row()
-        call("tag_transaction", row_ids=[rid], tags=["food", "acct::matched"])
+        call("tag_transaction", row_ids=[rid], tags=["food", "acct::matched"],
+             workflow="owner@1", expected_generation=0)
         line = [l for l in call("list_transactions").splitlines()
                 if l.strip().startswith("#%d " % rid)][0]
         self.assertIn("tags: food", line)
@@ -313,21 +329,24 @@ class TestReads(LedgerCase):
 
     def test_get_transaction_shows_foreign_tags_apart(self):
         rid = self.row()
-        call("tag_transaction", row_ids=[rid], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[rid], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         out = call("get_transaction", row_id=rid)
         self.assertIn("Tags: none", out)
         self.assertIn("acct::matched", out)
 
     def test_filters_accept_namespaced_names(self):
         a, b = self.row(), self.row()
-        call("tag_transaction", row_ids=[a], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[a], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         out = call("list_transactions", tags_any=["acct::matched"])
         self.assertIn("#%d " % a, out)
         self.assertNotIn("#%d " % b, out)
 
     def test_spend_by_tag_ignores_foreign_tags_by_default(self):
         a, b = self.row(), self.row()
-        call("tag_transaction", row_ids=[a], tags=["acct::matched"])
+        call("tag_transaction", row_ids=[a], tags=["acct::matched"],
+             workflow="owner@1", expected_generation=0)
         call("tag_transaction", row_ids=[b], tags=["food"])
         out = call("spend_by_tag")
         self.assertNotIn("acct::matched", out)
@@ -337,7 +356,8 @@ class TestReads(LedgerCase):
 
     def test_spend_by_tag_groups_a_named_foreign_tag(self):
         a = self.row()
-        call("tag_transaction", row_ids=[a], tags=["acct::matched", "food"])
+        call("tag_transaction", row_ids=[a], tags=["acct::matched", "food"],
+             workflow="owner@1", expected_generation=0)
         out = call("spend_by_tag", tags=["acct::matched"])
         self.assertIn("acct::matched", out)
         self.assertNotIn("food", out)

@@ -147,7 +147,7 @@ class TestSpendByTag(Base):
         self.tx(ik="t1", minor=1000)
         self.conn.execute("DELETE FROM sync_state")   # stale -> refresh runs
 
-        def hostile_refresher(c, account_id, resource):
+        def hostile_refresher(c, account_id, resource, out=None):
             c.execute("UPDATE accounts SET included=0 WHERE account_id=?",
                       (account_id,))
 

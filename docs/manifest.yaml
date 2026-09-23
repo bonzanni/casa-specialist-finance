@@ -110,7 +110,39 @@
     - tests/test_tools_aggregate.py
     - tests/test_tools_rules.py
     - tests/test_tx_classifier.py
-  related: [architecture/ingestion-and-identity.md, reference/tool-surface.md]
+  related: [architecture/ingestion-and-identity.md, reference/tool-surface.md, architecture/backups-and-restore.md]
+
+- doc: architecture/backups-and-restore.md
+  summary: Backups, the event index beside the ledger, settlement, the minted restore point, and the in-place restore.
+  when_changing: backups, restore, workflow registrations, the restore generation, or what a refresh reports across a restore
+  covers:
+    - plugins/bank-feed/server/backups.py
+    - plugins/bank-feed/server/tools_backup.py
+    - plugins/bank-feed/server/tools_annotate.py::_fenced_write
+  tests:
+    - tests/test_backups.py
+    - tests/test_tools_backup.py
+    - tests/test_tools_annotate.py
+  related: [architecture/annotations-and-rules.md, architecture/backups-erasure.md, architecture/ingestion-and-identity.md, reference/tool-surface.md]
+  defines_invariants: [INV-BACKUP-001, INV-BACKUP-002, INV-BACKUP-003, INV-BACKUP-004]
+  invariant_tests:
+    INV-BACKUP-001: [tests/test_backups.py::test_lock_order_is_ledger_then_index_and_settle_requires_the_ledger_lock]
+    INV-BACKUP-002: [tests/test_backups.py::test_generation_counts_distinct_committed_restore_ids]
+    INV-BACKUP-003: [tests/test_backups.py::test_sessions_attempts_and_meta_are_kept_live]
+    INV-BACKUP-004: [tests/test_tools_refresh.py::test_no_rendered_string_in_either_module_names_a_destructive_tool]
+
+- doc: architecture/backups-erasure.md
+  summary: What delete_all_data removes beside the ledger, in what order, what is durable when, and what each failure may say.
+  when_changing: the erasure of the backup copies, the prune records it writes, or what a stuck erasure reports
+  covers:
+    - plugins/bank-feed/server/backups.py
+    - plugins/bank-feed/server/tools_backup.py
+    - plugins/bank-feed/server/tools_destructive.py
+  tests:
+    - tests/test_backups.py
+    - tests/test_tools_backup.py
+    - tests/test_tools_destructive.py
+  related: [architecture/backups-and-restore.md, reference/tool-surface.md]
 
 - doc: architecture/credentials.md
   summary: Four credentials, two provider surfaces, one vault, and one mode authority.
@@ -130,7 +162,7 @@
   related: [reference/enable-banking-credentials.md, reference/sandbox-mode.md, reference/configuration.md]
 
 - doc: reference/tool-surface.md
-  summary: Every MCP tool, which six are protected, and the three lists that must stay in step.
+  summary: Every MCP tool, which seven are protected, and the three lists that must stay in step.
   when_changing: adding, removing, renaming or protecting a tool, or changing the role allow-list
   covers:
     - plugins/bank-feed/.claude-plugin/plugin.json

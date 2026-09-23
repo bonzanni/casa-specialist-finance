@@ -1,6 +1,6 @@
 ---
 name: bank-accounts
-description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the sandbox dry-run bank choice, the opt-in mailbox ferry for the sign-in email, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, and how to annotate transactions with tags and notes.
+description: Bank-account and transaction methodology for the finance specialist — the authorization nudge loop, cache-age and coverage-hole honesty, deterministic arithmetic, untrusted provider text, the two-tap link, the sandbox dry-run bank choice, the opt-in mailbox ferry for the sign-in email, the resident reminder duty, the escape from a refused renewal, what the irreversible tools really do to bank access, how to annotate transactions with tags and notes, and the weekly backup and what a restore does and does not undo.
 ---
 
 # Bank accounts — methodology
@@ -179,10 +179,11 @@ the names understate two of them and overstate one.
   active** — this does not disconnect the bank.
 - `purge` deletes every transaction booked before a cutoff date, across all
   accounts, and reclaims the file space.
-- `delete_all_data` erases the whole local ledger **and asks every bank to
-  withdraw its consent** — real calls to the provider, not a local-only wipe.
-  This is the one tool that can end bank access everywhere at once. Say so
-  before it runs, not after.
+- `delete_all_data` erases the whole local ledger **and every backup file**
+  (each one is a copy of the whole ledger, so leaving them would leave the
+  data restorable) **and asks every bank to withdraw its consent** — real
+  calls to the provider, not a local-only wipe. This is the one tool that can
+  end bank access everywhere at once. Say so before it runs, not after.
 
 Two things about `delete_all_data`'s output that read as errors and are not:
 
@@ -247,6 +248,12 @@ handle is how the annotation tools address a transaction.
   one says so ("found it after all — the receipt came by post").
 - **Tags written `owner::name` belong to another workflow** and are that
   workflow's state: never set or clear them.
+- **A workflow that writes `owner::` tags or its own notes names itself**:
+  pass `workflow` (its string, e.g. `acct@1.2.0`) and `expected_generation`
+  (the restore generation `list_backups` showed at the start of the pass) on
+  `tag_transaction`, `untag_transaction` and `add_note`. The first write of a
+  new workflow string mints its restore point automatically; a refusal
+  saying the ledger was restored means stop the pass and re-read.
 - **Vocabulary tools act everywhere at once**: `rename_tag` renames a tag
   across the whole ledger (renaming onto an existing tag merges them and
   requires `merge: true` — irreversible, say so before you do it);
@@ -343,3 +350,20 @@ exactly the manual flow above.
   spent — a delayed earlier mail can be the one candidate in the window,
   and redeeming it is contained (same account, same credential custody)
   but worth naming.
+
+## 11. Backups and restore points
+
+- **Every finance pass takes a weekly backup**: call `backup(reason="weekly")`
+  once per pass, after `sync`. Nobody can schedule it but you; retention keeps
+  the eight most recent, so calling it more often costs nothing but a copy.
+- `list_backups` shows every backup, the workflows that have minted a restore
+  point, and the restore generation. Relay it when asked; the ids are what
+  the operator names.
+- **A restore is the operator's tap, never your decision.** `restore_backup`
+  is protected; you propose it only when the operator asks to put the ledger
+  back, and you name what it does: rows, tags, notes, rules and registrations
+  come back as they were; bank links stay as they are now; an account the
+  backup knew but that is not linked now comes back needing a re-link; refresh
+  reports produced while the restore ran may be stale — run `sync` after.
+- What a restore does not undo: casa's memory, the transcripts, anything
+  another plugin stored for itself.

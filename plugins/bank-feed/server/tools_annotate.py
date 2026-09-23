@@ -19,12 +19,23 @@ this module never prints a stored note back.
 
 `author` is a VALIDATED enum, not fenced text: attribution, not
 authentication — it records who was speaking, on the caller's word.
+
+`tag_transaction`, `untag_transaction` and `add_note` accept an optional
+`workflow` + `expected_generation` pair (issue #39): a write that carries
+one is fenced through `_fenced_write`, which mints that workflow's install
+backup on its first write — the restore point a later `restore_backup`
+would undo it to — before the write itself lands. `expected_generation`
+guards against writing atop a ledger this pass has not re-read since a
+restore; `_namespaced_without_workflow` refuses an `owner::` tag with no
+workflow, since it is not this module's classification vocabulary to write
+unattributed.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import re
 
+import backups
 import rules
 import tools_read
 from tools_read import register
@@ -186,6 +197,167 @@ def _echo(rows):
     return lines
 
 
+WORKFLOW_RULE = ("workflow must look like owner@version (a-z owner up to 24 chars, "
+                 "'@', a version of letters, digits, '.', '+', '_' or '-' up to 32)")
+
+
+def _workflow_args(args):
+    """-> (workflow|None, expected_generation|None, refusal|None). Both or
+    neither: a workflow string without the generation it read, or a
+    generation without a workflow, is refused. bool is not an int here."""
+    wf, eg = args.get("workflow"), args.get("expected_generation")
+    if wf is None and eg is None:
+        return None, None, None
+    if wf is None:
+        return None, None, ("expected_generation is only meaningful with a workflow "
+                            "string. Nothing was changed.")
+    if not isinstance(wf, str) or not backups.WORKFLOW_RE.fullmatch(wf):
+        return None, None, "invalid workflow %r: %s. Nothing was changed." % (wf, WORKFLOW_RULE)
+    if eg is None:
+        return None, None, ("a write carrying workflow %s must carry expected_generation "
+                            "— the restore generation list_backups reported to this pass. "
+                            "Nothing was changed." % wf)
+    if isinstance(eg, bool) or not isinstance(eg, int) or eg < 0:
+        return None, None, ("expected_generation must be a non-negative integer. "
+                            "Nothing was changed.")
+    return wf, eg, None
+
+
+def _namespaced_without_workflow(tags, workflow):
+    """A tag written `owner::name` is not this module's classification
+    vocabulary — it belongs to whichever workflow owns that namespace, and
+    writing it unattributed would let it sneak in as one. Refused only
+    when no `workflow` is carried; a fenced write may write it (issue #39)."""
+    if workflow is None:
+        for t in tags:
+            ns = rules.tag_namespace(t)
+            if ns is not None:
+                return ("%r belongs to another workflow (the '%s' namespace); writing "
+                        "it needs that workflow's string in `workflow` and its "
+                        "expected_generation, so a restore point precedes the first "
+                        "write. Nothing was changed." % (t, ns))
+    return None
+
+
+def _mint_line(workflow, minted, remint):
+    """The one sentence about the restore point this write took, in the one
+    place both the ordinary reply and the retention-failure reply read it
+    from. A RE-MINT says what it does not cover: the writes that happened
+    under the registration whose copy went missing are not in the new copy."""
+    if remint:
+        return ("The earlier restore point for %s was missing; a new one was "
+                "minted now (backup %s). It does not undo %s's earlier writes."
+                % (workflow, minted.op_id, workflow))
+    return "Restore point minted for %s: backup %s." % (workflow, minted.op_id)
+
+
+def _orphan_quietly(paths, handle, minted):
+    """The rolled-back mint's orphan record, on a path that is already
+    reporting a failure. A second failure here must not REPLACE the original
+    cause with its own — the caller's `except` is mid-flight."""
+    try:
+        backups.finish_backup(paths, handle, minted, committed=False)
+    except backups.BackupError:
+        pass
+
+
+def _fenced_write(c, workflow, expected, validate, write):
+    """The fixed order: BEGIN IMMEDIATE -> settle -> compare
+    expected_generation with the SETTLED generation -> validate (reads; a
+    refusal mints nothing) -> mint if the string is new OR its registered
+    copy is gone -> write -> COMMIT -> terminal index record.
+
+    `validate(c) -> (refusal_text | None, ctx)` performs every read-only
+    check (row state, caps, the echo) and hands what the write needs;
+    `write(c, ctx) -> reply_text` performs the INSERT/DELETE loop. Neither
+    commits. Without a workflow this is the plain transaction every write
+    always had, in two named halves."""
+    c.execute("BEGIN IMMEDIATE")
+    handle = minted = paths = state = None
+    remint = False
+    # ONE outer finally releases the index lock on EVERY exit — a refusal
+    # that returns early would otherwise leak it, and flock is not
+    # re-entrant, so the next backup, restore, listing or workflow write in
+    # this process would refuse as busy for ever.
+    try:
+        try:
+            if workflow is not None:
+                paths = backups.paths_for(tools_read.ledger_path(c))
+                state, handle = backups.settle(c, paths)
+                if expected != state.generation:
+                    c.execute("ROLLBACK")
+                    return ("the ledger was restored since this pass began (restore "
+                            "generation is %d, the pass expected %d) — re-read the "
+                            "ledger before writing. Nothing was changed."
+                            % (state.generation, expected))
+            refusal, ctx = validate(c)
+            if refusal:
+                c.execute("ROLLBACK")
+                return refusal
+            if workflow is not None and (workflow not in state.registrations
+                                         or workflow in state.broken):
+                # A REGISTRATION WHOSE COPY IS GONE RE-MINTS HERE. Refusing
+                # instead wedged that workflow for good: nothing in this tree
+                # deletes one registration, and re-minting was impossible
+                # precisely because the registration was still there — so the
+                # remedy both texts named did not exist. A missing copy is
+                # therefore treated exactly like an unregistered string, and
+                # `take_backup`'s INSERT OR REPLACE moves the row onto the new
+                # copy. The reply says what the new point does not cover.
+                #
+                # The restore point precedes the write: the copy is taken by a
+                # separate reader and sees only committed state, so nothing this
+                # transaction has read or will write is in it.
+                remint = workflow in state.broken
+                minted = backups.take_backup(c, paths, handle, "install:" + workflow,
+                                             register=workflow)
+            reply = write(c, ctx)
+            c.execute("COMMIT")
+        except backups.BackupError as exc:
+            # A refusal here must not silently keep a successful mint alive:
+            # if take_backup already landed before something later in THIS
+            # try raised, the ROLLBACK undoes its registration INSERT, and
+            # the copy on disk needs its own orphan record so settle() never
+            # mistakes it for a live, registered install backup — structural,
+            # not dependent on which exception raised or where in the try.
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            if minted is not None:
+                _orphan_quietly(paths, handle, minted)
+            # An ErasureIncomplete out of `settle` above is not "nothing was
+            # changed": that settlement unlinked copies before it refused, and
+            # the text for what it did travels with the exception.
+            return backups.refusal_text(exc)
+        except Exception:
+            # SQLite auto-rolls-back on SQLITE_FULL/IOERR: a bare ROLLBACK
+            # after one of those would itself raise "cannot rollback -- no
+            # transaction is active", masking the real exception and
+            # skipping the orphan step below.
+            if c.in_transaction:
+                c.execute("ROLLBACK")
+            if minted is not None:
+                _orphan_quietly(paths, handle, minted)
+            raise
+        if minted is not None:
+            line = _mint_line(workflow, minted, remint)
+            try:
+                backups.finish_backup(paths, handle, minted, committed=True)
+            except backups.BackupError as exc:
+                # finish_backup runs AFTER the COMMIT above: the write and
+                # the mint are both already durable by the time retention
+                # can fail, so this is never "nothing was changed" -- the
+                # operator needs the reply AND the restore point id either
+                # way (tools_backup.backup does the same thing one file
+                # over).
+                return (reply + "\n" + line + " Retention could not prune: %s "
+                        "— the write and the restore point are complete." % exc)
+            reply += "\n" + line
+        return reply
+    finally:
+        if handle is not None:
+            handle.close()
+
+
 @register("tag_transaction",
           "Attach short classification tags to cached transactions "
           "(1-100 #row_id handles from list_transactions). Tags are "
@@ -194,20 +366,31 @@ def _echo(rows):
           "another workflow: it is not a classification, and has its own "
           "budget (16 per owner, 64 per transaction). All-or-nothing: one "
           "refusing row refuses the whole call and nothing is written. "
-          "Idempotent per row.",
+          "Idempotent per row. Writes for another workflow (owner::name "
+          "tags, or notes a workflow makes) carry `workflow` (e.g. "
+          "acct@1.2.0) and `expected_generation` from list_backups; the "
+          "first write of a new workflow string mints its restore point.",
           {"type": "object", "properties": {
-              "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA},
+              "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA,
+              "workflow": {"type": "string"},
+              "expected_generation": {"type": "integer", "minimum": 0}},
            "required": ["row_ids", "tags"]})
 def tag_transaction(args: dict) -> str:
     tags, refusal = _normalize_tags(args.get("tags"))
+    if refusal:
+        return refusal
+    workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
+    refusal = _namespaced_without_workflow(tags, workflow)
     if refusal:
         return refusal
     row_ids, refusal = _normalize_row_ids(args.get("row_ids"))
     if refusal:
         return refusal
     c = tools_read.conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
+
+    def validate(c):
         rows, problems = _load_rows(c, row_ids)
         # Cap checks run over the state-valid rows EVEN WHEN state
         # problems exist, so one refusal names every failure of both
@@ -222,29 +405,32 @@ def tag_transaction(args: dict) -> str:
             if why is not None:
                 problems.append("row #%d %s" % (row["row_id"], why))
         if problems:
-            c.execute("ROLLBACK")
-            return "; ".join(problems) + " Nothing was changed."
+            return "; ".join(problems) + " Nothing was changed.", None
         echo = _echo(rows)                     # before COMMIT, see _echo
+        return None, {"rows": rows, "echo": echo,
+                      "existing_by_row": existing_by_row}
+
+    def write(c, ctx):
+        rows, echo = ctx["rows"], ctx["echo"]
+        existing_by_row = ctx["existing_by_row"]
         now = _now()
         for row in rows:
             for tag in tags:
                 c.execute("INSERT OR IGNORE INTO transaction_tags"
                           "(row_id, tag, added_at) VALUES (?,?,?)",
                           (row["row_id"], tag, now))
-        c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
-    all_present = [row_id for row_id, existing in existing_by_row.items()
-                   if set(tags) <= existing]
-    lines = ["Tagged %d row(s) with %s." % (len(rows), ", ".join(tags))]
-    if all_present:
-        lines.append("On %d row(s) every listed tag was already present: %s."
-                     % (len(all_present),
-                        ", ".join("#%d" % rid for rid in all_present)))
-    lines.append("Rows touched:")
-    lines += echo
-    return "\n".join(lines)
+        all_present = [row_id for row_id, existing in existing_by_row.items()
+                       if set(tags) <= existing]
+        lines = ["Tagged %d row(s) with %s." % (len(rows), ", ".join(tags))]
+        if all_present:
+            lines.append("On %d row(s) every listed tag was already present: %s."
+                         % (len(all_present),
+                            ", ".join("#%d" % rid for rid in all_present)))
+        lines.append("Rows touched:")
+        lines += echo
+        return "\n".join(lines)
+
+    return _fenced_write(c, workflow, expected, validate, write)
 
 
 @register("untag_transaction",
@@ -252,25 +438,40 @@ def tag_transaction(args: dict) -> str:
           "from list_transactions; same normalization as tag_transaction, "
           "at most 16 tags per call). Removing a tag deletes that stored "
           "classification (cheap to re-add with tag_transaction). "
-          "All-or-nothing: one refusing row refuses the whole call.",
+          "All-or-nothing: one refusing row refuses the whole call. Writes "
+          "for another workflow (owner::name tags, or notes a workflow "
+          "makes) carry `workflow` (e.g. acct@1.2.0) and "
+          "`expected_generation` from list_backups; the first write of a "
+          "new workflow string mints its restore point.",
           {"type": "object", "properties": {
-              "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA},
+              "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA,
+              "workflow": {"type": "string"},
+              "expected_generation": {"type": "integer", "minimum": 0}},
            "required": ["row_ids", "tags"]})
 def untag_transaction(args: dict) -> str:
     tags, refusal = _normalize_tags(args.get("tags"))
+    if refusal:
+        return refusal
+    workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
+    refusal = _namespaced_without_workflow(tags, workflow)
     if refusal:
         return refusal
     row_ids, refusal = _normalize_row_ids(args.get("row_ids"))
     if refusal:
         return refusal
     c = tools_read.conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
+
+    def validate(c):
         rows, problems = _load_rows(c, row_ids)
         if problems:
-            c.execute("ROLLBACK")
-            return "; ".join(problems) + " Nothing was changed."
+            return "; ".join(problems) + " Nothing was changed.", None
         echo = _echo(rows)                     # before COMMIT, see _echo
+        return None, {"rows": rows, "echo": echo}
+
+    def write(c, ctx):
+        rows, echo = ctx["rows"], ctx["echo"]
         removed = 0
         for row in rows:
             for tag in tags:
@@ -278,18 +479,16 @@ def untag_transaction(args: dict) -> str:
                     "DELETE FROM transaction_tags WHERE row_id=? AND tag=?",
                     (row["row_id"], tag))
                 removed += cur.rowcount
-        c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
-    lines = ["Untagged: %d tag-row pair(s) removed (listed tags: %s)."
-             % (removed, ", ".join(tags))]
-    if removed < len(rows) * len(tags):
-        lines.append("%d pair(s) were not present to begin with."
-                     % (len(rows) * len(tags) - removed))
-    lines.append("Rows touched:")
-    lines += echo
-    return "\n".join(lines)
+        lines = ["Untagged: %d tag-row pair(s) removed (listed tags: %s)."
+                 % (removed, ", ".join(tags))]
+        if removed < len(rows) * len(tags):
+            lines.append("%d pair(s) were not present to begin with."
+                         % (len(rows) * len(tags) - removed))
+        lines.append("Rows touched:")
+        lines += echo
+        return "\n".join(lines)
+
+    return _fenced_write(c, workflow, expected, validate, write)
 
 
 @register("add_note",
@@ -297,11 +496,17 @@ def untag_transaction(args: dict) -> str:
           "transaction (1-100 #row_id handles). Notes are append-only — a "
           "correction is a new note. Max 1000 characters. author records "
           "who is speaking: 'user' (the operator actually said it) or "
-          "'agent'. All-or-nothing across the listed rows.",
+          "'agent'. All-or-nothing across the listed rows. Writes for "
+          "another workflow (owner::name tags, or notes a workflow makes) "
+          "carry `workflow` (e.g. acct@1.2.0) and `expected_generation` "
+          "from list_backups; the first write of a new workflow string "
+          "mints its restore point.",
           {"type": "object", "properties": {
               "row_ids": _ROW_IDS_SCHEMA,
               "note": {"type": "string"},
-              "author": {"type": "string", "enum": list(AUTHORS)}},
+              "author": {"type": "string", "enum": list(AUTHORS)},
+              "workflow": {"type": "string"},
+              "expected_generation": {"type": "integer", "minimum": 0}},
            "required": ["row_ids", "note", "author"]})
 def add_note(args: dict) -> str:
     author = args.get("author")
@@ -318,31 +523,35 @@ def add_note(args: dict) -> str:
     if len(note) > NOTE_MAX:
         return ("notes are capped at %d characters (this one is %d). "
                 "Nothing was changed." % (NOTE_MAX, len(note)))
+    workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
     row_ids, refusal = _normalize_row_ids(args.get("row_ids"))
     if refusal:
         return refusal
     c = tools_read.conn()
-    c.execute("BEGIN IMMEDIATE")
-    try:
+
+    def validate(c):
         rows, problems = _load_rows(c, row_ids)
         if problems:
-            c.execute("ROLLBACK")
-            return "; ".join(problems) + " Nothing was changed."
+            return "; ".join(problems) + " Nothing was changed.", None
         echo = _echo(rows)                     # before COMMIT, see _echo
+        return None, {"rows": rows, "echo": echo}
+
+    def write(c, ctx):
+        rows, echo = ctx["rows"], ctx["echo"]
         now = _now()
         for row in rows:
             c.execute(
                 "INSERT INTO transaction_notes(row_id, author, note,"
                 " created_at) VALUES (?,?,?,?)",
                 (row["row_id"], author, note, now))
-        c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
-    lines = ["Note added to %d row(s) (author: %s). get_transaction shows "
-             "each journal." % (len(rows), author), "Rows touched:"]
-    lines += echo
-    return "\n".join(lines)
+        lines = ["Note added to %d row(s) (author: %s). get_transaction shows "
+                 "each journal." % (len(rows), author), "Rows touched:"]
+        lines += echo
+        return "\n".join(lines)
+
+    return _fenced_write(c, workflow, expected, validate, write)
 
 
 def _one_tag(value):

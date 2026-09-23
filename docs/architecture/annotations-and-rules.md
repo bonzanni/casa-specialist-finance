@@ -32,6 +32,14 @@ transaction, so a concurrent `apply_plan()` cannot supersede the row between the
 and the write and strand the annotation on a row whose annotations have already
 migrated.
 
+`tag_transaction`, `untag_transaction` and `add_note` take two further optional
+arguments, `workflow` and `expected_generation`, for a caller that is itself a workflow
+rather than the resident: the first write of a new `workflow` string mints a restore
+point before the write lands, and every later write on that string is refused if the
+ledger's restore generation has moved since the pass began. `owner::name` tags — another
+workflow's own vocabulary — may only be written this way. `architecture/backups-and-restore.md`
+is where the mint, the fence and the restore itself are described.
+
 Note search is a full-text index maintained alongside the notes table. The best-ranked
 match is not necessarily the latest word on a row, so each hit carries the matched note's
 date and how many notes follow it, and the journal header says the latest note reflects
@@ -127,4 +135,5 @@ casa reminder the operator creates, which produces a turn in which the skill run
 **Related**
 - [`architecture/ingestion-and-identity.md`](../architecture/ingestion-and-identity.md)
 - [`reference/tool-surface.md`](../reference/tool-surface.md)
+- [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md)
 <!-- END SOURCEMAP -->

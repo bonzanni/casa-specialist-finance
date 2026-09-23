@@ -313,7 +313,7 @@ class TestBalanceSelection(Base):
 
 
 class TestStaleness(Base):
-    def _record(self, conn, account_id, resource):
+    def _record(self, conn, account_id, resource, out=None):
         self.calls.append((account_id, resource))
         conn.execute("UPDATE sync_state SET last_success_at=? WHERE account_id=?"
                      " AND resource=?", (_ago(0), account_id, resource))
@@ -348,6 +348,91 @@ class TestStaleness(Base):
         call("list_transactions")
         self.assertEqual(self.calls, [("a", "transactions")])
 
+    def test_an_inline_refresh_that_crossed_a_restore_is_not_credited_as_refreshed(self):
+        # The refresher writes a `last_success_at` and returns False: exactly
+        # what a restore leaves behind — the stamp is the backup's, not this
+        # run's. Crediting the TIMESTAMP reported the restored row as a fresh
+        # refresh, so success is credited from the return value alone.
+        self.account("a")
+        self.balance("a", "CLBD", 100)
+
+        def refresher(c, account_id, resource, out=None):
+            c.execute("INSERT INTO sync_state(account_id, resource, last_success_at)"
+                      " VALUES (?,?,?)", (account_id, resource, tools_read._now().isoformat()))
+            if out is not None:
+                out["erased"] = True
+            return False
+        tools_read.REFRESHER = refresher
+        out = call("get_balances")
+        self.assertNotIn("refreshed inline just now", out)
+        self.assertIn("ledger life changed during this refresh", out)
+        self.assertIn("run sync", out)
+
+    def test_a_refresh_that_reports_incomplete_is_not_credited_as_refreshed(self):
+        # Success is credited from the refresher's RETURN VALUE, never from a
+        # moved timestamp. Both a capped run and a restored `sync_state` row
+        # leave a fresher stamp behind a refresh that completed nothing, and
+        # the note called both "refreshed inline just now".
+        self.account("a")
+        self.balance("a", "CLBD", 100)
+        self.synced("a", "balances", age_s=10 * 3600)
+
+        def refresher(c, account_id, resource, out=None):
+            c.execute("UPDATE sync_state SET last_success_at=? WHERE"
+                      " account_id=? AND resource=?",
+                      (_ago(0), account_id, resource))
+            return False
+        tools_read.REFRESHER = refresher
+        out = call("get_balances")
+        self.assertNotIn("refreshed inline just now", out)
+        self.assertIn("cache age 0m", out)
+
+    def test_a_life_change_with_no_sync_row_is_still_reported(self):
+        # A restore that put no sync_state row back is exactly the case
+        # with no timestamp, so the "never synced" branch must carry the
+        # notice too: decided after that early `continue`, it is lost on the
+        # one account that has nothing else to say.
+        self.account("a")
+        self.balance("a", "CLBD", 100)
+
+        def refresher(c, account_id, resource, out=None):
+            if out is not None:
+                out["erased"] = True
+            return False
+        tools_read.REFRESHER = refresher
+        out = call("get_balances")
+        self.assertIn("never synced (the account's ledger life changed", out)
+
+    def test_a_life_change_belongs_to_the_account_it_happened_to(self):
+        # `res_out` is initialised per account, unconditionally, BEFORE the
+        # staleness condition. Initialised inside it: the fresh account "a"
+        # raised UnboundLocalError, and the fresh account "c" after the
+        # restored "b" inherited b's flag and reported a life change that
+        # never happened to it.
+        for aid in ("a", "b", "c"):
+            self.account(aid)
+            self.balance(aid, "CLBD", 100)
+        self.synced("a", "balances", age_s=60)          # fresh: no refresh
+        self.synced("b", "balances", age_s=10 * 3600)   # stale: refreshed
+        self.synced("c", "balances", age_s=60)          # fresh: no refresh
+
+        def refresher(c, account_id, resource, out=None):
+            out["erased"] = True
+            return False
+        tools_read.REFRESHER = refresher
+        cache = [ln for ln in call("get_balances").splitlines()
+                 if ln.startswith("Cache:")][0]
+        self.assertEqual(cache.count("ledger life changed"), 1)
+
+    def test_list_accounts_marks_an_account_with_no_live_binding(self):
+        # Both spellings of "unbound": the refresh path refuses on
+        # `not session_id`, so an empty string is unbound there too and must
+        # not render here as a linked account.
+        self.account("acc1", session_id=None)
+        self.account("acc2", session_id="")
+        self.assertEqual(call("list_accounts").count(
+            "not linked — re-link needed"), 2)
+
 
 class TestTheRefreshersExitHint(Base):
     """`_freshness` prints the exception's CLASS
@@ -366,7 +451,7 @@ class TestTheRefreshersExitHint(Base):
     """
 
     def _raise(self, exc):
-        def refresher(c, account_id, resource):
+        def refresher(c, account_id, resource, out=None):
             raise exc
         tools_read.REFRESHER = refresher
 
@@ -995,7 +1080,7 @@ class TestRefreshHonesty(Base):
         self.synced("a", "balances", age_s=10 * 3600)   # stale
         self.balance("a", "CLBD", 100)
 
-        def noop(conn, account_id, resource):
+        def noop(conn, account_id, resource, out=None):
             pass  # returns cleanly, updates NOTHING
 
         tools_read.REFRESHER = noop

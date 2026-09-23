@@ -10,6 +10,8 @@
 
 - item: plugins/bank-feed/server/apply.py
   doc: architecture/ingestion-and-identity.md
+- item: plugins/bank-feed/server/backups.py
+  doc: architecture/backups-and-restore.md
 - item: plugins/bank-feed/server/bank_feed_server.py
   doc: architecture/overview.md
 - item: plugins/bank-feed/server/callbacks.py
@@ -50,6 +52,8 @@
   doc: architecture/annotations-and-rules.md
 - item: plugins/bank-feed/server/tools_auth.py
   doc: reference/tool-surface.md
+- item: plugins/bank-feed/server/tools_backup.py
+  doc: architecture/backups-and-restore.md
 - item: plugins/bank-feed/server/tools_destructive.py
   doc: reference/tool-surface.md
 - item: plugins/bank-feed/server/tools_read.py
@@ -65,6 +69,8 @@
 - item: tool:add_rule
   doc: reference/tool-surface.md
 - item: tool:apply_rules
+  doc: reference/tool-surface.md
+- item: tool:backup
   doc: reference/tool-surface.md
 - item: tool:balance_total
   doc: reference/tool-surface.md
@@ -92,6 +98,8 @@
   doc: reference/tool-surface.md
 - item: tool:list_accounts
   doc: reference/tool-surface.md
+- item: tool:list_backups
+  doc: reference/tool-surface.md
 - item: tool:list_banks
   doc: reference/tool-surface.md
 - item: tool:list_rules
@@ -109,6 +117,8 @@
 - item: tool:rename_tag
   doc: reference/tool-surface.md
 - item: tool:replace_rule
+  doc: reference/tool-surface.md
+- item: tool:restore_backup
   doc: reference/tool-surface.md
 - item: tool:setup_bank_feed
   doc: reference/tool-surface.md
@@ -131,6 +141,8 @@
 - item: protected:label_account
   doc: reference/tool-surface.md
 - item: protected:purge
+  doc: reference/tool-surface.md
+- item: protected:restore_backup
   doc: reference/tool-surface.md
 - item: protected:unlink_bank
   doc: reference/tool-surface.md
@@ -155,6 +167,8 @@
 - item: role:mcp__plugin_bank-feed_bank-feed__add_rule
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__apply_rules
+  doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__backup
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__balance_total
   doc: reference/tool-surface.md
@@ -182,6 +196,8 @@
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__list_accounts
   doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__list_backups
+  doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__list_banks
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__list_rules
@@ -199,6 +215,8 @@
 - item: role:mcp__plugin_bank-feed_bank-feed__rename_tag
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__replace_rule
+  doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__restore_backup
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__setup_bank_feed
   doc: reference/tool-surface.md
