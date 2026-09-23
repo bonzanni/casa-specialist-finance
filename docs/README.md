@@ -17,6 +17,7 @@ Start with the row that matches what you are about to change.
 | adding, removing, renaming or protecting a tool, or changing the role allow-list | [`reference/tool-surface.md`](reference/tool-surface.md) |
 | an environment variable, the config schema, the mcp manifest, or the vault contract | [`reference/configuration.md`](reference/configuration.md) |
 | anything published — documents, comments, commit messages, or the gates that enforce them | [`doctrine/publishing.md`](doctrine/publishing.md) |
+| backups, restore, workflow registrations, the restore generation, or what a refresh reports across a restore | [`architecture/backups-and-restore.md`](architecture/backups-and-restore.md) |
 | keys, tokens, the vault seam, signing, or mode selection | [`architecture/credentials.md`](architecture/credentials.md) |
 | linking, authorization, renewal, the callback contract, or rate control | [`architecture/bank-linking.md`](architecture/bank-linking.md) |
 | matching, occurrence allocation, coverage, the ledger schema, or a migration | [`architecture/ingestion-and-identity.md`](architecture/ingestion-and-identity.md) |
@@ -27,6 +28,7 @@ Start with the row that matches what you are about to change.
 | the component layout, the plugin split, or how a tool call is dispatched | [`architecture/overview.md`](architecture/overview.md) |
 | the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, hook installation, or the release-tag route | [`contributing/publication-guards.md`](contributing/publication-guards.md) |
 | the documentation rules, the corpus verifier, or the coverage ledger | [`contributing/doc-contract.md`](contributing/doc-contract.md) |
+| the erasure of the backup copies, the prune records it writes, or what a stuck erasure reports | [`architecture/backups-erasure.md`](architecture/backups-erasure.md) |
 | the setup tools, the reconcile ladder, or what setup provisions | [`reference/setup-flow.md`](reference/setup-flow.md) |
 <!-- END ROUTING -->
 

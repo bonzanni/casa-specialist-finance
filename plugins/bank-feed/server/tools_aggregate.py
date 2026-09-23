@@ -44,8 +44,12 @@ def _ages_only(c, account_ids, provisional):
                  if row else None)
         age = ((tools_read._now() - stamp).total_seconds()
                if stamp else None)
+        # One definition of the record's shape: `life_changed` is False here
+        # by construction — this branch never calls a refresher — but a key
+        # `_freshness_note` reads must exist on every entry, not only on the
+        # ones that came back from `_freshness`.
         out.append({"account_id": aid, "age_s": age, "refreshed": False,
-                    "error": None, "exit_hint": "",
+                    "error": None, "exit_hint": "", "life_changed": False,
                     "completeness": (row or {}).get("completeness")})
     return out
 

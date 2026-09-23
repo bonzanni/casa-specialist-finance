@@ -1,7 +1,7 @@
 {
   "name": "bank-feed",
-  "version": "0.10.1",
-  "description": "Read-only bank account information (PSD2 AIS via Enable Banking), the finance data tools, and local transaction annotations (tags, notes) with note search, batch annotation and spend-by-tag aggregation, and deterministic auto-tagging rules applied at ingest.",
+  "version": "0.11.0",
+  "description": "Read-only bank account information (PSD2 AIS via Enable Banking), the finance data tools, local transaction annotations (tags, notes) with note search, batch annotation and spend-by-tag aggregation, deterministic auto-tagging rules applied at ingest, and ledger backups with a protected restore.",
   "author": {"name": "Nicola Bonzanni"},
   "casa": {
     "callbacks": [{"name": "authorize"}],
@@ -14,7 +14,8 @@
       {"name": "forget_local_account", "summary": "Erases account {account_id} locally: transactions, balances, coverage, sync state. Nothing is revoked -- this does NOT disconnect the bank. Cannot be undone."},
       {"name": "delete_all_data", "summary": "Erases the ENTIRE local finance ledger for every linked account: every transaction, balance, session and sync record. The most destructive of these actions. Cannot be undone."},
       {"name": "label_account", "summary": "Changes account {account_id}'s label, category or included status. Excluding it removes the account from every balance and transaction total shown until it is re-included."},
-      {"name": "accept_app_reregistration", "summary": "Authorizes setup_bank_feed to REGISTER A REPLACEMENT Enable Banking application because the previously bound one vanished from the control panel. Every bank must be re-linked afterwards."}
+      {"name": "accept_app_reregistration", "summary": "Authorizes setup_bank_feed to REGISTER A REPLACEMENT Enable Banking application because the previously bound one vanished from the control panel. Every bank must be re-linked afterwards."},
+      {"name": "restore_backup", "summary": "Replaces the ENTIRE local finance ledger with backup {backup_id}: transactions, tags, notes and rules as they were then. Bank links are kept live, never taken from the backup."}
     ],
     "resultContract": {
       "version": 1,
@@ -23,6 +24,7 @@
         "add_note": {"result": "safe"},
         "add_rule": {"result": "safe"},
         "apply_rules": {"result": "safe"},
+        "backup": {"result": "safe"},
         "balance_total": {"result": "safe"},
         "bank_feed_signin": {"result": "safe"},
         "collect_authorization": {"result": "safe"},
@@ -37,6 +39,7 @@
         "link_bank": {"result": "capability", "provides": ["approval_link"],
                       "delivers": {"approval_link": "operator_link"}},
         "list_accounts": {"result": "safe"},
+        "list_backups": {"result": "safe"},
         "list_banks": {"result": "safe"},
         "list_rules": {"result": "safe"},
         "list_tags": {"result": "safe"},
@@ -46,6 +49,7 @@
         "rename_account": {"result": "safe"},
         "rename_tag": {"result": "safe"},
         "replace_rule": {"result": "safe"},
+        "restore_backup": {"result": "safe"},
         "spend_by_tag": {"result": "safe"},
         "sync": {"result": "safe"},
         "tag_transaction": {"result": "safe"},
@@ -89,7 +93,11 @@
       "mcp__plugin_bank-feed_bank-feed__unlink_bank",
       "mcp__plugin_bank-feed_bank-feed__purge",
       "mcp__plugin_bank-feed_bank-feed__forget_local_account",
-      "mcp__plugin_bank-feed_bank-feed__delete_all_data"
+      "mcp__plugin_bank-feed_bank-feed__delete_all_data",
+
+      "mcp__plugin_bank-feed_bank-feed__backup",
+      "mcp__plugin_bank-feed_bank-feed__list_backups",
+      "mcp__plugin_bank-feed_bank-feed__restore_backup"
     ]
   }
 }

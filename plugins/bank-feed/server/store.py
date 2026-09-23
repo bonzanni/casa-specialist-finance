@@ -20,9 +20,14 @@ import stat
 import time
 from pathlib import Path
 
+import backups
 import ebmode
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+
+#: Read at call time by `_settle_best_effort`, not captured at import — tests
+#: lower it to bound the wait on a lock another process holds.
+_SETTLE_BUSY_MS = 10000
 
 _PROD_DB_FILENAME = "bank_feed.sqlite"
 _SANDBOX_DB_FILENAME = "bank_feed.sandbox.sqlite"
@@ -348,6 +353,16 @@ CREATE TABLE IF NOT EXISTS tag_rules (
   created_at TEXT,
   account_id TEXT,
   account_category TEXT);
+
+-- Which workflow strings have a minted restore point (issue #39). Written
+-- ONLY by backups.take_backup inside the annotation write that mints; read by
+-- backups.settle. A restore replaces this table from the backup like any
+-- ordinary table, which by construction unregisters everything registered
+-- after that backup. SCHEMA_VERSION 9 exists FOR this table.
+CREATE TABLE IF NOT EXISTS workflow_registrations (
+  workflow TEXT PRIMARY KEY NOT NULL,
+  backup_id TEXT NOT NULL,
+  registered_at TEXT NOT NULL);
 """
 
 # Forward-only migrations: {target_version: (sql, ...)}. Anything _SCHEMA
@@ -831,6 +846,32 @@ def snapshot_before_migration(path):
     return str(dest)
 
 
+def _settle_best_effort(conn, db: Path) -> None:
+    """Open-time recovery of the backup index. Skipped when there is no
+    index (one stat), and skipped — never failing the open — when either
+    lock cannot be taken, or any other I/O failure reaches this call:
+    every consumer of settled state (a workflow write, a backup, a
+    restore, a listing) settles under both locks itself, so a skipped
+    open-time pass costs a little work later, never a wrong answer.
+    Failing the open would make "another process is taking a backup" — or
+    "the disk is full" — into "the finance ledger will not open".
+    `backups.settle` converts its own raw I/O failures into `BackupError`;
+    the bare `OSError` below is belt and braces for anything that still
+    reaches this far un-converted."""
+    paths = backups.paths_for(db)
+    if not paths.index.exists():
+        return
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        return
+    try:
+        backups.settle(conn, paths, hold=False)
+        conn.execute("COMMIT")
+    except (backups.BackupError, sqlite3.OperationalError, OSError):
+        conn.execute("ROLLBACK")
+
+
 def open_db(path=None) -> sqlite3.Connection:
     """Open the ledger with the at-rest modes, integrity check, and migrations.
 
@@ -846,9 +887,14 @@ def open_db(path=None) -> sqlite3.Connection:
     for suffix in _SIDECARS:
         _guard_nofollow(db.parent / (db.name + suffix))
 
-    conn = sqlite3.connect(str(db), isolation_level=None)
+    # URI filenames, so the restore can ATTACH a backup read-only
+    # (`file:...?mode=ro`); an ATTACH honours URI syntax only when the main
+    # connection was opened with it. `as_uri()` percent-encodes, so a data
+    # directory carrying '?' or '#' cannot be misparsed as a query string.
+    conn = sqlite3.connect(db.resolve().as_uri(), isolation_level=None, uri=True)
     conn.row_factory = sqlite3.Row
     _register_functions(conn)
+    conn.execute("PRAGMA busy_timeout=%d" % _SETTLE_BUSY_MS)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
@@ -877,6 +923,8 @@ def open_db(path=None) -> sqlite3.Connection:
     elif current < SCHEMA_VERSION:
         snapshot_before_migration(db)     # before any schema change
         _migrate(conn, current)
+
+    _settle_best_effort(conn, db)
 
     _harden(db)
     for suffix in _SIDECARS:

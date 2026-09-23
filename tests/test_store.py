@@ -1503,3 +1503,55 @@ class TestSchemaV8Upgrade(unittest.TestCase):
                 self.rules.signature(f))
         finally:
             conn.close()
+
+
+class TestSchemaV9Registrations(unittest.TestCase):
+    def _v8_db(self, path):
+        conn = sqlite3.connect(path)
+        conn.executescript(store._SCHEMA)
+        conn.execute("DROP TABLE workflow_registrations")
+        conn.execute("INSERT OR REPLACE INTO meta(key, value)"
+                     " VALUES ('schema_version', '8')")
+        conn.commit(); conn.close()
+
+    def test_a_v8_ledger_receives_the_registrations_table(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "bank_feed.sqlite"
+            self._v8_db(path)
+            conn = store.open_db(path)
+            cols = [r[1] for r in conn.execute(
+                "PRAGMA table_info(workflow_registrations)")]
+            self.assertEqual(cols, ["workflow", "backup_id", "registered_at"])
+            self.assertEqual(conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "9")
+            conn.close()
+
+    def test_busy_timeout_is_ten_seconds(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = store.open_db(pathlib.Path(d) / "bank_feed.sqlite")
+            self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 10000)
+            conn.close()
+
+
+class TestUriConnection(unittest.TestCase):
+    """Without URI filenames, a valid backup fails to ATTACH read-only on a
+    Python build whose SQLite lacks the USE_URI default, and the wrapper
+    reports a real backup as unreadable."""
+
+    def test_the_ledger_connection_accepts_uri_filenames(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            main = store.open_db(root / "bank_feed.sqlite")
+            other_path = root / "other.sqlite"
+            other = store.open_db(other_path)
+            other.close()
+            try:
+                main.execute(
+                    "ATTACH DATABASE ? AS probe",
+                    (other_path.resolve().as_uri() + "?mode=ro",))
+                with self.assertRaises(sqlite3.OperationalError) as cm:
+                    main.execute(
+                        "INSERT INTO probe.meta(key, value) VALUES ('x','y')")
+                self.assertIn("readonly", str(cm.exception))
+            finally:
+                main.close()

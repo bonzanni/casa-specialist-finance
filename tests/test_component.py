@@ -12,9 +12,9 @@ the whole thing survives the gates casa actually applies at install:
   and neither names a tool the manifest does not declare;
 * `casa.setupTool` obeys casa's own naming rule and every `protectedTools`
   summary fits the length casa enforces;
-* the protected-tool gate names exactly the six tools required — the four
-  destructive tools plus `label_account` and `accept_app_reregistration` — and
-  never `collect_authorization`;
+* the protected-tool gate names exactly the seven tools required — the four
+  destructive tools plus `label_account`, `accept_app_reregistration` and
+  `restore_backup` — and never `collect_authorization`;
 * every AUTHORED file casa marker-scans at install passes its own scan —
   the gates that decide whether the bundled dependency resolves and whether
   the component loads at all (see `TestCasaInstallGate`);
@@ -79,6 +79,7 @@ import bank_feed_server  # noqa: E402
 import tools_annotate  # noqa: E402,F401
 import tools_aggregate  # noqa: E402,F401
 import tools_auth  # noqa: E402
+import tools_backup  # noqa: E402,F401
 import tools_destructive  # noqa: E402,F401
 import tools_read  # noqa: E402
 import tools_rules  # noqa: E402,F401
@@ -96,8 +97,11 @@ DESTRUCTIVE = {"unlink_bank", "purge", "forget_local_account", "delete_all_data"
 # accept_app_reregistration is the ONLY key to the vanished-app gate -- a
 # model-supplied argument is inference alone so casa's operator-confirmation
 # hook has to be the one authorizing a registration that orphans every bank
-# session.
-PROTECTED = DESTRUCTIVE | {"label_account", "accept_app_reregistration"}
+# session. restore_backup (issue #39) replaces the ENTIRE ledger's rows in
+# place from a caller-supplied backup id -- inference alone, same as every
+# other member here.
+PROTECTED = DESTRUCTIVE | {"label_account", "accept_app_reregistration",
+                          "restore_backup"}
 
 # --------------------------------------------------------------------------
 # casa's install-time gates, reimplemented because casa is not importable from
@@ -1181,7 +1185,7 @@ class TestPluginManifest(unittest.TestCase):
         for tool in man["casa"]["provides_tools"]:
             self.assertTrue(tool.startswith(prefix), tool)
 
-    def test_protected_tools_are_exactly_the_six_protected_tools(self):
+    def test_protected_tools_are_exactly_the_seven_protected_tools(self):
         man = _plugin_manifest()
         names = _protected_tool_names(man)
         self.assertEqual(names, PROTECTED)

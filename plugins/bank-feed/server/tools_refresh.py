@@ -198,13 +198,27 @@ class NotLinked(RuntimeError):
 #: balances re-raises on every read for as long as it stays linked — and a
 #: fail-closed refusal with no stated exit is a wedged account, not a
 #: safeguard. `_reclaim`'s failure branch and `forget_local_account`'s
-#: provider-residue paragraph both name their remedy; this is the same rule.
+#: provider-residue paragraph both name their remedy; this is the same rule —
+#: an exit is stated, and (see below) it is stated as reads the operator
+#: makes, never as a tool that erases.
 #:
 #: ONE string, used by the raise and by `sync`'s failure line, so the exit the
 #: operator is told about cannot drift from the exit the class documents. It is
 #: appended ONLY to this failure: a remedy printed beside every failed fetch is
 #: an always-on warning, and within a week the case that matters reads like the
 #: others.
+#:
+#: IT NAMES NO TOOL THAT ERASES OR REVOKES, and that is the rule, not a
+#: preference. This text used to say "run forget_local_account for that
+#: account to clear them". Every report here is rendered outside the ledger's
+#: write lock, so any of them may be stale by exactly one restore that landed
+#: after the run's terminal life check — and a restore revives cached
+#: balances, so the stale reply recommended erasing an account that was
+#: healthy and merely needed a re-link. Cached rows are never evidence for
+#: erasing an account's history. The exit stays real — it is stated in the
+#: operator's own vocabulary, as two READS of the ledger as it now is, from
+#: which the erasure is their decision to make. `link_bank` is not
+#: destructive and may still be named where a binding is genuinely absent.
 #:
 #: NO PARENTHESES, and that is load-bearing rather than a style choice.
 #: `tools_read._freshness_note` prints this text inside a parenthesised clause
@@ -216,11 +230,11 @@ class NotLinked(RuntimeError):
 #: `test_the_only_shipped_exit_carries_no_clause_delimiter`.
 NO_BALANCES_EXIT = (
     ". If this bank has genuinely stopped offering balances for this account "
-    "— a closed account, a permissions change — this refusal will repeat on "
-    "every read until the cached rows are gone: run forget_local_account for "
-    "that account to clear them. Bank access is not touched by that — it "
-    "erases this plugin's local copy of the account, and a later link_bank "
-    "brings the account back")
+    "— a closed account, a permissions change — this refusal repeats on every "
+    "read while the cached rows remain: run sync and read its outcome; "
+    "consent_status shows whether the bank still offers this account. Whether "
+    "to erase the local copy is the operator's decision, made from those two "
+    "reads")
 
 
 class NoBalancesReturned(RuntimeError):
@@ -296,8 +310,17 @@ def _reconcile_balance_types(c, account_id: str, returned: list,
             % ",".join("?" * len(returned)),
             [account_id] + list(returned) + [account_id, incarnation])
         return
-    held = c.execute("SELECT COUNT(*) FROM balances WHERE account_id=?",
-                     (account_id,)).fetchone()[0]
+    # The count carries the run's life token, exactly as the delete above
+    # does. Reproduced without it: a balance refresh paused at the bank, an
+    # erasure and a restore underneath it — cached balances back, a fresh
+    # incarnation — and the resumed empty response counted rows this run's
+    # life cannot vouch for and raised over them. Rows that are not this
+    # run's are not its to withdraw a claim over; a mismatch takes the
+    # `erased` path instead, where the report reads the account row.
+    held = c.execute("SELECT COUNT(*) FROM balances WHERE account_id=?"
+                     " AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
+                     " AND incarnation=?)",
+                     (account_id, account_id, incarnation)).fetchone()[0]
     if held:
         raise NoBalancesReturned(
             "the bank returned no balances while this account still has some "
@@ -446,11 +469,32 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     # reads is exactly what the fence exists to catch.
     incarnation = account.get("incarnation")
     try:
-        return _fetch_resource(c, account_id, resource, account, incarnation,
-                               out=out)
-    except Exception as exc:  # noqa: BLE001 — recorded (guarded), re-raised
-        _note_failure(c, account_id, resource, exc, incarnation)
-        raise
+        result = _fetch_resource(c, account_id, resource, account, incarnation,
+                                 out=out)
+        exc = None
+    except Exception as e:  # noqa: BLE001 — recorded (guarded), then finalised
+        _note_failure(c, account_id, resource, e, incarnation)
+        result, exc = False, e
+    # THE ONE TERMINAL LIFE CHECK. Fencing the intermediate reads one at a
+    # time does not hold, and each attempt left another gap:
+    # `backfill_complete`'s `sync_state` row came back from a backup and read
+    # as "refreshed"; the empty-balances count raised over rows the run no
+    # longer owned; `_note_failure`'s stamp described a life that no longer
+    # exists. Each of those reads may have crossed a restore, so none of them
+    # decides the report: the truth at the exit does, and this is the one exit
+    # every outcome passes through — the returned result AND the exception.
+    # The exception is swallowed on a mismatch because a failure belonging to
+    # a life that is gone is not this ledger's failure to report; `sync`
+    # renders the restored/erased line instead, from the row itself.
+    row = c.execute("SELECT incarnation FROM accounts WHERE account_id=?",
+                    (account_id,)).fetchone()
+    if row is None or row[0] != incarnation:
+        if out is not None:
+            out["erased"] = True
+        return False
+    if exc is not None:
+        raise exc
+    return result
 
 
 def _fetch_resource(c, account_id: str, resource: str, account: dict,
@@ -786,18 +830,47 @@ def sync(args: dict) -> str:
                                      automatic=False, out=res_out):
                     lines.append(_account_line(name, resource, "refreshed"))
                 elif res_out.get("erased"):
-                    # The issue-#8 fence fired: the "INCOMPLETE … marked
-                    # partial" line below would be false here — there is no
+                    # The life fence fired: the "INCOMPLETE … marked partial"
+                    # line below would be false here — there may be no
                     # sync_state row left to be marked anything, and possibly
-                    # no account. Erasure is the operator's own completed
-                    # action; this line's job is to not contradict it.
-                    lines.append(_account_line(
-                        name, resource,
-                        "NOTHING STORED — this account was erased locally "
-                        "while the refresh was in flight, so nothing the "
-                        "fetch returned was kept. If the erasure was yours, "
-                        "there is nothing to do; a future link_bank can "
-                        "bring the account back."))
+                    # no account.
+                    #
+                    # TWO different events land here, and a single wording was
+                    # false for one of them. An erasure and a RESTORE both
+                    # re-mint the life token, but a restore keeps the binding
+                    # live: rendering it as "erased locally … a future
+                    # link_bank can bring the account back" told the operator
+                    # to re-link an account that never lost its consent. So
+                    # the branch reads the truth — the account row itself,
+                    # inside this same connection — rather than any proxy for
+                    # which event it was.
+                    live = c.execute("SELECT session_id FROM accounts WHERE"
+                                     " account_id=?", (account_id,)).fetchone()
+                    if live is None:
+                        # Erasure is the operator's own completed action; this
+                        # line's job is to not contradict it.
+                        lines.append(_account_line(
+                            name, resource,
+                            "NOTHING STORED — this account was erased locally "
+                            "while the refresh was in flight, so nothing the "
+                            "fetch returned was kept. If the erasure was "
+                            "yours, there is nothing to do; a future "
+                            "link_bank can bring the account back."))
+                    else:
+                        text = ("RESTORED — the account's ledger life changed "
+                                "during this refresh; nothing the fetch "
+                                "returned was kept. Run sync again.")
+                        if not live[0]:
+                            # `needs-relink` is derived, never stored: an
+                            # account with no live binding IS one that needs
+                            # re-linking, and a stored flag would be one more
+                            # derivative to drift. Falsy, not `is None`:
+                            # `_fetch_resource` refuses on `not session_id`,
+                            # so an empty string is unbound to the fetch and
+                            # would otherwise render as linked here.
+                            text += (" This account is not linked — a re-link "
+                                     "is needed.")
+                        lines.append(_account_line(name, resource, text))
                 else:
                     # A capped pagination returns normally, so "refreshed" was
                     # printed over a run that fetched part of the history and
@@ -841,9 +914,18 @@ def sync(args: dict) -> str:
                        NO_BALANCES_EXIT
                        if isinstance(exc, NoBalancesReturned) else "")))
             else:
-                batch_new += len(res_out.get("new_row_ids") or [])
-                batch_tagged += res_out.get("auto_tagged") or 0
-                batch_needs += res_out.get("needs_classification") or 0
+                # A run whose life changed kept nothing, and its counts are
+                # not this reply's to add up: "5 new transaction(s)" under
+                # "nothing the fetch returned was kept" contradicts the line
+                # above it. The fetch may well have inserted rows — the
+                # terminal check fires AFTER a successful fetch too — and the
+                # restore replaced them. Scoped to the three counters rather
+                # than skipping the rest of the block, so whatever is added
+                # here later is not silently skipped with them.
+                if not res_out.get("erased"):
+                    batch_new += len(res_out.get("new_row_ids") or [])
+                    batch_tagged += res_out.get("auto_tagged") or 0
+                    batch_needs += res_out.get("needs_classification") or 0
     if batch_new:
         # needs is the propagated FINAL-STATE workable count, never
         # new-minus-tagged: a parked/terminal insert is neither bucket, so

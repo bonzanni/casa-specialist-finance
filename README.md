@@ -16,7 +16,7 @@ One casa **specialist component** — a role, a persona, and two bundled plugins
 
 - **`bank-feed`** — an MCP server (Python 3.11 standard library only) that owns the
   bank connection, the SQLite ledger, the annotation store, the auto-tagging rulebook,
-  and 31 tools.
+  and 35 tools.
 - **`tx-classifier`** — a skill that decides how transactions should be classified and
   works the queue the rules cannot settle. No server, no storage of its own.
 

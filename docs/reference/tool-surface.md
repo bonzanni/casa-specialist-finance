@@ -2,7 +2,7 @@
 
 > Code is the source of truth. This file is a map; when it and the code disagree, the code wins.
 
-Thirty-two MCP tools, all served by `bank-feed`. `tx-classifier` adds none — it is a
+Thirty-five MCP tools, all served by `bank-feed`. `tx-classifier` adds none — it is a
 skill and calls these.
 
 Regenerate the list this table describes with:
@@ -78,6 +78,8 @@ alone is enough:
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
 | `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it. |
+| `backup` | Take a consistent copy of the whole ledger. `reason` is `weekly` or `manual`; retention keeps the 8 most recent of each. |
+| `list_backups` | Every backup with its time, size, reason and state; the registered workflow strings; the restore events; and the restore generation. Settles any pending backup or restore first, which can append to the index — why this sits under Writing rather than Reading. |
 
 ### Tags another workflow owns
 
@@ -91,6 +93,12 @@ mint them, because a workflow that maintains a fixed vocabulary would otherwise 
 asserting a tag it had retracted under its old name. `delete_tag` is allowed; the owner
 reasserts whatever it still holds. They follow their transaction through a supersession,
 as notes do, and are erased with it. A single `:` is not a separator and is refused.
+
+Writing one of these tags — or a note attributed to a workflow — needs that workflow's
+own `workflow` string and the `expected_generation` `list_backups` last showed, on
+`tag_transaction`, `untag_transaction` and `add_note`. The first write of a new
+`workflow` string mints that workflow's own restore point before the write lands; see
+`architecture/backups-and-restore.md`.
 
 ## Setup and authorization
 
@@ -112,7 +120,7 @@ arguments would only invite an agent to invent values for them.
 
 ## Protected — casa demands an operator grant
 
-These six are declared in `casa.protectedTools`. casa's fail-closed hook demands a grant
+These seven are declared in `casa.protectedTools`. casa's fail-closed hook demands a grant
 **bound to the exact arguments** before the call reaches this process, and the summary
 the operator sees is the one in the plugin manifest. No tool takes a `confirm` argument:
 a model-supplied boolean is inference satisfying itself.
@@ -125,6 +133,7 @@ a model-supplied boolean is inference satisfying itself.
 | `delete_all_data` | Erases the entire local ledger for every account, **then attempts to withdraw every open bank consent**. Consents it cannot prove withdrawn keep their handles so they can be revoked by hand. |
 | `label_account` | Changes an account's label, category or inclusion. Excluding it removes the account from every total shown. |
 | `accept_app_reregistration` | Authorizes registering a **replacement** Enable Banking application. Every bank must be re-linked afterwards. |
+| `restore_backup` | Replaces every ordinary table's rows in place from a backup: transactions, tags, notes, rules, registrations. Bank links are kept live, never taken from the backup; an account in the backup but not linked live comes back needing a re-link. |
 
 `label_account` is protected despite not deleting anything: silently excluding an
 account changes every number the specialist reports afterwards, which is

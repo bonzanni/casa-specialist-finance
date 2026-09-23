@@ -91,9 +91,12 @@ from tools_read import register
 # `accept_app_reregistration` is the ONLY key to the vanished-app gate: no
 # model-suppliable argument may authorize a registration that orphans every
 # bank session, so casa's operator-confirmation hook is what gates it.
+# `restore_backup` (issue #39) replaces the ENTIRE ledger's rows in place from
+# a backup id -- a model-supplied `backup_id` is inference alone, exactly like
+# every other member here, so casa's operator grant is what authorizes it.
 PROTECTED = frozenset({"unlink_bank", "purge", "forget_local_account",
                        "delete_all_data", "label_account",
-                       "accept_app_reregistration"})
+                       "accept_app_reregistration", "restore_backup"})
 
 def _app_name() -> str:
     """The ONE application this plugin owns — in the mode's world.

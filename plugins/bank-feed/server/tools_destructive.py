@@ -27,8 +27,10 @@ import datetime as _dt
 import re
 
 import apply
+import backups
 import callbacks
 import tools_auth
+import tools_read
 from tools_auth import (GATE_NOTE, _conn, _require_declared,
                         _resolve_consent_ref, _safe, _vacuum)
 from tools_read import register
@@ -39,15 +41,20 @@ from tools_read import register
 DESTRUCTIVE_TOOLS = ("unlink_bank", "purge", "forget_local_account",
                      "delete_all_data")
 
-#: The ONLY `meta` keys that survive `delete_all_data`. Both are structural,
-#: not data: `schema_version` is what `store.open_db` migrates against, and
-#: `account_secret` is the local HMAC key `store.account_id` derives every
-#: account id from — regenerating it would silently re-key the whole ledger on
-#: the next link. Everything else in `meta` is erasable data, and the
-#: renewal-handoff keys in particular EMBED a raw session identifier, which is
-#: bearer-equivalent. The list is a whitelist on purpose: a key added by a
-#: later feature is deleted by default.
-STRUCTURAL_META_KEYS = ("schema_version", "account_secret")
+#: The ONLY `meta` keys that survive `delete_all_data`. All three are
+#: structural, not data: `schema_version` is what `store.open_db` migrates
+#: against; `account_secret` is the local HMAC key `store.account_id` derives
+#: every account id from — regenerating it would silently re-key the whole
+#: ledger on the next link; and `backup_restore_op` (`backups.MARKER_KEY` —
+#: the same spelling, cross-checked by test) belongs to the backup crash
+#: protocol, not to this ledger's own data: it is the id `backups.settle`
+#: reads to decide whether a still-pending restore record terminates
+#: `committed` or `aborted`, and erasing it here could settle a restore that
+#: actually committed as `aborted` instead. Everything else in `meta` is
+#: erasable data, and the renewal-handoff keys in particular EMBED a raw
+#: session identifier, which is bearer-equivalent. The list is a whitelist on
+#: purpose: a key added by a later feature is deleted by default.
+STRUCTURAL_META_KEYS = ("schema_version", "account_secret", "backup_restore_op")
 
 #: Every table `delete_all_data` empties unconditionally. `occurrence_alloc` is
 #: on the list because it is per-account data — an unsalted sha256 over amount,
@@ -68,12 +75,16 @@ STRUCTURAL_META_KEYS = ("schema_version", "account_secret")
 #: has to mean them too -- and the retired table is precisely where another
 #: installation's measurements would be sitting. `ref_observations` is the
 #: earned-trust evidence (issue #1) and goes for the same reason: every row is
-#: a measurement OF this installation's own accounts.
+#: a measurement OF this installation's own accounts. `workflow_registrations`
+#: (`backups.REGISTRATIONS_TABLE`, cross-checked by test) is data too, not
+#: structural: after a total erasure there are no workflow writes left to
+#: bind an install backup to, so unregistering every workflow is right, and
+#: the next write a workflow makes mints its own install backup afresh.
 _DATA_TABLES = ("transaction_refs", "transaction_tags", "transaction_notes",
                 "tag_rules", "transactions", "occurrence_alloc",
                 "balances", "coverage", "sync_state", "accounts", "attempts",
                 "aspsp_capability", "aspsp_capability_retired",
-                "ref_observations")
+                "ref_observations", "workflow_registrations")
 
 #: `account_id`-scoped tables for `forget_local_account`.
 #: `transaction_refs` is keyed by a GLOBAL `row_id` and is therefore the one
@@ -711,6 +722,15 @@ def delete_all_data(args: dict) -> str:
                                     " closed_at IS NULL").fetchone()[0]}
     for table in ("transactions", "accounts"):
         counts[table] = c.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+    # Read here, BEFORE the transaction, for the same reason as `counts`
+    # above: the "Done." message has to say whether the backup crash-recovery
+    # marker was actually there to keep. Reading it after the erasure would
+    # always say "kept" whenever it is present at all — STRUCTURAL_META_KEYS
+    # keeps it unconditionally — which cannot distinguish the common case (no
+    # unsettled restore, so no marker) from the rare one this whitelist entry
+    # exists for.
+    marker_was_present = c.execute(
+        "SELECT 1 FROM meta WHERE key=?", (backups.MARKER_KEY,)).fetchone() is not None
 
     # THE REVERSIBLE HALF GOES FIRST, AND IT IS DURABLE BEFORE THE FIRST BANK
     # IS ASKED. Withdrawing the consents first makes the IRREVERSIBLE half the
@@ -729,6 +749,55 @@ def delete_all_data(args: dict) -> str:
     # write transaction holds the ledger locked for as long as the bank
     # takes.
     c.execute("BEGIN IMMEDIATE")
+    # Settle the backup index under both locks BEFORE erasing the
+    # registrations: a mint committed by a process that died before its
+    # terminal record would otherwise settle `orphan` once its
+    # registration is gone. A settlement refusal leaves the erasure
+    # unapplied.
+    paths = backups.paths_for(tools_read.ledger_path(c))
+    try:
+        backup_state, handle = backups.settle(c, paths)
+    except backups.BackupError as exc:
+        c.execute("ROLLBACK")
+        if isinstance(exc, backups.ErasureIncomplete):
+            # Settlement was completing an erasure an EARLIER call recorded,
+            # and it just retried every remaining copy. "Nothing was erased"
+            # would be false about this call's own attempt on those files and
+            # says nothing about the only residue there is, so the residue is
+            # named instead. No claim is made about the ledger's rows: whether
+            # that earlier call's ledger half landed is its own report to give.
+            #
+            # `describe()` carries the alarm, and carries it only for the
+            # copies it is true of: a `.partial` is not restorable, so telling
+            # an operator that one is a whole copy of their ledger sends them
+            # after the wrong file with the wrong urgency.
+            #
+            # The consequence is stated as the set it really is. "Nothing else
+            # here can proceed" was false of every read, of `sync`, and of
+            # every write that carries no workflow: only the four calls that
+            # settle the index — `backup`, `restore_backup`, `delete_all_data`
+            # and a workflow-bearing write — refuse, and an operator told the
+            # plugin was wholly wedged goes looking for a different fault.
+            return ("An erasure recorded earlier is not finished: %s. No "
+                    "backup, restore, total erasure or workflow write runs "
+                    "until the erasure completes. Check the backups "
+                    "directory (%s): make it writable, repair the disk it is "
+                    "on, or delete its contents by hand; then run any "
+                    "backup, restore, listing or workflow write to finish "
+                    "the erasure." % (exc.describe(), paths.backups_dir.name))
+        return "%s. Nothing was erased." % exc
+    except Exception:
+        # Anything that is NOT a BackupError — a bug, an OOM, a
+        # KeyboardInterrupt — would otherwise leave the module-singleton
+        # connection `in_transaction` for ever: the next BEGIN IMMEDIATE any
+        # write tool issues in this process fails "cannot start a transaction
+        # within a transaction", and every write tool is wedged until the
+        # process restarts. Same shape as list_backups' and restore_backup's
+        # catch-alls, for the same reason.
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+    erased_backups, backups_warning, erase_op = None, None, None
     try:
         for table in _DATA_TABLES:
             c.execute("DELETE FROM %s" % table)
@@ -736,23 +805,208 @@ def delete_all_data(args: dict) -> str:
         # THE RAW SESSION ID (`renewal_handoff|<session_id>`), alongside the
         # single-flight claims and the provenance fingerprint. Excluding `meta`
         # would contradict the full-erasure claim and retain bearer-equivalent
-        # identifiers. Everything non-structural goes; the two structural keys
-        # are named explicitly, so a key added later is deleted by default
-        # rather than surviving because nobody remembered it.
+        # identifiers. Everything non-structural goes; the structural keys are
+        # named explicitly, so a key added later is deleted by default rather
+        # than surviving because nobody remembered it.
         c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
                   % ", ".join("?" * len(STRUCTURAL_META_KEYS)),
                   tuple(STRUCTURAL_META_KEYS))
+        # THE ERASURE OF THE COPIES IS RECORDED BEFORE IT HAPPENS, through the
+        # same index protocol a mint and a restore already use. Without this
+        # record a crash between the COMMIT below and `erase_backups` left an
+        # empty ledger beside an intact whole-ledger copy, and `restore_backup`
+        # brought the erased transaction straight back — the one outcome this
+        # call promises cannot happen. `append` fsyncs, so settlement in ANY
+        # later process finishes the file erasure from the record alone.
+        #
+        # It is the LAST statement before the COMMIT on purpose. A failure
+        # above it rolls the ledger back with nothing recorded and nothing
+        # erased. A failure of the COMMIT itself rolls the ledger back with the
+        # record already durable, and the copies then go at the next
+        # settlement anyway: an erasure the operator authorised is not
+        # cancelled by its ledger half failing, and the honest report of that
+        # case is "the ledger erasure failed and the copies are gone", never
+        # copies left sitting in the one place the operator was told they
+        # would not be.
+        erase_op = backups.new_op_id()
+        handle.append("erase", erase_op, "pending")
         c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
+    except backups.BackupError as exc:
+        # Only the `append` above raises this here, and it raises BEFORE the
+        # COMMIT: with no durable pending record nothing would ever complete
+        # the erasure of the copies, so the whole call refuses rather than
+        # empty a ledger whose whole-ledger copies would outlive it.
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if exc.written:
+            # THE BYTES LANDED AND ONLY THE FLUSH FAILED. The line is readable
+            # right now by anything that parses this index, so the next settle
+            # in any process completes the erasure of the copies — "Nothing was
+            # erased" would be a promise about files this call has already
+            # scheduled for removal, and the operator would go looking for
+            # backups that are about to disappear.
+            return ("%s. The ledger was not erased. A record of the backup "
+                    "erasure may already be durable: the backup copies will be "
+                    "removed at the next settlement (any backup, restore, "
+                    "listing or workflow write)." % exc)
+        return "%s. Nothing was erased." % exc
+    except Exception as exc:                 # noqa: BLE001 — class name only
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if erase_op is not None:
+            # THE APPEND IS THE LAST STATEMENT BEFORE THE COMMIT, so reaching
+            # here with an erasure id in hand means the COMMIT itself is what
+            # failed — an exact discriminator, not a guess at the exception's
+            # class. The ledger rolled back intact and the pending record is
+            # durable, so the copies go at the next settlement regardless.
+            # Raising here handed the operator a generic error for a state
+            # with two specific halves, both of which they need to know.
+            return ("The ledger erasure failed (%s) and was rolled back — the "
+                    "ledger is intact. The backup copies are still scheduled "
+                    "for erasure and will be removed at the next settlement."
+                    % type(exc).__name__)
         raise
-    done = ("Done. Every metadata row went with the data, including the "
-            "renewal-handoff records whose keys embed a bank session "
-            "identifier; only the schema version and the local "
-            "account_id secret remain, so the database is immediately "
-            "usable again. The restore fingerprint is gone too: the next "
-            "run records a fresh one, which is correct — this ledger has "
-            "no past to be restored from any more.")
+    else:
+        # THE BACKUP FILES ARE PART OF "THE ENTIRE LOCAL LEDGER". Each
+        # `<db>.backups/*.sqlite` is a whole-ledger copy — sessions, the
+        # renewal-handoff `meta` keys, `accounts.uid`, every transaction — so
+        # leaving them behind made every sentence below false: one
+        # `restore_backup` put the erased ledger back. This runs AFTER the
+        # COMMIT, while the index handle from the settle above is still held;
+        # the index itself is kept, append-only, so the record of the erasure
+        # survives it and the restore generation stays monotonic.
+        try:
+            erased_backups = backups.erase_backups(paths, handle, backup_state,
+                                                   erase_op)
+        except backups.BackupError as exc:
+            # Reported, never raised: the ledger is already erased by the
+            # COMMIT above, and raising here would discard the whole account
+            # of what this call did — the same rule the "PAST THIS LINE"
+            # contract below states for the bank half.
+            #
+            # The copies that DID go are still counted, from the exception
+            # itself: the sweep no longer stops at the first file it cannot
+            # unlink, so "some went and some did not" is now the ordinary
+            # shape of this failure and a reply that counted none of them
+            # would understate what the retry still has to do.
+            erased_backups = (exc.erasure
+                              if isinstance(exc, backups.ErasureIncomplete)
+                              else None)
+            # `residue()`, not the whole account: the count sentences below
+            # already say what went, so this line says only what is left — and
+            # it splits whole copies from partials, because the alarm is true
+            # of one and not the other.
+            #
+            # The consequence for the OTHER calls that settle is stated here
+            # too. It used to appear only in the message a RETRY got, which the
+            # operator sees only if they run one: until the erasure completes
+            # the pending erase record makes settlement refuse, so the next
+            # backup, restore or workflow write fails with no hint that this
+            # call is why. It is named as that set and no wider: a read, a
+            # `sync` and every write that carries no workflow never settle the
+            # index and are untouched, and claiming otherwise sent an operator
+            # after a fault that is not there.
+            if isinstance(exc, backups.ErasureIncomplete) and (
+                    exc.erasure.failed or exc.erasure.failed_partials):
+                left = ("at least one backup file beside it could not be "
+                        "removed: %s" % exc.residue())
+            elif isinstance(exc, backups.ErasureIncomplete):
+                # Every copy WAS unlinked and what failed is the flush that
+                # makes the unlinks outlive a power loss. "Could not be
+                # removed" would send the operator looking for a file that is
+                # not there; what is true is that the erasure is not finished.
+                left = ("the removal of the backup copies is not durable yet: "
+                        "%s" % exc.residue())
+            elif isinstance(exc, backups.ErasureRecordUnwritten):
+                # NOT A STALLED SWEEP. `ErasureRecordUnwritten` is raised only
+                # once every copy is already gone and the directory already
+                # flushed, so it neither shares the generic template below
+                # (there is nothing here for the operator to retry or delete
+                # by hand) nor the `else` branch's "stopped part way" wording,
+                # which would describe a directory this call has just emptied
+                # as one still holding copies.
+                backups_warning = (
+                    "Every backup copy was erased and the directory "
+                    "flushed, but the index record confirming it could not "
+                    "be written (%s); the next settlement (any backup, "
+                    "restore, listing or workflow write) re-checks the "
+                    "directory and writes it." % exc)
+                left = None
+            else:
+                # The sweep did not finish rather than failing on named files,
+                # so what went and what is left is precisely what this
+                # exception cannot say — and a count that was not measured is
+                # the one thing this reply must not invent.
+                left = ("the erasure of the backup files stopped part way "
+                        "(%s), and this call cannot say which of them are "
+                        "still there" % exc)
+            if left is not None:
+                backups_warning = (
+                    "WARNING — the local ledger IS erased, but %s. No backup, "
+                    "restore, total erasure or workflow write runs until the "
+                    "erasure completes; every other call, reads included, is "
+                    "unaffected. Run delete_all_data again to retry, or delete "
+                    "%s by hand." % (left, paths.backups_dir.name))
+    finally:
+        handle.close()
+    # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" TWO OF
+    # THEM. `backup_restore_op` (`backups.MARKER_KEY`) is in
+    # STRUCTURAL_META_KEYS beside `schema_version` and `account_secret`, so a
+    # restore that left it behind means a THIRD row remains — "only the
+    # schema version and the local account_id secret remain" was then false
+    # of the row sitting right there in `meta`. The marker only ever exists
+    # at all when an unsettled restore needed it, so it is named here only
+    # when `marker_was_present` — read BEFORE the erasure, for the same
+    # reason as `counts` above.
+    survivors = ("the schema version, the local account_id secret and the "
+                "backup subsystem's crash-recovery marker remain (none of "
+                "them carries bank data)" if marker_was_present else
+                "the schema version and the local account_id secret remain "
+                "(neither carries bank data)")
+    # "The restore fingerprint" here is `provenance.py`'s environment
+    # fingerprint (`provenance_fp`), which this DELETE always erases -- it is
+    # NOT in STRUCTURAL_META_KEYS and is a different key from the backup
+    # subsystem's crash-recovery marker named in `survivors` above.
+    done = ("Done. Every non-structural metadata row went with the data, "
+            "including the renewal-handoff records whose keys embed a bank "
+            "session identifier; %s, so the database is immediately usable "
+            "again. The restore fingerprint is gone too: the next run "
+            "records a fresh one, which is correct — this ledger has no "
+            "past to be restored from any more." % survivors)
+    if marker_was_present:
+        # The marker's own survival is already named in `survivors` above —
+        # saying it was "kept" a second time here would restate the same
+        # fact under a different word. What this sentence adds is what the
+        # sentence above does NOT cover: the registrations that pointed at
+        # backups are gone, so the next workflow write starts a fresh one.
+        done += (" The workflow registrations were erased, so a workflow's "
+                "next write mints a fresh restore point.")
+    if erased_backups is not None:
+        # EVERY NUMBER HERE COUNTS ONLY WHAT WENT, and each is the count of a
+        # different audit shape: an indexed copy leaves a `prune` record in the
+        # index, a copy in flight never had an index record to prune, and a
+        # file the sweep could not unlink is the warning's subject, not this
+        # sentence's. A single total over all three would be a number the index
+        # cannot corroborate. Nothing there to erase says nothing at all —
+        # "0 backup file(s) were erased" reads as a failure of a call that
+        # succeeded.
+        if erased_backups.removed:
+            done += (" %d backup file(s) were erased too — a backup is a copy "
+                     "of this ledger." % erased_backups.removed)
+        if erased_backups.partials:
+            done += (" %d partial copy(ies) — a backup interrupted part way —"
+                     " were erased as well." % erased_backups.partials)
+        if erased_backups.index_warning:
+            # The sweep finished and only the terminal record's FLUSH did not.
+            # The line is readable, so the erasure is complete and the next
+            # settlement reads it as complete; the gap is in the audit trail's
+            # durability, not in the erasure, and saying the sweep "stopped
+            # part way" — which is what this used to print — described an empty
+            # directory as one still holding copies.
+            done += (" Every backup copy was erased; the index record "
+                     "confirming it could not be flushed (%s) — it is readable "
+                     "and settles at the next listing."
+                     % erased_backups.index_warning)
 
     # PAST THIS LINE THIS TOOL DOES NOT RAISE. Everything below is either
     # irreversible at a bank or already committed here, so an exception would
@@ -906,6 +1160,8 @@ def delete_all_data(args: dict) -> str:
            else ""),
         done,
     ]
+    if backups_warning:
+        notice.append(backups_warning)
     if not handles_ok:
         notice.append(handles_note)
     notice.append(_reclaim(c)[1])

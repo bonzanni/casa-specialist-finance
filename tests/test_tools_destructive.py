@@ -12,20 +12,27 @@ about.
 """
 import ast
 import datetime
+import errno
 import json
+import os
 import pathlib
+import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "plugins/bank-feed/server"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # _toolbase
 
 import apply  # noqa: E402
+import backups  # noqa: E402
 import callbacks  # noqa: E402
 import eb_ais  # noqa: E402
 import bank_feed_server  # noqa: E402
 import store  # noqa: E402
+import tools_annotate  # noqa: E402,F401  (registers add_note)
 import tools_auth  # noqa: E402
+import tools_backup  # noqa: E402,F401  (registers backup/list_backups/restore_backup)
 import tools_destructive  # noqa: E402
 import tools_read  # noqa: E402
 
@@ -1296,9 +1303,22 @@ class TestDeleteAll(DestructiveBase):
         self.raw.execute(
             "INSERT INTO meta(key, value) VALUES ('some_future_key','x')")
         secret_before = store.local_secret(self.raw)
-        call("delete_all_data")
+        out = call("delete_all_data")
+        # No `backup_restore_op` was ever written here, so the reply must not
+        # name the backup subsystem's marker as a survivor -- only the two
+        # rows that actually remain.
+        self.assertIn("the schema version and the local account_id secret "
+                      "remain", out)
+        self.assertNotIn("crash-recovery marker", out)
         keys = {r[0] for r in self.raw.execute("SELECT key FROM meta")}
-        self.assertEqual(keys, set(tools_destructive.STRUCTURAL_META_KEYS))
+        # `backup_restore_op` is structural too, but it is only ever WRITTEN
+        # by a restore — nothing here ran one, so it is correctly absent
+        # rather than present-and-empty. assertEqual against the full
+        # whitelist would wrongly demand a key nothing wrote; the subset
+        # check plus the two keys `store.open_db` always populates is the
+        # accurate claim.
+        self.assertLessEqual(keys, set(tools_destructive.STRUCTURAL_META_KEYS))
+        self.assertEqual(keys, {"schema_version", "account_secret"})
         # The two survivors are structural for a reason: regenerating the
         # secret would silently re-key every account id on the next link.
         self.assertEqual(store.local_secret(self.raw), secret_before)
@@ -1370,6 +1390,40 @@ class TestDeleteAll(DestructiveBase):
             [r[0] for r in self.raw.execute("SELECT account_id FROM accounts")],
             ["acc1"])
         self.assertIsNotNone(tools_auth._meta_get(self.raw, "some_future_key"))
+
+    def test_delete_all_data_erases_registrations_and_keeps_the_restore_marker(self):
+        self.raw.execute(
+            "INSERT INTO workflow_registrations VALUES"
+            " ('acct@1.0.0','aaaaaaaaaaaaaaaa','t')")
+        self.raw.execute(
+            "INSERT INTO meta(key, value) VALUES ('backup_restore_op',"
+            "'bbbbbbbbbbbbbbbb')")
+        out = call("delete_all_data")
+        # The marker WAS kept, so "only the schema version and the local
+        # account_id secret remain" is false of this call's own database --
+        # a third structural row is sitting right there in `meta` -- and the
+        # reply must name it rather than silently drop it from the count.
+        self.assertNotIn(
+            "only the schema version and the local account_id secret remain",
+            out)
+        self.assertIn("crash-recovery marker", out)
+        self.assertEqual(
+            self.raw.execute(
+                "SELECT count(*) FROM workflow_registrations").fetchone()[0],
+            0)
+        self.assertEqual(
+            self.raw.execute(
+                "SELECT value FROM meta WHERE"
+                " key='backup_restore_op'").fetchone()[0],
+            "bbbbbbbbbbbbbbbb")
+
+    def test_the_two_lists_cross_check_the_backups_module(self):
+        # STRUCTURAL_META_KEYS and _DATA_TABLES re-spell `backups.MARKER_KEY`
+        # and `backups.REGISTRATIONS_TABLE` as literals; this pins the one
+        # spelling against the other so the two cannot silently drift apart
+        # on a future rename.
+        self.assertIn(backups.MARKER_KEY, tools_destructive.STRUCTURAL_META_KEYS)
+        self.assertIn(backups.REGISTRATIONS_TABLE, tools_destructive._DATA_TABLES)
 
 
 class TestTheIrreversibleHalfHappensLast(DestructiveBase):
@@ -2235,3 +2289,510 @@ class TestRulesAtDeletionSites(DestructiveBase):
         self.assertNotIn("Auto-tagging rules are unaffected.", out)
         self.assertEqual(self.count("tag_rules"), 3)
 
+
+MINT_AND_DIE = r'''
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import backups, store
+c = store.open_db(sys.argv[2]); paths = backups.paths_for(sys.argv[2])
+c.execute("BEGIN IMMEDIATE")
+_, h = backups.settle(c, paths)
+b = backups.take_backup(c, paths, h, "install:acct@1.0.0", register="acct@1.0.0")
+c.execute("COMMIT")
+print(b.op_id, flush=True)
+os._exit(0)          # dies before the terminal record
+'''
+
+
+class TestDeleteAllDataSettlesFirst(DestructiveBase):
+    """The two-process case settling-before-erasure exists for: a mint
+    committed by a process that died before writing its own terminal record,
+    settled from an ALREADY-OPEN process's connection by the erasure itself —
+    never two connections in one process, which cannot reproduce a crash
+    between COMMIT and the terminal index append.
+    """
+
+    def test_a_mint_that_died_after_commit_settles_committed_even_across_delete_all_data(self):
+        db_path = self.root / "f.sqlite"
+        out = subprocess.run(
+            [sys.executable, "-c", MINT_AND_DIE, str(SERVER_DIR), str(db_path)],
+            capture_output=True, text=True, check=True).stdout.split()
+        op = out[0]
+        # The already-open process (self.raw, wired to tools_read.CONN by
+        # DestructiveBase.setUp) runs the erasure BEFORE any settlement of
+        # its own — delete_all_data's own settle() call is the first thing
+        # that ever looks at the dead process's pending record.
+        call("delete_all_data")
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        self.raw.execute("BEGIN IMMEDIATE")
+        try:
+            st, handle = backups.settle(self.raw, paths)
+            handle.close()
+        finally:
+            self.raw.execute("ROLLBACK")
+        self.assertEqual(st.backups[op]["state"], "committed")
+        self.assertEqual(st.registrations, {})
+
+    def test_a_settlement_refusal_erases_nothing_and_asks_no_bank(self):
+        self.session()
+        self.account()
+        self.tx()
+        self.raw.execute(
+            "INSERT INTO workflow_registrations VALUES"
+            " ('acct@1.0.0','aaaaaaaaaaaaaaaa','t')")
+        original = backups.settle
+
+        def boom(*a, **k):
+            raise backups.BackupError("boom")
+        backups.settle = boom
+        self.addCleanup(setattr, backups, "settle", original)
+
+        out = call("delete_all_data")
+        self.assertIn("Nothing was erased", out)
+        # Every table the erasure would have emptied is still full, and no
+        # bank was ever asked: a settlement refusal happens before the
+        # erasure loop even starts, so it must be as if the call never ran.
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual(self.count("accounts"), 1)
+        self.assertEqual(
+            self.raw.execute(
+                "SELECT count(*) FROM workflow_registrations").fetchone()[0],
+            1)
+        self.assertFalse(tools_read.CONN.in_transaction)
+        self.assertEqual(self.ais.deleted, [])
+
+
+class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
+    """A backup is a WHOLE-LEDGER COPY -- sessions, the renewal-handoff `meta`
+    keys, `accounts.uid`, every transaction. Leaving the copies beside the
+    erased ledger made every sentence this tool prints false: "no past to be
+    restored from any more", and casa's own "Cannot be undone", were both
+    undone by a single `restore_backup`."""
+
+    def _paths(self):
+        return backups.paths_for(tools_read.ledger_path(self.raw))
+
+    def _two_real_backups(self):
+        """One `backup` through the tool, one MINTED by a workflow write --
+        the two ways a copy gets there, and the mint is the one nothing can
+        prune."""
+        self.session()
+        self.account()
+        self.tx()
+        rid = self.raw.execute("SELECT row_id FROM transactions").fetchone()[0]
+        self.assertRegex(call("backup", reason="manual"), r"Backup [0-9a-f]{16} written")
+        self.assertIn("Restore point minted",
+                      call("add_note", row_ids=[rid], note="n", author="agent",
+                           workflow="acct@1.0.0", expected_generation=0))
+        paths = self._paths()
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 2)
+        return paths
+
+    def _prunes(self, paths):
+        return [l for l in paths.index.read_text().splitlines()
+                if l.split()[1:2] == ["prune"]]
+
+    def test_delete_all_data_erases_every_backup_file_and_records_each_one(self):
+        paths = self._two_real_backups()
+        out = call("delete_all_data")
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        self.assertEqual(len(self._prunes(paths)), 2)
+        self.assertIn("2 backup file(s) were erased too — a backup is a copy of "
+                      "this ledger.", out)
+        # The INDEX is kept -- append-only, so the record of what existed and
+        # what was removed survives the erasure it describes.
+        self.assertTrue(paths.index.is_file())
+        listing = call("list_backups")
+        self.assertEqual(listing.count("pruned"), 2)
+        self.assertIn("Restore generation: 0", listing)
+
+    def test_a_copy_in_flight_goes_with_them(self):
+        paths = self._two_real_backups()
+        partial = paths.partial_file("b" * 16)
+        partial.write_bytes(b"half a copy")
+        out = call("delete_all_data")
+        self.assertFalse(partial.exists())
+        # A `.partial` never reached the index, so it earns no audit line --
+        # which is why it is counted in its OWN sentence instead of inflating
+        # the count whose number the `prune` records have to corroborate.
+        self.assertEqual(len(self._prunes(paths)), 2)
+        self.assertIn("2 backup file(s) were erased too", out)
+        self.assertIn("1 partial copy(ies)", out)
+
+    def test_the_erasure_of_the_copies_is_recorded_before_it_happens(self):
+        # A crash between the ledger COMMIT and the unlinking used to leave an
+        # empty ledger beside an intact whole-ledger copy. The record is what
+        # closes that window: settlement in any later process finishes the job.
+        paths = self._two_real_backups()
+        call("delete_all_data")
+        records = [l.split()[1:] for l in paths.index.read_text().splitlines()[1:]]
+        erases = [r for r in records if r[0] == "erase"]
+        self.assertEqual([r[2] for r in erases], ["pending", "committed"])
+        self.assertEqual(erases[0][1], erases[1][1])          # one operation
+        self.assertEqual(records[-1][0], "erase")
+
+    def test_an_erasure_that_fails_before_its_commit_records_no_erase_at_all(self):
+        # The pending record is the LAST statement before the COMMIT precisely
+        # so that "nothing was erased" still covers the copies: a failure above
+        # it must leave no record that settlement would act on.
+        paths = self._two_real_backups()
+        self.fail_at("DELETE FROM transactions")
+        with self.assertRaises(Boom):
+            call("delete_all_data")
+        self.assertEqual([l for l in paths.index.read_text().splitlines()
+                          if l.split()[1:2] == ["erase"]], [])
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 2)
+
+    def test_one_file_it_cannot_unlink_never_stops_the_others(self):
+        # The sweep used to stop at the first failure, so the reply's "run it
+        # again" made no progress: the retry met the same file first and every
+        # copy behind it stayed a restorable whole ledger.
+        paths = self._two_real_backups()
+        doomed = sorted(p.name for p in paths.backups_dir.glob("*.sqlite"))[0]
+        real_unlink = pathlib.Path.unlink
+
+        def selective(p, *a, **k):
+            if p.name == doomed:
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        repair = lambda: setattr(pathlib.Path, "unlink", real_unlink)  # noqa: E731
+        self.addCleanup(repair)
+        pathlib.Path.unlink = selective
+        out = call("delete_all_data")
+        # The other copy went, and its audit line with it.
+        self.assertEqual([p.name for p in paths.backups_dir.iterdir()], [doomed])
+        self.assertEqual(len(self._prunes(paths)), 1)
+        # The count sentence counts ONLY what was removed; the failure is the
+        # warning's subject, with a count and never a path.
+        self.assertIn("1 backup file(s) were erased too", out)
+        self.assertIn("WARNING — the local ledger IS erased, but at least one "
+                      "backup file beside it could not be removed: 1 whole "
+                      "copy(ies) could not be removed — EVERY BACKUP IS A "
+                      "WHOLE COPY OF THIS LEDGER", out)
+        # The consequence is stated by the warning itself, not only by the
+        # message a retry would produce: until the erasure completes, the
+        # pending erase record makes settlement refuse. And it is stated as
+        # the set it really is -- "every other bank-feed call" was false of
+        # every read, of `sync`, and of every write carrying no workflow,
+        # which sent an operator looking for a fault that is not there.
+        self.assertIn("No backup, restore, total erasure or workflow write "
+                      "runs until the erasure completes; every other call, "
+                      "reads included, is unaffected.", out)
+        self.assertNotIn("Every other bank-feed call", out)
+        self.assertNotIn(doomed, out)
+        # THE RETRY NOW MAKES PROGRESS. The erasure's pending record is still
+        # there, so the moment the file can go, settlement finishes what this
+        # call started -- before the retry does anything of its own.
+        repair()
+        out2 = call("delete_all_data")
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        self.assertEqual(len(self._prunes(paths)), 2)
+        # Nothing was left for the retry's OWN erasure to remove, so it claims
+        # nothing: "0 backup file(s) were erased" reads as a failed call.
+        self.assertNotIn("backup file(s) were erased too", out2)
+        self.assertNotIn("partial copy(ies)", out2)
+
+    def test_while_copies_survive_an_erasure_the_next_call_names_the_residue(self):
+        paths = self._two_real_backups()
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def refuse(p, *a, **k):
+            if p.name.endswith(".sqlite"):
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = refuse
+        call("delete_all_data")
+        # Settlement runs first on the retry and hits the same wall. Saying
+        # "nothing was erased" there would be false about the copies this call
+        # just retried and silent about the only residue there is.
+        out = call("delete_all_data")
+        self.assertIn("An erasure recorded earlier is not finished: 2 whole "
+                      "copy(ies) could not be removed — EVERY BACKUP IS A "
+                      "WHOLE COPY OF THIS LEDGER, so the copies that may "
+                      "still be on disk hold this ledger's data.", out)
+        self.assertIn(paths.backups_dir.name, out)
+        self.assertNotIn("Nothing was erased", out)
+        self.assertFalse(tools_read.CONN.in_transaction)
+
+    def test_the_erased_ledger_cannot_be_restored_afterwards(self):
+        # The point of the whole finding, stated as behaviour rather than as
+        # file counts: the id the operator was just handed no longer restores.
+        self.session()
+        self.account()
+        self.tx()
+        bid = call("backup", reason="manual").split()[1]
+        call("delete_all_data")
+        out = call("restore_backup", backup_id=bid)
+        self.assertIn("no restorable backup %s" % bid, out)
+        self.assertEqual(self.count("transactions"), 0)
+
+    def test_a_backup_file_that_cannot_be_unlinked_warns_and_still_erases(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        paths = self._two_real_backups()
+        # The directory is made read-only AFTER the settle, because settle's
+        # own `_prepare` chmods it back to 0700: the condition being
+        # reproduced is "not writable at the moment of the erasure".
+        real_settle = backups.settle
+
+        def settle_then_seal(*a, **k):
+            out = real_settle(*a, **k)
+            os.chmod(str(paths.backups_dir), 0o500)
+            return out
+        self.addCleanup(os.chmod, str(paths.backups_dir), 0o700)
+        self.addCleanup(setattr, backups, "settle", real_settle)
+        backups.settle = settle_then_seal
+        out = call("delete_all_data")
+        # The erasure itself is committed -- the failure is reported, never
+        # raised, and never as "nothing happened".
+        self.assertEqual(self.count("transactions"), 0)
+        self.assertEqual(self.count("accounts"), 0)
+        self.assertIn("WARNING — the local ledger IS erased, but at least one "
+                      "backup file beside it could not be removed", out)
+        self.assertIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
+        self.assertNotIn("backup file(s) were erased too", out)
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 2)
+
+    def test_an_index_append_that_fails_after_its_unlink_still_gets_its_record(self):
+        # THE UNLINK AND ITS AUDIT RECORD ARE TWO EVENTS, and only the second
+        # one needs a writable index: a full disk takes the record and leaves
+        # the copy gone. Settlement then completed the pending erasure against
+        # a directory that no longer held the file, found nothing to record,
+        # and the copy stayed in the index with no `prune` line for ever — the
+        # listing called it FILE MISSING, which is exactly what a copy deleted
+        # by something outside this plugin looks like. Recovery could not tell
+        # "we erased it" from "it disappeared".
+        paths = self._two_real_backups()
+        ids = sorted(p.name[:-len(".sqlite")]
+                     for p in paths.backups_dir.glob("*.sqlite"))
+        real = backups.IndexHandle.append
+        fired = []
+
+        def append(handle, *fields):
+            if fields[0] == "prune" and not fired:
+                fired.append(True)
+                raise backups.BackupError(
+                    "the backup index could not be written: ENOSPC")
+            return real(handle, *fields)
+        self.addCleanup(setattr, backups.IndexHandle, "append", real)
+        backups.IndexHandle.append = append
+        out = call("delete_all_data")
+        backups.IndexHandle.append = real
+        # The state the finding starts from: one copy unlinked, no record of
+        # it, the erasure still pending. The warning does not invent a count
+        # it never measured -- the sweep stopped, so what is left is exactly
+        # what this failure cannot say.
+        self.assertIn("the erasure of the backup files stopped part way", out)
+        self.assertIn("this call cannot say which of them are still there", out)
+        self.assertEqual(self._prunes(paths), [])
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 1)
+        listing = call("list_backups")            # settles the pending erasure
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        # EXACTLY ONE `prune` PER INDEXED COPY, including the one whose file
+        # was already gone before this settlement looked: inside an authorised
+        # erasure an absent indexed copy is an erased one.
+        prunes = [l.split() for l in self._prunes(paths)]
+        self.assertEqual(sorted(p[2] for p in prunes), ids)
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["erase", "committed"])
+        self.assertEqual(listing.count("pruned"), 2)
+        self.assertNotIn("FILE MISSING", listing)
+
+    def test_an_unremovable_partial_is_not_announced_as_a_whole_copy(self):
+        # The alarm is about RESTORABILITY: a whole copy left on disk undoes
+        # the erasure outright, and one `restore_backup` is all it takes. A
+        # `.partial` never reached the index and `restore` refuses anything not
+        # in the index, so firing the same alarm for one sent the operator
+        # after the wrong file with the wrong urgency. It still holds ledger
+        # pages, so it is named — in its own clause, at its own weight.
+        paths = self._two_real_backups()
+        paths.partial_file("b" * 16).write_bytes(b"half a copy")
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def selective(p, *a, **k):
+            if p.name.endswith(".partial"):
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = selective
+        out = call("delete_all_data")
+        self.assertIn("1 unfinished copy(ies) could not be removed — a partial "
+                      "cannot be restored, but it still holds this ledger's "
+                      "pages", out)
+        self.assertNotIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
+        # And what DID go is still counted, per audit shape.
+        self.assertIn("2 backup file(s) were erased too", out)
+        self.assertNotIn("partial copy(ies) — a backup interrupted part way", out)
+
+    def test_a_failed_index_write_for_the_erase_record_erased_nothing(self):
+        # `append` writes and then flushes. The write failing means the record
+        # does not exist, nothing will ever complete the erasure of the copies,
+        # and the call refuses -- "Nothing was erased" is the whole truth here.
+        paths = self._two_real_backups()
+        real_write = os.write
+
+        def write(fd, data):
+            if b" erase " in data:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        self.assertIn("Nothing was erased", out)
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual([l for l in paths.index.read_text().splitlines()
+                          if l.split()[1:2] == ["erase"]], [])
+        self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 2)
+
+    def test_a_failed_flush_of_the_erase_record_does_not_claim_nothing_was_erased(self):
+        # THE SAME EXCEPTION FOR TWO DIFFERENT OUTCOMES was the defect. A
+        # failed fsync follows a write that LANDED: the line is readable right
+        # now, so the next settlement in any process removes every copy —
+        # "Nothing was erased" would send the operator looking for backups that
+        # are about to disappear.
+        paths = self._two_real_backups()
+        real_write, real_fsync = os.write, os.fsync
+        armed = []
+
+        def write(fd, data):
+            n = real_write(fd, data)
+            if b" erase " in data:
+                armed.append(fd)
+            return n
+
+        def fsync(fd):
+            if fd in armed:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_fsync(fd)
+        with mock.patch.object(backups.os, "write", write), \
+                mock.patch.object(backups.os, "fsync", fsync):
+            out = call("delete_all_data")
+        self.assertNotIn("Nothing was erased", out)
+        self.assertIn("The ledger was not erased. A record of the backup "
+                      "erasure may already be durable: the backup copies will "
+                      "be removed at the next settlement (any backup, restore, "
+                      "listing or workflow write).", out)
+        # Both halves of that sentence, driven rather than reasoned about: the
+        # ledger really is whole, and the record really is readable.
+        self.assertEqual(self.count("transactions"), 1)
+        erases = [l.split() for l in paths.index.read_text().splitlines()
+                  if l.split()[1:2] == ["erase"]]
+        self.assertEqual([e[3] for e in erases], ["pending"])
+        call("list_backups")
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+
+    def test_a_flush_failure_on_the_terminal_record_says_the_copies_went(self):
+        # THE SAME EXCEPTION FOR TWO DIFFERENT OUTCOMES, one level further in
+        # than the pending record. A failed fsync on the TERMINAL follows a
+        # write that landed: the line is readable, so every copy is gone and
+        # the erasure is complete. Reporting "the erasure of the backup files
+        # stopped part way ... this call cannot say which of them are still
+        # there" described a directory this call had just emptied.
+        paths = self._two_real_backups()
+        real_write, real_fsync = os.write, os.fsync
+        armed = []
+
+        def write(fd, data):
+            n = real_write(fd, data)
+            if b" erase " in data and data.rstrip().endswith(b"committed"):
+                armed.append(fd)
+            return n
+
+        def fsync(fd):
+            if fd in armed:
+                armed.clear()
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_fsync(fd)
+        with mock.patch.object(backups.os, "write", write), \
+                mock.patch.object(backups.os, "fsync", fsync):
+            out = call("delete_all_data")
+        # Driven, not reasoned about: the directory really is empty and the
+        # terminal record really is readable.
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["erase", "committed"])
+        self.assertNotIn("stopped part way", out)
+        self.assertNotIn("WARNING — the local ledger IS erased", out)
+        self.assertIn("2 backup file(s) were erased too", out)
+        self.assertIn("Every backup copy was erased; the index record "
+                      "confirming it could not be flushed (the backup index "
+                      "could not be flushed: ENOSPC) — it is readable and "
+                      "settles at the next listing.", out)
+        # And the next call settles over it without refusing anything.
+        self.assertIn("Restore generation: 0", call("list_backups"))
+
+    def test_a_write_failure_on_the_terminal_record_says_the_copies_went(self):
+        # THE SWEEP ALREADY FINISHED by the time the terminal append is even
+        # attempted: `_erase` unlinks every file and flushes the directory
+        # BEFORE it appends `erase <op> committed`, so a failed WRITE of that
+        # one line is not the sweep stopping part way -- it is the record of
+        # a finished sweep failing to write. The old reply described a
+        # directory this call had just emptied as one still holding copies.
+        paths = self._two_real_backups()
+        real_write = os.write
+
+        def write(fd, data):
+            if b" erase " in data and data.rstrip().endswith(b"committed"):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        # Driven, not reasoned about: the directory really is empty.
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        self.assertNotIn("stopped part way", out)
+        self.assertNotIn("WARNING — the local ledger IS erased", out)
+        self.assertIn("Every backup copy was erased and the directory "
+                      "flushed, but the index record confirming it could "
+                      "not be written (the backup index could not be "
+                      "written: ENOSPC); the next settlement (any backup, "
+                      "restore, listing or workflow write) re-checks the "
+                      "directory and writes it.", out)
+        erases = [l.split() for l in paths.index.read_text().splitlines()
+                  if l.split()[1:2] == ["erase"]]
+        self.assertEqual([e[3] for e in erases], ["pending"])
+        call("list_backups")               # settles it
+        last = paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["erase", "committed"])
+
+    def test_a_commit_failure_after_the_pending_record_reports_both_halves(self):
+        # The append is the LAST statement before the COMMIT, so an erasure id
+        # in hand on this path means the COMMIT is what failed: the ledger
+        # rolled back intact and the copies are still scheduled to go. Raising
+        # handed the operator a generic error for a state with two specific
+        # halves, neither of which they could guess.
+        paths = self._two_real_backups()
+        self.fail_at("COMMIT")
+        out = call("delete_all_data")
+        self.assertIn("The ledger erasure failed (Boom) and was rolled back — "
+                      "the ledger is intact. The backup copies are still "
+                      "scheduled for erasure and will be removed at the next "
+                      "settlement.", out)
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual(self.count("accounts"), 1)
+        tools_read.CONN = self.conn
+        self.assertFalse(tools_read.CONN.in_transaction)
+        call("list_backups")
+        self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
+        self.assertEqual(self.count("transactions"), 1)
+
+    def test_a_non_backup_error_out_of_settle_leaves_no_open_transaction(self):
+        # Only `BackupError` was caught, so anything else -- a bug, an OOM --
+        # left the module-singleton connection `in_transaction` for ever, and
+        # the next BEGIN IMMEDIATE any write tool issued in this process
+        # failed "cannot start a transaction within a transaction".
+        self.session()
+        self.account()
+        self.tx()
+        real = backups.settle
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        backups.settle = boom
+        self.addCleanup(setattr, backups, "settle", real)
+        with self.assertRaises(RuntimeError):
+            call("delete_all_data")
+        backups.settle = real
+        self.assertFalse(tools_read.CONN.in_transaction)
+        self.assertEqual(self.count("transactions"), 1)
+        # Proves the ledger lock really was released: a write tool works.
+        self.assertRegex(call("backup", reason="manual"), r"Backup [0-9a-f]{16}")
