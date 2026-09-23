@@ -196,8 +196,9 @@ Two things about `delete_all_data`'s output that read as errors and are not:
   retry it names.
 - Lines beginning `WARNING` after the erasure describe work that happened
   *after* the point of no return: a withdrawal pass that stopped part way, a
-  session row that could not be removed, or a `VACUUM` that did not run. The
-  local erasure is committed in every one of those cases. Read them as a
+  session row that could not be removed, or a reclaim (`VACUUM` and the
+  write-ahead-log checkpoint) that did not finish. The local erasure is
+  committed in every one of those cases. Read them as a
   to-do list, and if more than one appears, lead with the one about bank
   consents — a consent still live at a bank is the only item on that list
   that costs the operator anything.

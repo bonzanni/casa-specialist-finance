@@ -155,7 +155,8 @@ def _cutoff(raw) -> str | None:
 #: left unchanged when it failed, so one message would assert the reclaim and
 #: then retract it.
 _RECLAIMED = ("Real deletes plus VACUUM, not tombstones: the rows "
-              "are gone from the file and the freed pages have been reclaimed.")
+              "are gone from the ledger database, its note index and its "
+              "write-ahead log, and the freed pages have been reclaimed.")
 
 
 def _reclaim(c):
@@ -181,9 +182,10 @@ def _reclaim(c):
     except Exception as exc:                 # noqa: BLE001 — class name only
         return False, (
             "WARNING — the rows are deleted and the deletion is committed, but "
-            "VACUUM did not run (%s), so the freed pages have NOT been "
-            "reclaimed and the erased data may still be recoverable from the "
-            "database file (and from any Home Assistant backup taken since). "
+            "the reclaim did not finish (%s): the freed pages or the "
+            "write-ahead log have NOT been cleared, and the erased data may "
+            "still be recoverable from the database files (and from any Home "
+            "Assistant backup taken since). "
             "Run this call again with the same arguments to finish the "
             "reclaim: every tool here re-runs it, including when there is "
             "nothing left to delete." % type(exc).__name__)

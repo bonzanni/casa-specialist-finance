@@ -2051,7 +2051,7 @@ class TestReclaim(DestructiveBase):
                     out = call(name, **args)
                 finally:
                     repair()
-                self.assertIn("VACUUM did not run", out)
+                self.assertIn("the reclaim did not finish", out)
                 self.assertIn("Boom", out)          # the CLASS, never a body
                 self.assertIn("may still be recoverable", out)
                 self.assertNotIn(tools_destructive._RECLAIMED, out)
@@ -2064,7 +2064,7 @@ class TestReclaim(DestructiveBase):
         self.tx()
         out = call("forget_local_account", account_id="acc1")
         self.assertIn(tools_destructive._RECLAIMED, out)
-        self.assertNotIn("VACUUM did not run", out)
+        self.assertNotIn("the reclaim did not finish", out)
 
     def test_the_printed_vacuum_remedy_actually_reclaims(self):
         # The warning tells the operator to run the same call again.
@@ -2078,7 +2078,7 @@ class TestReclaim(DestructiveBase):
         self.tx()
         repair = self.break_vacuum()
         first = call("forget_local_account", account_id="acc1")
-        self.assertIn("VACUUM did not run", first)
+        self.assertIn("the reclaim did not finish", first)
         repair()                             # the disk recovers
 
         self.conn.sql = []
@@ -2107,14 +2107,14 @@ class TestReclaim(DestructiveBase):
         repair = self.break_vacuum()
         try:
             first = call("forget_local_account", account_id="acc1")
-            self.assertIn("VACUUM did not run", first)
+            self.assertIn("the reclaim did not finish", first)
             # The row is gone now, so the retry takes the not-found branch.
             self.assertEqual(self.count("accounts"), 0)
             second = call("forget_local_account", account_id="acc1")
         finally:
             repair()
         self.assertIn("nothing was deleted", second)
-        self.assertIn("VACUUM did not run", second)
+        self.assertIn("the reclaim did not finish", second)
         self.assertIn("may still be recoverable", second)
         self.assertNotIn("have been reclaimed", second)
         self.assertNotIn(tools_destructive._RECLAIMED, second)
@@ -2963,20 +2963,104 @@ class TestTheEraseRecordIsWholeOrAbsent(DestructiveBase):
         self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 1)
 
 
+class TestTheLedgersOwnWriteAheadLogIsReclaimed(DestructiveBase):
+    """Issue #41. The ledger runs in WAL mode, so every row an erasure deletes
+    was first written to `<ledger>-wal`, and the VACUUM that reclaims the main
+    file's free pages leaves those frames where they are until a checkpoint
+    truncates the log. Session identifiers are bearer-equivalent, and the
+    reply says they are gone."""
+
+    #: A value that exists nowhere but in the rows the erasure deletes.
+    ERASED_IK = "ik-erased-quokka-row"
+
+    def _files_holding(self, needle):
+        return sorted(p.name for p in self.root.rglob("*")
+                      if p.is_file() and needle.encode() in p.read_bytes())
+
+    def test_delete_all_data_leaves_no_file_holding_a_destroyed_session_id(self):
+        self.session()
+        self.account()
+        self.tx(ik=self.ERASED_IK)
+        # The precondition is the defect's: the id really is in the log.
+        self.assertIn("f.sqlite-wal", self._files_holding(SESSION_ID))
+        out = call("delete_all_data")
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertIn(tools_destructive._RECLAIMED, out)
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+        self.assertEqual(self._files_holding(self.ERASED_IK), [])
+
+    def test_forget_local_account_leaves_no_file_holding_its_rows(self):
+        self.account()
+        self.tx(ik=self.ERASED_IK)
+        self.assertIn("f.sqlite-wal", self._files_holding(self.ERASED_IK))
+        out = call("forget_local_account", account_id="acc1")
+        self.assertIn(tools_destructive._RECLAIMED, out)
+        self.assertEqual(self._files_holding(self.ERASED_IK), [])
+
+    def test_purge_leaves_no_file_holding_the_purged_rows(self):
+        self.account()
+        self.tx(ik=self.ERASED_IK, booking_date="2024-06-01")
+        out = call("purge", before_date="2025-01-01")
+        self.assertIn(tools_destructive._RECLAIMED, out)
+        self.assertEqual(self._files_holding(self.ERASED_IK), [])
+
+    def test_no_erasure_leaves_a_deleted_note_in_the_full_text_index(self):
+        # The note index is external-content FTS5: a deleted note becomes a
+        # tombstone in a NEW segment and the old segment, text and all, stays
+        # a live row of `notes_fts_data`, which VACUUM therefore keeps.
+        for aid, name, args in (
+                ("accp", "purge", {"before_date": "2025-01-01"}),
+                ("accf", "forget_local_account", {"account_id": "accf"}),
+                ("acca", "delete_all_data", {})):
+            with self.subTest(tool=name):
+                note = "confidentialquokka" + aid
+                self.account(aid)
+                self.tx(aid, booking_date="2024-06-01")
+                rid = self.raw.execute(
+                    "SELECT row_id FROM transactions WHERE account_id=?",
+                    (aid,)).fetchone()[0]
+                call("add_note", row_ids=[rid], note=note, author="user")
+                self.assertIn("f.sqlite-wal", self._files_holding(note))
+                out = call(name, **args)
+                self.assertIn(tools_destructive._RECLAIMED, out)
+                self.assertEqual(self._files_holding(note), [])
+                self.raw.execute("INSERT INTO notes_fts(notes_fts)"
+                                 " VALUES('integrity-check')")
+
+    def test_a_checkpoint_a_reader_blocks_is_reported_not_claimed(self):
+        # Another connection holding a read snapshot keeps the checkpoint
+        # from reaching the end of the log, so the deleted frames stay in it.
+        # That is the state the reclaim sentence must not describe as done.
+        self.session()
+        self.account()
+        self.tx(ik=self.ERASED_IK)
+        reader = store.open_db(self.root / "f.sqlite")
+        self.addCleanup(reader.close)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM transactions").fetchone()
+        self.raw.execute("PRAGMA busy_timeout=0")
+        out = call("delete_all_data")
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertNotIn(tools_destructive._RECLAIMED, out)
+        self.assertIn("the reclaim did not finish", out)
+        # The retry the warning asks for finishes the job once the reader is
+        # gone.
+        reader.execute("COMMIT")
+        out = call("delete_all_data")
+        self.assertIn(tools_destructive._RECLAIMED, out)
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+
 class TestACopyTakenWhileTheBanksAnswerDoesNotSurvive(DestructiveBase):
     """The banks are asked outside every lock, after the first sweep. A backup
     another process takes then copies the `sessions` rows — bank-session
     identifiers — that the erasure destroys a moment later."""
 
     def _files_holding(self, needle):
-        """Every file under the data directory holding `needle`, except the
-        live ledger's own write-ahead log: its stale frames are the ledger's
-        concern (they hold what the ledger held before the erasure, with or
-        without any backup), not a copy's, and this class is about copies."""
+        """Every file under the data directory holding `needle`, the live
+        ledger's own write-ahead log included (issue #41)."""
         hits = []
         for p in self.root.rglob("*"):
-            if p.name == "f.sqlite-wal":
-                continue
             if p.is_file() and needle.encode() in p.read_bytes():
                 hits.append(p.name)
         return hits
