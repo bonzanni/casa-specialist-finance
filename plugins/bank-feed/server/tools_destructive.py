@@ -617,7 +617,7 @@ def _withdraw_open_consents(c):
     return gone, kept
 
 
-def _destroy_proven_handles(c):
+def _destroy_proven_handles(c, paths):
     """Delete the session rows the provider PROVED gone — and only those.
 
     THE PREDICATE IS `closed_at`, NOT A LIST BUILT IN THIS MODULE. Deleting
@@ -635,7 +635,8 @@ def _destroy_proven_handles(c):
     Rows already closed BEFORE this call are deleted too, and correctly: the
     same single writer put that timestamp there, on the same proof.
 
-    Returns `(ok, warning or None)`. It does not raise: the erasure is already
+    Returns `(ok, warning or None, [lines about the backup copies])`. It
+    does not raise: the erasure is already
     committed and the consents are already withdrawn by the time this runs, so
     an exception here would once again hand the operator an error for a call
     that did the irreversible half. Same trade as `_reclaim`, same answer — the
@@ -666,17 +667,53 @@ def _destroy_proven_handles(c):
                         " WHERE closed_at IS NOT NULL").fetchone()[0]
     except Exception:                        # noqa: BLE001 — see `due is None`
         due = None
+    # THE ROWS GO IN ONE TRANSACTION WITH THE RECORD OF A SECOND SWEEP OF THE
+    # COPIES. The banks are asked outside every lock, after the first sweep,
+    # so another process can take a backup while they answer — and that copy
+    # holds these very session rows (bank-session identifiers). Destroying the
+    # rows and leaving that copy would leave the one identifier the erasure
+    # promised gone, restorable. So: settle, delete the proven rows, append
+    # `erase <op> pending` as the LAST statement before the COMMIT, then sweep
+    # under the still-held index handle. A copy taken before this COMMIT is in
+    # the directory and goes; one taken after it copies the ledger without the
+    # rows. A failed append rolls the DELETE back: the rows stay, so no copy
+    # can hold an identifier the ledger no longer has, and the reply says why.
+    handle = state = erase_op = None
     try:
-        c.execute("DELETE FROM sessions WHERE closed_at IS NOT NULL")
+        c.execute("BEGIN IMMEDIATE")
+        state, handle = backups.settle(c, paths)
+        destroyed = c.execute(
+            "DELETE FROM sessions WHERE closed_at IS NOT NULL").rowcount
+        if destroyed:
+            # Only when rows really went in THIS transaction: with none
+            # destroyed no copy can hold an identifier the ledger lost.
+            erase_op = backups.new_op_id()
+            handle.append("erase", erase_op, "pending")
+        c.execute("COMMIT")
+    except backups.BackupError as exc:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
+        # Settlement succeeded when `state` is set, so the failure is the
+        # sweep's own `pending` append.
+        return (False, _handles_kept_note(due, exc, state is not None),
+                _settled_lines(exc.settled
+                               or (state.settled if state else None)))
     except Exception as exc:                 # noqa: BLE001 — class name only
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
         failure = type(exc).__name__
+        extra = _settled_lines(state.settled if state else None)
         if due is None:
             return False, (
                 "WARNING — the local ledger IS erased, but the sweep of "
                 "session rows could not run (%s) and this call could not read "
                 "how many were due, so it cannot tell you whether an inert row "
                 "was left behind. Run consent_status to see what is still "
-                "listed, and delete_all_data again to finish." % failure)
+                "listed, and delete_all_data again to finish." % failure), extra
         if not due:
             # Not a WARNING: there is no residue and nothing to do about it.
             # Still said out loud, because a write that failed is never
@@ -686,7 +723,7 @@ def _destroy_proven_handles(c):
                 "Note — the sweep of session rows could not run (%s), but "
                 "NOTHING WAS DUE for removal: no consent is recorded here as "
                 "proven gone, so this call destroyed no handle and left none "
-                "behind. There is nothing to clear." % failure)
+                "behind. There is nothing to clear." % failure), extra
         # EVERY CLAIM HERE IS SCOPED TO THE ROWS IT COUNTS. This warning can
         # stand beside the halted-pass warning, which is about the DISJOINT
         # set of consents nobody could prove dead — so an unscoped "there is
@@ -699,8 +736,117 @@ def _destroy_proven_handles(c):
             "(%s). Those rows are inert: the provider confirmed those consents "
             "gone, so consent_status does not list them and there is nothing "
             "left to revoke at those banks. Run delete_all_data again to clear "
-            "the residue." % (due, failure))
-    return True, None
+            "the residue." % (due, failure)), extra
+    lines = _settled_lines(state.settled)
+    try:
+        if erase_op is not None:
+            swept = _second_sweep(paths, handle, state, erase_op)
+            if swept:
+                lines.append(swept)
+        return True, None, lines
+    finally:
+        handle.close()
+
+
+def _settled_tail(state) -> str:
+    """" <sentence>" naming what this call's settlement removed when it
+    completed an interrupted erasure, or "" when it removed nothing."""
+    if state is None or state.settled is None:
+        return ""
+    er = state.settled
+    return (" Settlement first %s an interrupted erasure and removed %d backup "
+            "copy(ies)%s." % ("completed" if er.finished else "resumed",
+                              er.removed,
+                              " and %d partial copy(ies)" % er.partials
+                              if er.partials else ""))
+
+
+def _settled_lines(settled) -> list:
+    """The settlement that opens the row sweep completes any erasure still
+    pending — the first sweep's, when it stopped above — and removing copies
+    there is part of this call's account: a reply that said the erasure had
+    not finished must also say that it then did."""
+    if settled is None:
+        return []
+    if not settled.finished:
+        return ["Settlement then resumed the pending erasure of the backup "
+                "copies and removed %d backup copy(ies) and %d partial "
+                "copy(ies) before it refused; the erasure is not finished."
+                % (settled.removed, settled.partials)]
+    return ["Settlement then completed the pending erasure of the backup "
+            "copies: it removed %d backup copy(ies) and %d partial copy(ies)."
+            % (settled.removed, settled.partials)]
+
+
+def _handles_kept_note(due, exc, appending: bool) -> str:
+    """The rows were kept because the index could not settle or record the
+    sweep that has to go with them. `exc` is our own text, never a body."""
+    if due == 0:
+        return ("Note — the sweep of session rows could not run (%s), but "
+                "NOTHING WAS DUE for removal: no consent is recorded here as "
+                "proven gone, so this call destroyed no handle and left none "
+                "behind. There is nothing to clear." % exc)
+    counted = ("%d session row(s)" % due if due is not None
+               else "the session rows")
+    note = ("WARNING — the local ledger IS erased, but %s belonging to "
+            "consents ALREADY PROVEN GONE were kept: the backup index could "
+            "not settle or record the sweep of the backup copies that has to "
+            "go with them (%s), and destroying the rows without it could "
+            "leave a copy holding an identifier this ledger no longer has. "
+            "Those rows are "
+            "inert: the provider confirmed those consents gone, so "
+            "consent_status does not list them and there is nothing left to "
+            "revoke at those banks. Run delete_all_data again to clear them."
+            % (counted, exc))
+    if appending and exc.written is not False:
+        # True: the line landed and only its flush failed. None: it may stand
+        # part-written. Either way this call cannot say it is absent.
+        note += (" A record of that sweep may already be in the index; if "
+                 "so, the next settlement removes the backup copies.")
+    return note
+
+
+def _second_sweep(paths, handle, state, erase_op):
+    """Sweep the copies after the session rows went; -> a reply line or None.
+    Never raises: the rows are already destroyed and the banks already asked,
+    so a failure is reported after the erasure, with its count."""
+    try:
+        er = backups.erase_backups(paths, handle, state, erase_op)
+    except backups.ErasureRecordUnwritten as exc:
+        er = exc.erasure or backups.Erasure()
+        return ("Every backup copy found after the banks were asked (%d) "
+                "was erased with the session rows destroyed here, but the "
+                "index record confirming it could not be written (%s); the "
+                "next settlement (any backup, restore, listing or workflow "
+                "write) writes it." % (er.removed, exc))
+    except backups.ErasureIncomplete as exc:
+        return ("WARNING — the session rows of consents proven gone were "
+                "destroyed, but the sweep of the backup copies found after the "
+                "banks were asked did not finish: %d went, and %s. No "
+                "backup, restore, total erasure or workflow write runs until "
+                "the erasure completes; every other call, reads included, is "
+                "unaffected. Run delete_all_data again to retry, or delete %s "
+                "by hand." % (exc.erasure.removed, exc.residue(),
+                              paths.backups_dir.name))
+    except backups.BackupError as exc:
+        return ("WARNING — the session rows of consents proven gone were "
+                "destroyed, but the sweep of the backup copies found after the "
+                "banks were asked stopped part way (%s), and this call "
+                "cannot say which of them are still there. The sweep is "
+                "recorded as pending, so the next settlement (any backup, "
+                "restore, listing or workflow write) finishes it." % exc)
+    line = None
+    if er.removed or er.partials:
+        line = ("%d backup copy(ies) and %d partial copy(ies) found after the "
+                "banks were asked were erased too: a copy taken while they "
+                "answered holds the session rows destroyed here."
+                % (er.removed, er.partials))
+    if er.index_warning:
+        line = ((line + " ") if line else "") + (
+            "The index record closing that sweep could not be flushed (%s) — "
+            "it is readable and settles at the next listing."
+            % er.index_warning)
+    return line
 
 
 @register("delete_all_data",
@@ -785,6 +931,29 @@ def delete_all_data(args: dict) -> str:
                     "on, or delete its contents by hand; then run any "
                     "backup, restore, listing or workflow write to finish "
                     "the erasure." % (exc.describe(), paths.backups_dir.name))
+        if isinstance(exc, backups.ErasureRecordUnwritten):
+            # Settlement COMPLETED an earlier erasure's sweep — every copy is
+            # gone and the directory flushed — and only the record confirming
+            # it failed. "Nothing was erased" would be false of the copies
+            # this very call just unlinked.
+            er = exc.erasure or backups.Erasure()
+            return ("An erasure recorded earlier was completed by this call's "
+                    "settlement: every backup copy is gone (%d removed now%s), "
+                    "but the index record confirming it could not be written "
+                    "(%s)%s; it will be written at the next settlement (any "
+                    "backup, restore, listing or workflow write). This call's "
+                    "own erasure did not run: the ledger was not erased."
+                    % (er.removed,
+                       ", and %d partial copy(ies)" % er.partials
+                       if er.partials else "",
+                       exc,
+                       " and may stand part-written until then"
+                       if exc.written is None else ""))
+        if exc.settled is not None:
+            # Any other refusal raised AFTER settlement unlinked copies: the
+            # ledger half did not run, the copies that went are gone.
+            return ("%s. The ledger was not erased; %s"
+                    % (exc, backups.settled_sentence(exc.settled)))
         return "%s. Nothing was erased." % exc
     except Exception:
         # Anything that is NOT a BackupError — a bug, an OOM, a
@@ -838,6 +1007,21 @@ def delete_all_data(args: dict) -> str:
         # empty a ledger whose whole-ledger copies would outlive it.
         if c.in_transaction:
             c.execute("ROLLBACK")
+        # This call's settlement ran before the refusal, and when it completed
+        # an interrupted erasure it removed copies: every branch below says
+        # so, and none of them says "Nothing was erased" then.
+        done_by_settle = _settled_tail(backup_state)
+        if exc.written is None:
+            # THE WRITE FAILED PART WAY AND ITS BYTES COULD NOT BE CUT BACK.
+            # The ledger rolled back, so nothing of it was erased; but the
+            # index may end in a partial record until the next settlement
+            # removes it, and "Nothing was erased" is a claim this call
+            # cannot make about a file it may have left a partial line in.
+            return ("%s. The ledger was not erased: its erasure was rolled "
+                    "back. The index may hold a partial record of the backup "
+                    "erasure; the next settlement (any backup, restore, "
+                    "listing or workflow write) recovers it.%s"
+                    % (exc, done_by_settle))
         if exc.written:
             # THE BYTES LANDED AND ONLY THE FLUSH FAILED. The line is readable
             # right now by anything that parses this index, so the next settle
@@ -848,7 +1032,9 @@ def delete_all_data(args: dict) -> str:
             return ("%s. The ledger was not erased. A record of the backup "
                     "erasure may already be durable: the backup copies will be "
                     "removed at the next settlement (any backup, restore, "
-                    "listing or workflow write)." % exc)
+                    "listing or workflow write).%s" % (exc, done_by_settle))
+        if done_by_settle:
+            return "%s. The ledger was not erased.%s" % (exc, done_by_settle)
         return "%s. Nothing was erased." % exc
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
@@ -863,8 +1049,8 @@ def delete_all_data(args: dict) -> str:
             # with two specific halves, both of which they need to know.
             return ("The ledger erasure failed (%s) and was rolled back — the "
                     "ledger is intact. The backup copies are still scheduled "
-                    "for erasure and will be removed at the next settlement."
-                    % type(exc).__name__)
+                    "for erasure and will be removed at the next settlement.%s"
+                    % (type(exc).__name__, _settled_tail(backup_state)))
         raise
     else:
         # THE BACKUP FILES ARE PART OF "THE ENTIRE LOCAL LEDGER". Each
@@ -1026,7 +1212,7 @@ def delete_all_data(args: dict) -> str:
         # nobody proved dead survives and stays revocable.
         gone, kept, halted = [], [], type(exc).__name__
 
-    handles_ok, handles_note = _destroy_proven_handles(c)
+    handles_ok, handles_note, sweep_lines = _destroy_proven_handles(c, paths)
 
     # THE ITEM THAT COSTS MONEY LEADS. What became of the banks'
     # own permissions is the only part of this call that can still cost the
@@ -1164,6 +1350,7 @@ def delete_all_data(args: dict) -> str:
         notice.append(backups_warning)
     if not handles_ok:
         notice.append(handles_note)
+    notice.extend(sweep_lines)
     notice.append(_reclaim(c)[1])
     notice.append(GATE_NOTE)
     return "\n".join(notice)

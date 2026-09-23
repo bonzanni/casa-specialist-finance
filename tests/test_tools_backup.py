@@ -227,3 +227,83 @@ class TestRestoreTool(Base):
         self.assertEqual(self.raw.execute(
             "SELECT count(*) FROM transactions").fetchone()[0], 0)
         self.assertIn("Restore generation: 1", call("list_backups"))
+
+    def test_a_restore_whose_index_record_only_failed_to_flush_says_it_is_readable(self):
+        # The line LANDED and only its flush failed: it is readable right now,
+        # so "could not be written … settles at the next listing" described a
+        # record that is already there.
+        import errno
+        import os
+        bid = call("backup", reason="manual").split()[1]
+        real_write, real_fsync = os.write, os.fsync
+        armed = []
+
+        def write(fd, data):
+            n = real_write(fd, data)
+            if b" restore " in data and data.rstrip().endswith(b"committed"):
+                armed.append(fd)
+            return n
+
+        def fsync(fd):
+            if armed and fd == armed[0]:
+                armed.clear()
+                raise OSError(errno.EIO, "Input/output error")
+            return real_fsync(fd)
+        with mock.patch.object(backups.os, "write", write), \
+                mock.patch.object(backups.os, "fsync", fsync):
+            out = call("restore_backup", backup_id=bid)
+        self.assertIn("The restore is complete; its index record was written "
+                      "but could not be flushed (the backup index could not "
+                      "be flushed: EIO); it is readable now.", out)
+        self.assertNotIn("could not be written", out)
+        self.assertNotIn("Nothing was changed", out)
+        last = self.paths.index.read_text().splitlines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["restore", "committed"])
+        self.assertIn("Restore generation: 1", call("list_backups"))
+
+
+class TestAPlacedCopyIsNotNothing(Base):
+    """`take_backup` renames the copy into place and then flushes the
+    directory. A flush that fails after the rename leaves a readable copy
+    whose `pending` record the next settlement commits, so the refusal is
+    never "Nothing was changed"."""
+
+    def _break_dir_flush(self):
+        import errno
+        real = backups._fsync_dir
+
+        def fsync_dir(d):
+            if d == self.paths.backups_dir:
+                raise OSError(errno.EIO, "Input/output error")
+            return real(d)
+        return mock.patch.object(backups, "_fsync_dir", fsync_dir)
+
+    def test_backup_says_the_copy_was_written_when_only_the_flush_failed(self):
+        with self._break_dir_flush():
+            out = call("backup", reason="manual")
+        self.assertNotIn("Nothing was changed", out)
+        self.assertRegex(out, r"^Backup ([0-9a-f]{16}) was written, but the "
+                         r"directory holding it could not be flushed \(the "
+                         r"backups directory could not be flushed: EIO\); it "
+                         r"may not survive a power loss\. The next listing "
+                         r"settles it\.$")
+        bid = out.split()[1]
+        self.assertTrue(self.paths.backup_file(bid).is_file())
+        self.assertRegex(call("list_backups"),
+                         r"%s  \d{8}T\d{6}Z  \d+ B  manual  committed" % bid)
+
+    def test_a_mint_says_the_copy_was_written_and_the_write_did_not_run(self):
+        import tools_annotate  # noqa: F401  (registers add_note)
+        rid = self.raw.execute(
+            "INSERT INTO transactions(account_id, identity_key, occurrence,"
+            " amount_minor, currency, direction) VALUES"
+            " ('a1','k',0,1,'EUR','DBIT')").lastrowid
+        with self._break_dir_flush():
+            out = call("add_note", row_ids=[rid], note="n", author="agent",
+                       workflow="acct@1.0.0", expected_generation=0)
+        self.assertNotIn("Nothing was changed", out)
+        self.assertIn("was written, but the directory holding it could not "
+                      "be flushed", out)
+        self.assertTrue(out.endswith("The write itself did not run."))
+        self.assertEqual(self.raw.execute(
+            "SELECT count(*) FROM transaction_notes").fetchone()[0], 0)

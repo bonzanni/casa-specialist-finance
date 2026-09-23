@@ -1,6 +1,6 @@
 {
   "name": "bank-feed",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Read-only bank account information (PSD2 AIS via Enable Banking), the finance data tools, local transaction annotations (tags, notes) with note search, batch annotation and spend-by-tag aggregation, deterministic auto-tagging rules applied at ingest, and ledger backups with a protected restore.",
   "author": {"name": "Nicola Bonzanni"},
   "casa": {

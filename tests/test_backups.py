@@ -714,7 +714,141 @@ class TestIoFailuresBecomeBackupErrors(Base):
             self.conn.execute("ROLLBACK")
 
 
+def torn_write(match, cut_fails=False):
+    """An `os.write` double that lands HALF of the first buffer containing
+    `match` and reports it, then raises ENOSPC on the continuation — the
+    shape a full disk gives a real write. Returns (write, ftruncate) doubles;
+    with `cut_fails`, the first ftruncate after the tear raises EIO."""
+    real_write, real_trunc = os.write, os.ftruncate
+    state = {"torn": False, "cut": False}
+
+    def write(fd, data):
+        if state["torn"] and not state.get("done"):
+            state["done"] = True
+            raise OSError(errno.ENOSPC, "No space left on device")
+        if match in data and not state["torn"]:
+            state["torn"] = True
+            return real_write(fd, data[:len(data) // 2])
+        return real_write(fd, data)
+
+    def ftruncate(fd, size):
+        if cut_fails and state["torn"] and not state["cut"]:
+            state["cut"] = True
+            raise OSError(errno.EIO, "Input/output error")
+        return real_trunc(fd, size)
+    return write, ftruncate
+
+
+class TestAnAppendIsWholeOrAbsent(Base):
+    """A write can land a prefix of a line and report it. The operation's
+    next append then completes it into a complete, malformed line — every
+    later settlement refuses the index for good — and a torn `pending` alone
+    is cut by the next settlement, losing the record of an operation that
+    went ahead on it."""
+
+    def test_a_torn_append_is_cut_back_and_the_index_reads_clean(self):
+        self.settled()
+        before = self.paths.index.read_bytes()
+        write, trunc = torn_write(b" backup ")
+        self.conn.execute("BEGIN IMMEDIATE")
+        _, h = backups.settle(self.conn, self.paths)
+        try:
+            with mock.patch.object(backups.os, "write", write), \
+                    mock.patch.object(backups.os, "ftruncate", trunc):
+                with self.assertRaises(backups.BackupError) as cm:
+                    h.append("backup", "a" * 16, "pending", "reason=manual")
+            self.assertIs(cm.exception.written, False)
+            # Byte-identical: the record does not exist, and no prefix of it
+            # is left for the next append to land on.
+            self.assertEqual(self.paths.index.read_bytes(), before)
+        finally:
+            h.close()
+            self.conn.execute("ROLLBACK")
+        self.conn.execute("BEGIN IMMEDIATE")
+        _, h = backups.settle(self.conn, self.paths)
+        h.append("backup", "b" * 16, "pending", "reason=manual")
+        h.close()
+        self.conn.execute("ROLLBACK")
+        st = self.settled()
+        self.assertEqual(st.backups["b" * 16]["state"], "aborted")
+        self.assertNotIn("a" * 16, st.backups)
+
+    def test_a_tear_that_cannot_be_cut_poisons_the_handle_until_the_next_settle(self):
+        self.settled()
+        before = self.paths.index.read_bytes()
+        write, trunc = torn_write(b" backup ", cut_fails=True)
+        self.conn.execute("BEGIN IMMEDIATE")
+        _, h = backups.settle(self.conn, self.paths)
+        try:
+            with mock.patch.object(backups.os, "write", write), \
+                    mock.patch.object(backups.os, "ftruncate", trunc):
+                with self.assertRaises(backups.BackupError) as cm:
+                    h.append("backup", "a" * 16, "pending", "reason=manual")
+            # "may hold a partial record": neither True nor False is honest.
+            self.assertIsNone(cm.exception.written)
+            torn = self.paths.index.read_bytes()
+            self.assertGreater(len(torn), len(before))
+            self.assertFalse(torn.endswith(b"\n"))
+            # The handle writes NOTHING more: an append here would complete
+            # the prefix into a malformed line no settlement can remove.
+            with self.assertRaises(backups.BackupError) as cm2:
+                h.append("backup", "c" * 16, "committed")
+            self.assertIs(cm2.exception.written, False)
+            self.assertEqual(self.paths.index.read_bytes(), torn)
+        finally:
+            h.close()
+            self.conn.execute("ROLLBACK")
+        # The next settlement cuts the tail and the index reads clean.
+        st = self.settled()
+        self.assertEqual(self.paths.index.read_bytes(), before)
+        self.assertEqual(st.backups, {})
+
+    def test_a_torn_header_write_leaves_no_header_prefix(self):
+        # The index's creation is a write too. A prefix of the header followed
+        # by a complete append is a malformed FIRST line — "bad header" for
+        # ever, since the torn-tail cut only removes an unterminated tail.
+        write, trunc = torn_write(backups.INDEX_HEADER.encode("ascii"))
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            with mock.patch.object(backups.os, "write", write), \
+                    mock.patch.object(backups.os, "ftruncate", trunc):
+                with self.assertRaises(backups.BackupError):
+                    backups.settle(self.conn, self.paths)
+        finally:
+            self.conn.execute("ROLLBACK")
+        self.assertEqual(self.paths.index.read_bytes(), b"")
+        self.conn.execute("BEGIN IMMEDIATE")
+        _, h = backups.settle(self.conn, self.paths)
+        h.append("backup", "b" * 16, "pending", "reason=manual")
+        h.close()
+        self.conn.execute("ROLLBACK")
+        self.assertEqual(self.index_lines()[0], backups.INDEX_HEADER)
+        self.assertEqual(self.settled().backups["b" * 16]["state"], "aborted")
+
+
 class TestOpenTimeSettlement(Base):
+    def test_a_non_utf8_line_is_unreadable_and_never_fails_the_open(self):
+        # A UnicodeDecodeError is a ValueError, which no `except BackupError`
+        # catches: it left `open_db` and the finance ledger would not open.
+        self.settled()
+        with open(self.paths.index, "ab") as f:
+            f.write(b"20260922T000000Z backup \xff\xfeaaaaaaaaaaaaaa pending"
+                    b" reason=manual\n")
+        conn = store.open_db(self.db)
+        try:
+            self.assertFalse(conn.in_transaction)
+            import tools_read
+            import tools_backup
+            tools_read.CONN = conn
+            try:
+                out = tools_backup.list_backups({})
+            finally:
+                tools_read.CONN = None
+            self.assertIn("the backup index is unreadable", out)
+            self.assertFalse(conn.in_transaction)
+        finally:
+            conn.close()
+
     def test_open_db_settles_a_pending_record_when_an_index_exists(self):
         self.settled()
         with open(self.paths.index, "a") as f:
@@ -1025,6 +1159,27 @@ class TestRestore(RestoreBase):
         self.assertRegex(row[2], r"^[0-9a-f]{16}$")
         self.assertEqual(r.bindings_kept, 1)
 
+    def test_every_survivor_including_accounts_created_after_the_backup_is_re_minted(self):
+        # The re-mint covers EVERY row that survives the restore, not only the
+        # rows the backup put back: an account created after the backup —
+        # linked or not — is kept by the restore, and a refresh paused across
+        # it must not find its old life token still valid.
+        self.seed(); bid = self.backup()
+        self.conn.execute("INSERT INTO accounts(account_id, uid, session_id,"
+                          " currency, incarnation) VALUES"
+                          " ('a2','uid-2','s1','EUR','life-0000000002'),"
+                          " ('a3', NULL, NULL, 'EUR','life-0000000003')")
+        before = {r[0]: r[1] for r in self.conn.execute(
+            "SELECT account_id, incarnation FROM accounts")}
+        self.assertEqual(set(before), {"a1", "a2", "a3"})
+        self.restore(bid)
+        after = {r[0]: r[1] for r in self.conn.execute(
+            "SELECT account_id, incarnation FROM accounts")}
+        self.assertEqual(set(after), set(before))
+        for aid in before:
+            self.assertNotEqual(after[aid], before[aid], aid)
+            self.assertRegex(after[aid], r"^[0-9a-f]{16}$")
+
     def test_an_account_in_the_backup_but_unlinked_live_comes_back_needing_relink(self):
         self.seed(); bid = self.backup()
         self.conn.execute("DELETE FROM accounts WHERE account_id='a1'")
@@ -1203,6 +1358,30 @@ class TestTwoProcesses(RestoreBase):
         self.assertIn("no restorable backup %s" % bid, out)
         self.assertEqual(self.conn.execute(
             "SELECT count(*) FROM transactions").fetchone()[0], 0)
+
+    def test_a_restore_after_an_interrupted_erasure_says_what_settlement_removed(self):
+        # The already-open process never re-ran open_db: its restore's own
+        # settlement completes the erasure (unlinking the copy) and THEN
+        # refuses the id. "Nothing was changed." would be false of the copy
+        # that settlement just removed.
+        self.seed()
+        bid = self.backup()
+        self.conn.execute("UPDATE sessions SET closed_at='t'")
+        subprocess.run([sys.executable, "-c", ERASE_AND_DIE, SRV, str(self.db)],
+                       check=False, capture_output=True, timeout=60)
+        self.assertTrue(self.paths.backup_file(bid).is_file())
+        import tools_read, tools_backup
+        tools_read.CONN = self.conn
+        try:
+            out = tools_backup.restore_backup({"backup_id": bid})
+        finally:
+            tools_read.CONN = None
+        self.assertIn("no restorable backup %s" % bid, out)
+        self.assertIn("This call did not run; settlement first completed an "
+                      "interrupted erasure and removed 1 backup copy(ies).", out)
+        self.assertNotIn("Nothing was changed.", out)
+        self.assertFalse(self.paths.backup_file(bid).exists())
+        self.assertFalse(self.conn.in_transaction)
 
     def test_a_pending_erasure_is_completed_once_by_two_settling_processes(self):
         self.seed()
