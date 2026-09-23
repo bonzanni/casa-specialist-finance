@@ -34,7 +34,8 @@ def render_listing(state: backups.LedgerState) -> str:
         elif not b["present"]:
             where = "FILE MISSING"
         else:
-            where = "%d B" % b["size"]
+            where = ("%d B" % b["size"] if b["size"] is not None
+                     else "size unreadable")
         lines.append("  %s  %s  %s  %s  %s" % (op, b["ts"], where, b["reason"], b["state"]))
     if state.registrations:
         lines.append("Registered workflows:")

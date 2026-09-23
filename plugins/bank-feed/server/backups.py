@@ -389,11 +389,27 @@ def _restat(st: LedgerState, paths: Paths) -> None:
     `restore`'s own preflight, which reads this same object — has to branch on
     the directory as it is once the copies are gone, not as it was before."""
     for op, b in st.backups.items():
-        f = paths.backup_file(op)
-        b["present"] = f.is_file()
-        b["size"] = f.stat().st_size if b["present"] else None
+        b["present"], b["size"] = _presence(paths.backup_file(op))
     st.broken = {wf for wf, reg in st.registrations.items()
-                 if not paths.backup_file(reg["backup_id"]).is_file()}
+                 if not _presence(paths.backup_file(reg["backup_id"]))[0]}
+
+
+def _presence(f: Path):
+    """-> (present, size-or-None). THREE STATES, NOT TWO: only
+    `FileNotFoundError` means the copy is gone. Any other `OSError` (EACCES,
+    EIO) means it could not be read back, and is answered as present with an
+    unknown size -- never as absent, which would call a copy erased or a
+    registration broken on no evidence. `Path.is_file()` is not used: on
+    Python 3.11 it raises that `OSError` out of settlement, and on later
+    versions it swallows it into False."""
+    try:
+        st = os.stat(str(f))
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return True, None
+    return stat.S_ISREG(st.st_mode), (st.st_size if stat.S_ISREG(st.st_mode)
+                                      else None)
 
 
 def settle(conn, paths: Paths, *, hold: bool = True):
