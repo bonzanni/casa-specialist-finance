@@ -65,6 +65,7 @@ import hashlib
 import json
 import os
 import platform
+import sqlite3
 import time
 from pathlib import Path
 
@@ -793,8 +794,25 @@ def _entry():
 
 
 def _vacuum(c) -> None:
-    """Real deletes plus VACUUM, not tombstones."""
+    """Real deletes plus VACUUM, not tombstones — and then the write-ahead log.
+
+    The ledger runs in WAL mode, so every deleted row was first written to
+    `<ledger>-wal`, and VACUUM reclaims only the main file: the old frames stay
+    in the log until a checkpoint truncates it (issue #41). A reader holding a
+    snapshot stops the checkpoint short and SQLite says so in the busy flag;
+    that is raised, not ignored, so `_reclaim` reports the erasure unfinished.
+
+    The note index goes first. It is external-content FTS5, whose 'delete'
+    writes a tombstone into a new segment and leaves the old segment — the
+    deleted note's text — a live row of `notes_fts_data` that VACUUM keeps.
+    A rebuild re-reads `transaction_notes`, so only surviving notes remain.
+    """
+    c.execute("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
     c.execute("VACUUM")
+    busy = c.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    if busy:
+        raise sqlite3.OperationalError(
+            "another connection kept the write-ahead log from being truncated")
 
 
 # --------------------------------------------------------------------------
