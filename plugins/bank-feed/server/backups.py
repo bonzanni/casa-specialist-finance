@@ -595,7 +595,6 @@ class IndexHandle:
         except OSError as exc:
             try:
                 os.ftruncate(self.fd, start)
-                _index_fsync(self.fd, settling=self.settling)
             except OSError as cut:
                 self._poisoned = True
                 log = _LOG.get()
@@ -605,9 +604,15 @@ class IndexHandle:
                     log.unverified += 1
                 raise BackupError(
                     "the backup index could not be written (%s) and the "
-                    "partial record could not be removed (%s); the next "
-                    "settlement removes it" % (_oserr(exc), _oserr(cut)),
-                    written=None) from None
+                    "partial record could not be removed (%s)"
+                    % (_oserr(exc), _oserr(cut)), written=None) from None
+            # THE CUT RETURNED: the partial record is gone, and the append is
+            # "not written". Whether the cut is durable is state (the call's
+            # index-level flush fact), not a different outcome of this write.
+            try:
+                _index_fsync(self.fd, settling=self.settling)
+            except OSError:
+                pass
             raise BackupError("the backup index could not be written: %s"
                               % _oserr(exc), written=False) from None
         # THE BYTES LANDED: settlement's record is an effect from here, flushed

@@ -648,6 +648,40 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertEqual(oct(self.paths.backups_dir.stat().st_mode & 0o777),
                          "0o700", "the reset itself still happened")
 
+    def test_an_append_cut_back_cleanly_is_not_written_whatever_the_flush(self):
+        # Astra, v5.2 code round 3: the cut returned but its fsync failed,
+        # and the refusal said the partial record "could not be removed" —
+        # false: the file ends at its previous newline.
+        self.backups_taken(1)
+        conn = self.warm()
+        conn.execute("BEGIN IMMEDIATE")
+        _, handle = backups.settle(conn, self.paths)
+        before = self.paths.index.read_bytes()
+        real_write, real_fsync = backups._write_whole, os.fsync
+
+        def write(fd, data):
+            real_write(fd, data[:9])
+            raise OSError(28, "No space left on device")
+        armed = [True]
+
+        def fsync(fd):
+            if armed[0] and os.readlink("/proc/self/fd/%d" % fd).endswith(
+                    self.paths.index.name):
+                armed[0] = False
+                raise OSError(5, "Input/output error")
+            return real_fsync(fd)
+        try:
+            with mock.patch.object(backups, "_write_whole", write), \
+                    mock.patch.object(backups.os, "fsync", fsync):
+                with self.assertRaises(backups.BackupError) as cm:
+                    handle.append("backup", "7777777777777777", "aborted")
+        finally:
+            conn.execute("ROLLBACK")
+            handle.close()
+        self.assertIs(cm.exception.written, False)
+        self.assertNotIn("could not be removed", str(cm.exception))
+        self.assertEqual(self.paths.index.read_bytes(), before)
+
     def test_two_cuts_are_counted(self):
         # Astra, v5.2 code round 1: two successful cuts read as one.
         self.warm()
@@ -703,7 +737,9 @@ class TestToolsWordTheirOwnWritesThroughOneRenderer(unittest.TestCase):
     wording index state three times): a tool may put a write outcome into
     words only through `backups.record_event`. Every read of `.written` or
     `.index_written` in a tool module is an argument to that call, or a
-    comparison against False (a branch, never a sentence)."""
+    comparison against False or a bare branch test (a branch, never a
+    sentence). `index_warning` is the erasure's written-but-unflushed
+    terminal record, the third carrier (Astra, v5.2 code round 3)."""
 
     def test_every_written_outcome_goes_through_record_event(self):
         bad = []
@@ -715,9 +751,14 @@ class TestToolsWordTheirOwnWritesThroughOneRenderer(unittest.TestCase):
                     parents[ch] = node
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Attribute)
-                        and node.attr in ("written", "index_written")):
+                        and node.attr in ("written", "index_written",
+                                          "index_warning")):
                     continue
                 up, ok = parents.get(node), False
+                # A bare branch test (`if er.index_warning:`) chooses whether
+                # to speak and words nothing.
+                if isinstance(up, (ast.If, ast.IfExp)) and up.test is node:
+                    ok = True
                 while up is not None and not ok:
                     if (isinstance(up, ast.Call)
                             and isinstance(up.func, ast.Attribute)

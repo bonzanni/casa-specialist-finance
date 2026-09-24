@@ -1126,10 +1126,10 @@ def _second_sweep(paths, handle, state, erase_op):
                 "taken while they answered holds the session rows destroyed "
                 "here." % er.went())
     if er.index_warning:
+        # The sweep's own terminal append, as an event (#48).
         line = ((line + " ") if line else "") + (
-            "The index record closing that sweep could not be flushed (%s) — "
-            "it is readable and settles at the next listing."
-            % er.index_warning)
+            "Of that sweep, %s." % backups.record_event(
+                "completion", True, er.index_warning))
     return line
 
 
@@ -1444,10 +1444,9 @@ def delete_all_data(args: dict) -> str:
             # durability, not in the erasure, and saying the sweep "stopped
             # part way" — which is what this used to print — described an empty
             # directory as one still holding copies.
-            done += (" Every backup copy was erased; the index record "
-                     "confirming it could not be flushed (%s) — it is readable "
-                     "and settles at the next listing."
-                     % erased_backups.index_warning)
+            done += (" Every backup copy was erased; %s."
+                     % backups.record_event("completion", True,
+                                            erased_backups.index_warning))
 
     # PAST THIS LINE THIS TOOL DOES NOT RAISE. Everything below is either
     # irreversible at a bank or already committed here, so an exception would

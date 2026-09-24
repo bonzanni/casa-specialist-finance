@@ -2772,10 +2772,10 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertNotIn("stopped part way", out)
         self.assertNotIn("WARNING — the local ledger IS erased", out)
         self.assertIn("2 backup copy(ies) were erased too", out)
-        self.assertIn("Every backup copy was erased; the index record "
-                      "confirming it could not be flushed (the backup index "
-                      "could not be flushed: ENOSPC) — it is readable and "
-                      "settles at the next listing.", out)
+        self.assertIn("Every backup copy was erased; its completion record "
+                      "was written but could not be flushed (the backup "
+                      "index could not be flushed: ENOSPC).", out)
+        self.assertNotIn("readable", out)
         # And the next call settles over it without refusing anything.
         self.assertIn("Restore generation: 0", call("list_backups"))
 
