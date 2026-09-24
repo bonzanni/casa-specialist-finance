@@ -427,6 +427,30 @@ def _now_s() -> float:
     return time.time()
 
 
+def authorization_in_progress(c) -> bool:
+    """Is any bank authorization possibly still completing? (issues #47, #51)
+
+    `purge` and `restore_backup` both rotate every account's incarnation, and
+    a renewal between its binding switch and its reply reads that rotation as
+    "nothing switched" -- telling the operator to unlink the consent that is
+    now live. So both wait while any attempt carries a lease token that a
+    collector holds (lease unexpired, however old the attempt) or that a
+    successor could still steal (expired, but casa can still redeliver: the
+    attempt can be answered up to PENDING_TTL_S after minting, the result
+    artifact lives RESULT_TTL_S after that, and a steal needs the lease
+    expired for a LEASE_TTL_S). Past that horizon nothing can resume the
+    attempt, and the row is left exactly as it is: clearing its token would
+    strand a collector that was only stalled, with a half-written binding.
+    One predicate for both tools, so the two waits cannot drift apart.
+    """
+    now = time.time()
+    horizon = PENDING_TTL_S + callbacks.RESULT_TTL_S + callbacks.LEASE_TTL_S
+    return c.execute(
+        "SELECT 1 FROM attempts WHERE lease_token IS NOT NULL AND"
+        " (COALESCE(lease_expiry, 0) > ? OR COALESCE(created_at, 0) > ?)"
+        " LIMIT 1", (now, now - horizon)).fetchone() is not None
+
+
 def _utcnow_iso() -> str:
     """Derived from `_now_s`, deliberately.
 

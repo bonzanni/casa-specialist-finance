@@ -3939,3 +3939,59 @@ class TestPurgeWaitsForAnAuthorization(PurgeRestartBase):
         self.assertIn("Purged the whole ledger", out)
         self.assertEqual(dict(self.raw.execute(
             "SELECT * FROM attempts").fetchone()), before)
+
+
+class TestRestoreWaitsForAnAuthorization(TestPurgeWaitsForAnAuthorization):
+    """Issue #51: a restore rotates every account's incarnation exactly as a
+    purge does, so it waits on the same horizon -- not only on an unexpired
+    lease. The purge tests are inherited and still run here; these add the
+    restore's."""
+
+    def setUp(self):
+        super().setUp()
+        self.bid = call("backup", reason="manual").split()[1]
+        self.tx(ik="new", booking_date="2026-06-01")
+        self.files = self.backup_files()
+        self.index = self.paths().index.read_text()
+
+    def assert_restore_refused(self, out):
+        self.assertIn("authorization is in progress", out)
+        self.assertIn("Nothing was changed", out)
+        self.assertEqual(self.count("transactions"), 2)
+        self.assertEqual(self.backup_files(), self.files)
+        self.assertEqual(self.paths().index.read_text(), self.index)
+
+    def assert_refused(self, out):
+        # The inherited purge refusals, re-based on this setUp's ledger.
+        self.assertIn("authorization is in progress", out)
+        self.assertIn("Nothing has been changed", out)
+        self.assertEqual(self.count("transactions"), 2)
+        self.assertEqual(self.backup_files(), self.files)
+
+    def test_restore_a_live_lease_refuses_however_old_the_attempt(self):
+        self.leased(created_ago=self.horizon() * 3, expires_in=60)
+        self.assert_restore_refused(call("restore_backup", backup_id=self.bid))
+
+    def test_restore_an_expired_lease_inside_the_horizon_refuses(self):
+        # The case #51 is about: before it, only an unexpired lease refused.
+        self.leased(created_ago=self.horizon() - 60, expires_in=-60)
+        self.assert_restore_refused(call("restore_backup", backup_id=self.bid))
+
+    def test_restore_past_the_horizon_runs_and_leaves_the_attempt_alone(self):
+        self.leased(created_ago=self.horizon() + 60, expires_in=-600)
+        before = dict(self.raw.execute("SELECT * FROM attempts").fetchone())
+        out = call("restore_backup", backup_id=self.bid)
+        self.assertIn("Restored backup %s" % self.bid, out)
+        self.assertEqual(self.count("transactions"), 1)
+        self.assertEqual(dict(self.raw.execute(
+            "SELECT * FROM attempts").fetchone()), before)
+
+    def test_both_tools_ask_the_one_shared_predicate(self):
+        # Shared, not copied: forcing the one predicate true refuses both
+        # tools with no attempt row at all, so neither carries its own.
+        with mock.patch.object(tools_auth, "authorization_in_progress",
+                               return_value=True):
+            self.assert_restore_refused(
+                call("restore_backup", backup_id=self.bid))
+            self.assert_refused(
+                call("purge", before_date="all", user_work="keep"))
