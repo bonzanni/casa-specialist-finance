@@ -3831,6 +3831,56 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
         self.assertEqual(backup_state(self.raw, pre_erasure_id(out)),
                          "committed")
 
+    def test_an_unflushed_index_record_is_called_readable_not_missing(self):
+        real = backups.IndexHandle.append
+
+        def flush_fails(handle, *fields):
+            real(handle, *fields)
+            if fields[:1] == ("backup",) and fields[2:3] == ("committed",):
+                raise backups.BackupError("the backup index could not be "
+                                          "flushed: EIO", written=True)
+        with mock.patch.object(backups.IndexHandle, "append", flush_fails):
+            out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertIn("written but could not be flushed", out)
+        self.assertIn("it is readable now", out)
+        self.assertNotIn("could not be written", out)
+        self.assertEqual(backup_state(self.raw, pre_erasure_id(out)),
+                         "committed")
+
+    def test_a_prune_that_fails_after_removing_a_copy_names_it(self):
+        with mock.patch.object(backups, "prune", lambda *a, **k: []):
+            for i in range(backups.ERASURE_KEEP):
+                self.tx(ik="again%d" % i, booking_date="2021-06-01")
+                call("purge", before_date="2024-01-01", user_work="keep")
+        oldest = min((b["seq"], op) for op, b in self._state().backups.items()
+                     if b["reason"] == backups.ERASURE_REASON)[1]
+        real = backups.IndexHandle.append
+
+        def prune_record_fails(handle, *fields):
+            if fields[:1] == ("prune",):
+                raise backups.BackupError("the backup index could not be "
+                                          "written: ENOSPC")
+            return real(handle, *fields)
+        self.tx(ik="last", booking_date="2021-06-01")
+        with mock.patch.object(backups.IndexHandle, "append",
+                               prune_record_fails):
+            out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertFalse(backups.paths_for(tools_read.ledger_path(
+            self.raw)).backup_file(oldest).exists())
+        self.assertIn("Retention stopped part way", out)
+        self.assertIn("after removing the oldest pre-erasure copy %s"
+                      % oldest, out)
+        self.assertNotIn("No other backup copy was changed", out)
+
+    def _state(self):
+        self.raw.execute("BEGIN IMMEDIATE")
+        try:
+            state, handle = backups.settle(self.raw, self.paths())
+            handle.close()
+        finally:
+            self.raw.execute("ROLLBACK")
+        return state
+
     def test_the_backup_tool_does_not_accept_the_erasure_reason(self):
         out = call("backup", reason=backups.ERASURE_REASON)
         self.assertIn("reason must be", out)

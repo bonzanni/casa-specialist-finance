@@ -787,9 +787,19 @@ def prune(paths: Paths, handle: IndexHandle, *, classes=None) -> list:
             except OSError as exc:
                 # The module's contract: every failure leaves as a
                 # BackupError carrying our own text, never a raw OSError.
-                raise BackupError("retention could not remove backup %s: %s"
-                                  % (op, _oserr(exc))) from None
-            handle.append("prune", op, "done")
+                err = BackupError("retention could not remove backup %s: %s"
+                                  % (op, _oserr(exc)))
+                err.pruned = list(pruned)
+                raise err from None
+            try:
+                handle.append("prune", op, "done")
+            except BackupError as exc:
+                # THE FILE IS ALREADY GONE. A caller told only "retention
+                # could not prune" would report a removal that happened as
+                # one that did not, so the copies removed so far -- this one
+                # included -- travel with the refusal.
+                exc.pruned = pruned + [op]
+                raise
             pruned.append(op)
     return pruned
 

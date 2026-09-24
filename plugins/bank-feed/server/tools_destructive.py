@@ -408,7 +408,11 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
     have removed an older copy either, or "nothing was erased" is false of
     the backups directory.
 
-    -> `(pruned ids, retention error or None, index error or None)`. The two
+    -> `(pruned ids, retention error or None, index error or None)`; the
+    index error is `(text, written)` with `BackupError.written`'s three
+    states, because "not written", "written but not flushed" and "possibly
+    torn" are three different states of the index and each needs its own
+    sentence. The two
     failures are different facts: a terminal record that could not be written
     leaves the copy `pending`, which the next settlement closes `committed`
     because its file is present, and NO prune ran; a prune that failed ran
@@ -421,7 +425,7 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
             handle.append("backup", b.op_id,
                           "committed" if committed else "orphan")
         except backups.BackupError as exc:
-            return [], None, str(exc)
+            return [], None, (str(exc), exc.written)
         if not committed:
             return [], None, None
         try:
@@ -429,7 +433,8 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
                                      classes=(backups.ERASURE_REASON,))
             return b.pruned, None, None
         except backups.BackupError as exc:
-            return [], str(exc), None
+            # Copies removed before the failure are still removed.
+            return list(getattr(exc, "pruned", None) or []), str(exc), None
     finally:
         handle.close()
 
@@ -456,13 +461,27 @@ def _backup_line(b, state, finished, restores) -> str:
     line = ("Backup %s was taken just before this erasure: restore_backup "
             "backup_id=%s puts back %s." % (b.op_id, b.op_id, restores))
     if index_error:
-        line += (" Its index record could not be written (%s); the copy is "
-                 "complete, and the next settlement (any backup, restore, "
-                 "listing or workflow write) records it." % index_error)
+        text, written = index_error
+        if written is True:
+            line += (" Its index record was written but could not be flushed "
+                     "(%s); it is readable now." % text)
+        elif written is None:
+            line += (" Its index record may be partially written (%s); the "
+                     "copy is complete, and the next settlement (any backup, "
+                     "restore, listing or workflow write) recovers the "
+                     "record." % text)
+        else:
+            line += (" Its index record could not be written (%s); the copy "
+                     "is complete, and the next settlement (any backup, "
+                     "restore, listing or workflow write) records it." % text)
     settled = backups.settled_note(state.settled if state is not None else None)
     if retention_error:
-        line += (" Retention could not prune older pre-erasure copies (%s); "
-                 "the backup itself is complete." % retention_error)
+        line += (" Retention stopped part way (%s)%s; the backup itself is "
+                 "complete." % (retention_error,
+                                ", after removing the oldest pre-erasure "
+                                "cop%s %s" % ("y" if len(pruned) == 1 else
+                                              "ies", ", ".join(pruned))
+                                if pruned else ""))
     elif pruned:
         line += (" Retention removed the oldest pre-erasure cop%s: %s."
                  % ("y" if len(pruned) == 1 else "ies", ", ".join(pruned)))
