@@ -87,7 +87,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         # Said once: the next call in the same process has nothing to say.
         again = dispatch("list_accounts", data_dir=self.data)
         self.assertNotIn(LEAD, again)
-        # And the log is gone with the call (Astra, code round 1): a direct
+        # And the log is gone with the call: a direct
         # call after it records into nothing, and its "nothing" is plain.
         self.assertIsNone(backups._LOG.get())
 
@@ -123,7 +123,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
             "as aborted.\n" % op), out)
 
     def test_forgetting_an_unknown_account_does_not_deny_what_settlement_removed(self):
-        # Terra, code round 1: "so nothing was deleted" stood under a
+        # "so nothing was deleted" stood under a
         # settlement sentence naming a removed copy.
         [bid] = self.backups_taken(1)
         self.append_index("erase abcdefabcdefabcd pending")
@@ -137,7 +137,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         self.assertNotIn("nothing was deleted", out)
 
     def test_permissions_settlement_resets_are_reported(self):
-        # Terra, code round 3: settlement resets the backups directory to
+        # settlement resets the backups directory to
         # 0700 and the index to 0600; a refusal then said "Nothing was
         # changed." over the reset.
         self.backups_taken(1)
@@ -156,7 +156,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
 
     def test_a_refusal_before_the_ledger_opens_says_only_what_it_did(self):
         # The argument check runs before the tool opens the ledger. The
-        # claim is the always-scoped one (operator ruling): true whatever
+        # claim is the always-scoped one (by design): true whatever
         # settlement did, and here nothing settled at all.
         self.backups_taken(1)
         self.append_index("backup 1111111111111111 pending reason=manual")
@@ -191,7 +191,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
             out)
 
     def test_an_open_time_commit_failure_does_not_fail_the_open(self):
-        # Terra, round 2: SQLite can roll back by itself on a failed COMMIT,
+        # SQLite can roll back by itself on a failed COMMIT,
         # and the unconditional ROLLBACK then raised out of the open.
         self.backups_taken(1)
         real = store.open_db
@@ -217,7 +217,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
 
 class TestEveryExitReportsTheWarmSettlement(Cold):
     def test_an_exception_after_settlement_still_names_what_went(self):
-        # Astra, round 1: a failure after settlement (here the listing's own
+        # a failure after settlement (here the listing's own
         # rendering) reached the operator as a bare error, and the copy the
         # settlement removed went unmentioned.
         [bid] = self.backups_taken(1)
@@ -232,7 +232,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
         self.assertIsNone(backups._LOG.get(), "an exception exit resets too")
 
     def test_a_successful_restore_names_the_record_its_settlement_closed(self):
-        # Astra, round 1: the restore's success reply never rendered any
+        # the restore's success reply never rendered any
         # settlement, so a record it closed went unmentioned.
         [bid] = self.backups_taken(1)
         self.warm()
@@ -247,7 +247,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
             "aborted.\n"), out)
 
     def test_a_backup_whose_rename_fails_closes_its_own_record(self):
-        # Astra, round 3: the rename failing left this call's own `pending`
+        # the rename failing left this call's own `pending`
         # line behind, so "this call's own operation changed nothing" was
         # false of the index.
         self.warm()
@@ -267,7 +267,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
         self.assertEqual(list(self.paths.backups_dir.glob("*.partial")), [])
 
 class TestUncertainWritesAreWordedAsUncertain(Cold):
-    """Astra, code round 1: a write whose outcome is unknown (`written`
+    """a write whose outcome is unknown (`written`
     None) is reported as possible, never as done, and never counted twice."""
 
     def _gone_copy_and_pending_erasure(self):
@@ -332,7 +332,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             "settlement cuts.\n"), out)
 
     def test_a_torn_header_repaired_later_in_the_call_is_not_reported(self):
-        # Astra, code round 2: the open-time pass tore the header, the
+        # the open-time pass tore the header, the
         # listing's own settlement wrote it whole, and the reply still
         # published the superseded residue.
         self.warm()
@@ -362,7 +362,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertIn("Restore generation: 0", out)
 
     def test_a_closure_retried_in_the_same_call_is_said_once(self):
-        # Astra, code round 2: the uncertain open-time closure and the
+        # the uncertain open-time closure and the
         # listing's successful retry were both published.
         self.backups_taken(1)
         self.append_index("backup 1111111111111111 pending reason=manual")
@@ -383,7 +383,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertEqual(out.count("1111111111111111 as aborted"), 1, out)
 
     def test_a_torn_header_the_retry_removed_is_not_reported(self):
-        # Astra, code round 3: both header writes tore; the first cut-back
+        # both header writes tore; the first cut-back
         # failed, the retry's cut removed the fragment and its own cut-back
         # succeeded. The index is empty — nothing of it is residue.
         self.warm()
@@ -411,7 +411,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertNotIn("ended in an incomplete line", out)
 
     def test_a_failed_flush_a_later_flush_covered_is_not_reported(self):
-        # Terra and Astra, code round 3: an fsync flushes every earlier
+        # an fsync flushes every earlier
         # write to the file, so a later successful one supersedes the
         # warning. Here the open-time cut's flush fails; the backup's own
         # appends then flush the index.
@@ -438,7 +438,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
     def test_an_unflushed_completion_a_later_flush_covered_is_not_reported(self):
         [bid] = self.backups_taken(1)
         self.append_index("erase abcdefabcdefabcd pending")
-        # Astra, v5.2 code round 1: the fault goes into the REAL fsync of the
+        # the fault goes into the REAL fsync of the
         # completion record, so the unflushed state is actually reached; the
         # backup's own appends then flush the index.
         real = os.fsync
@@ -496,7 +496,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "flushed, so it may not survive a power loss.", out)
 
     def test_a_tools_own_torn_write_is_the_state_at_the_last_release(self):
-        # Terra, v5.1: state read only at settlement's exit was stale after
+        # state read only at settlement's exit was stale after
         # the tool's own later write. It is read at every release of the
         # index lock, so the backup's own torn `pending` line is what the
         # reply reports, as an observation.
@@ -521,7 +521,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertNotIn(LEAD, out, "the torn write was the tool's own")
 
     def test_a_mode_reset_that_failed_is_not_claimed(self):
-        # Terra and Astra, v3 round 4: the reset was logged before the chmod.
+        # the reset was logged before the chmod.
         self.backups_taken(1)
         os.chmod(str(self.paths.backups_dir), 0o755)
         real = os.chmod
@@ -537,7 +537,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                          "0o755")
 
     def test_an_unverified_write_is_reported_when_the_state_is_unreadable(self):
-        # Astra, v5 round 1: an unknown-outcome write, with the final read
+        # an unknown-outcome write, with the final read
         # failing too, went silent.
         self.backups_taken(1)
         self.append_index("backup 6666666666666666 pending reason=manual")
@@ -567,7 +567,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertNotIn("as aborted", out)
 
     def test_an_index_another_process_created_is_not_claimed(self):
-        # Terra, v5.2 code round 1: creation was inferred from a pre-check,
+        # creation was inferred from a pre-check,
         # so an index another process created in between was claimed. It is
         # now the exclusive create's own success, and a new index's header
         # write is logged as the effect it is.
@@ -592,7 +592,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "backup index; wrote the backup index's header.", out)
 
     def test_a_release_after_a_failed_fchmod_is_observed(self):
-        # Astra, v5.2 code round 1: `_acquire_index` released the lock on
+        # `_acquire_index` released the lock on
         # its fchmod failure without the observation every release makes.
         [bid] = self.backups_taken(1)
         self.append_index("erase abcdefabcdefabcd pending")
@@ -611,7 +611,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "not finished: 1 whole copy still present", out)
 
     def test_a_directory_another_process_created_is_not_claimed(self):
-        # Terra, v5.2 code round 2: creation was inferred from an existence
+        # creation was inferred from an existence
         # check that raced another process's mkdir.
         self.warm()
         real_mkdir = pathlib.Path.mkdir
@@ -626,7 +626,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertRegex(out, r"Backup [0-9a-f]{16} written")
 
     def test_an_unreadable_mode_claims_no_reset_and_no_creation(self):
-        # Astra, v5.2 code round 2: a failed existence check read as
+        # a failed existence check read as
         # "absent", inventing a creation and hiding a real reset.
         self.backups_taken(1)
         os.chmod(str(self.paths.backups_dir), 0o755)
@@ -649,7 +649,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                          "0o700", "the reset itself still happened")
 
     def test_an_append_cut_back_cleanly_is_not_written_whatever_the_flush(self):
-        # Astra, v5.2 code round 3: the cut returned but its fsync failed,
+        # the cut returned but its fsync failed,
         # and the refusal said the partial record "could not be removed" —
         # false: the file ends at its previous newline.
         self.backups_taken(1)
@@ -683,7 +683,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertEqual(self.paths.index.read_bytes(), before)
 
     def test_settlements_cut_back_fragment_is_an_effect(self):
-        # Astra, v5.2 code round 5: settlement's closure wrote nine bytes,
+        # settlement's closure wrote nine bytes,
         # the rest failed, and the cut-back removed them: a cut, unreported.
         self.backups_taken(1)
         self.append_index("backup 8888888888888888 pending reason=manual")
@@ -707,7 +707,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "index", out)
 
     def test_settlements_header_cut_back_is_an_effect(self):
-        # Astra, v5.2 code round 6: the header path cut back nine landed
+        # the header path cut back nine landed
         # bytes and said nothing.
         self.warm()
         self._close()
@@ -731,7 +731,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "index", out)
 
     def test_a_write_that_landed_nothing_claims_no_cut(self):
-        # Terra, v5.2 code round 6: a write that failed before landing a
+        # a write that failed before landing a
         # byte, with the post-failure fstat failing too, was claimed as a
         # cut. The proof is `os.write`'s own count.
         self.backups_taken(1)
@@ -763,7 +763,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertNotIn("cut an incomplete last line", out)
 
     def test_an_invalid_index_is_not_read_as_a_pending_erasure(self):
-        # Terra, v5.2 code round 5: a bad header followed by an
+        # a bad header followed by an
         # erasure-shaped line read as "a recorded erasure" at the release,
         # though settlement rejects that index.
         self.warm()
@@ -778,7 +778,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertNotIn("While an erasure is pending", out)
 
     def test_two_cuts_are_counted(self):
-        # Astra, v5.2 code round 1: two successful cuts read as one.
+        # two successful cuts read as one.
         self.warm()
         self._close()
         self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
@@ -828,13 +828,13 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
 
 
 class TestToolsWordTheirOwnWritesThroughOneRenderer(unittest.TestCase):
-    """Rule 2b, structurally (Astra, v5.2 code rounds 1-2 found a tool
-    wording index state three times): a tool may put a write outcome into
-    words only through `backups.record_event`. Every read of `.written` or
-    `.index_written` in a tool module is an argument to that call, or a
+    """Tools report only their own events, never the index's state, and they
+    may put a write outcome into words only through `backups.record_event`.
+    Every read of `.written` or `.index_written` in a tool module is an
+    argument to that call, or a
     comparison against False or a bare branch test (a branch, never a
     sentence). `index_warning` is the erasure's written-but-unflushed
-    terminal record, the third carrier (Astra, v5.2 code round 3)."""
+    terminal record, the third carrier."""
 
     def test_every_written_outcome_goes_through_record_event(self):
         bad = []

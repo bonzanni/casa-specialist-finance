@@ -2638,7 +2638,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # what this failure cannot say.
         self.assertIn("the erasure of the backup files stopped part way", out)
         # Its own first unlink is counted though a plain BackupError (the
-        # failed prune append) stopped the sweep (Astra, v5.2 code round 4).
+        # failed prune append) stopped the sweep.
         self.assertIn("1 backup copy(ies) were erased too", out)
         # The settlement that opens the session-row sweep, later in the same
         # call, completes the stalled erasure — and the reply says so, below
@@ -3259,7 +3259,7 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
                       "not be removed", out)
 
     def test_the_second_sweeps_torn_terminal_record_is_not_called_unwritten(self):
-        # Terra, v5.2 code round 4: the second sweep hard-coded "could not be
+        # the second sweep hard-coded "could not be
         # written" for a terminal append that failed part way (`written`
         # None), whose bytes may still be in the index.
         self._populate()

@@ -1120,7 +1120,7 @@ def _second_sweep(paths, handle, state, erase_op):
     except backups.BackupError as exc:
         # The sweep's own event, with what it removed before stopping;
         # whether its erasure is still pending is the dispatcher's
-        # lock-release sentence (Astra, v5.2 r4).
+        # lock-release sentence.
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
                 "banks were asked stopped part way (%s)%s."
@@ -1321,7 +1321,7 @@ def delete_all_data(args: dict) -> str:
         # survives it and the restore generation stays monotonic.
         # The account is allocated HERE and passed in, so a plain
         # BackupError raised after some unlinks (a failed `prune` append)
-        # still carries what this call's own sweep removed (Astra, v5.2 r4).
+        # still carries what this call's own sweep removed.
         erased_backups = backups.Erasure()
         try:
             erased_backups = backups.erase_backups(paths, handle, backup_state,

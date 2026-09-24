@@ -174,7 +174,7 @@ def _observe(paths) -> dict:
         obs["partial_tail"] = bool(raw) and not raw.endswith(b"\n")
         cut = raw[:raw.rfind(b"\n") + 1] if raw else b""
         # Through settlement's own parser: an index settlement rejects is
-        # "unknown" here, never a naive reading of its lines (Terra, r5).
+        # "unknown" here, never a naive reading of its lines.
         pending = set()
         for rec in (_parse(cut) if cut else []):
             if rec["kind"] == "erase":
@@ -445,7 +445,7 @@ def _write_whole(fd: int, data: bytes) -> None:
 
     The OSError it raises carries `landed`: how many bytes `os.write`
     returned before the failure — the only proof a later cut-back removed
-    anything (Terra, v5.2 code round 6)."""
+    anything."""
     landed = 0
     try:
         while data:
@@ -462,8 +462,7 @@ def _write_whole(fd: int, data: bytes) -> None:
 def _write_or_cut(fd: int, data: bytes, start: int, *, settling: bool) -> None:
     """Write every byte of `data`, or cut the file back to `start`. THE ONE
     write-and-cut-back of the index: its two callers (a record append, the
-    header) each reported the cut differently until it lived here (Astra,
-    v5.2 code rounds 5-6).
+    header) each reported the cut differently until it lived here.
 
     On failure the OSError is re-raised carrying `cut`: None when the
     cut-back returned, else the OSError of the cut that failed. For a
