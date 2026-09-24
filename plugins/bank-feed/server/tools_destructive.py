@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import time as _time
 
 import apply
 import backups
@@ -363,56 +364,366 @@ def unlink_bank(args: dict) -> str:
     return "\n".join(lines)
 
 
+#: `purge`'s `user_work` values. Required, no default: the choice is all or
+#: nothing, and an erasure the operator did not choose explicitly is the one
+#: thing this tool must not infer.
+USER_WORK = ("keep", "erase")
+
+#: The `sync_state.last_error` a whole-ledger purge leaves on every account's
+#: transactions row, beside `completeness='partial'`. It is what the reads and
+#: `sync` print about the gap, so it names both ways back.
+PURGED_NOTE = ("history purged (purge before_date=all) on %s: restore_backup "
+               "backup_id=%s puts it back locally; a fresh bank approval "
+               "refetches what lies inside the plugin's request window and "
+               "the bank's own retention")
+
+
+def _authorization_in_progress(c) -> bool:
+    """Is any bank authorization possibly still completing? (issue #47)
+
+    A purge rotates every account's incarnation, and a renewal between its
+    binding switch and its reply reads that rotation as "nothing switched" --
+    telling the operator to unlink the consent that is now live. So a purge
+    waits while any attempt carries a lease token that a collector holds
+    (lease unexpired, however old the attempt) or that a successor could
+    still steal (expired, but casa can still redeliver: the attempt can be
+    answered up to PENDING_TTL_S after minting, the result artifact lives
+    RESULT_TTL_S after that, and a steal needs the lease expired for a
+    LEASE_TTL_S). Past that horizon nothing can resume the attempt, and the
+    row is left exactly as it is: clearing its token would strand a collector
+    that was only stalled, with a half-written binding.
+    """
+    now = _time.time()
+    horizon = (tools_auth.PENDING_TTL_S + callbacks.RESULT_TTL_S
+               + callbacks.LEASE_TTL_S)
+    return c.execute(
+        "SELECT 1 FROM attempts WHERE lease_token IS NOT NULL AND"
+        " (COALESCE(lease_expiry, 0) > ? OR COALESCE(created_at, 0) > ?)"
+        " LIMIT 1", (now, now - horizon)).fetchone() is not None
+
+
+def _finish_pre_erasure(paths, handle, b, *, committed: bool):
+    """Record the copy's terminal state, then prune its OWN class only -- and
+    only after an erasure that committed: a call that erased nothing must not
+    have removed an older copy either, or "nothing was erased" is false of
+    the backups directory.
+
+    -> `(pruned ids, retention error or None, index error or None)`; the
+    index error is `(text, written)` with `BackupError.written`'s three
+    states, because "not written", "written but not flushed" and "possibly
+    torn" are three different states of the index and each needs its own
+    sentence. The two
+    failures are different facts: a terminal record that could not be written
+    leaves the copy `pending`, which the next settlement closes `committed`
+    because its file is present, and NO prune ran; a prune that failed ran
+    after a recorded copy. Never raises: the copy is already real.
+
+    `backups.finish_backup` is the same two steps; they are taken apart here
+    only so a failure of each can be told apart."""
+    try:
+        try:
+            handle.append("backup", b.op_id,
+                          "committed" if committed else "orphan")
+        except backups.BackupError as exc:
+            return [], None, (str(exc), exc.written)
+        if not committed:
+            return [], None, None
+        try:
+            b.pruned = backups.prune(paths, handle,
+                                     classes=(backups.ERASURE_REASON,))
+            return b.pruned, None, None
+        except backups.BackupError as exc:
+            # Copies removed before the failure are still removed.
+            return list(getattr(exc, "pruned", None) or []), str(exc), None
+    finally:
+        handle.close()
+
+
+def _rolled_back(head: str, b, state) -> str:
+    """A scoped erasure that rolled back: nothing of the ledger went, and no
+    backup copy was pruned (`_finish_pre_erasure` prunes nothing then) -- but
+    this call's settlement may have completed an earlier interrupted erasure
+    on the way, and that is said rather than covered by "nothing"."""
+    text = ("%s Backup %s, taken for it, is kept (it is a copy of the "
+            "unchanged ledger)." % (head, b.op_id))
+    settled = backups.settled_note(state.settled if state is not None else None)
+    return text + " " + settled if settled else text
+
+
+def _backup_line(b, state, finished, restores) -> str:
+    """The reply's account of the backup copies (issue #47): the copy this
+    call took and what a restore of it brings back, and what else changed in
+    the backups directory -- which is nothing, unless retention pruned an
+    older pre-erasure copy or this call's settlement completed an earlier
+    interrupted total erasure. "No other backup copy was changed" is said
+    only when both are false."""
+    pruned, retention_error, index_error = finished
+    line = ("Backup %s was taken just before this erasure: restore_backup "
+            "backup_id=%s puts back %s." % (b.op_id, b.op_id, restores))
+    if index_error:
+        text, written = index_error
+        if written is True:
+            line += (" Its index record was written but could not be flushed "
+                     "(%s); it is readable now." % text)
+        elif written is None:
+            line += (" Its index record may be partially written (%s); the "
+                     "copy is complete, and the next settlement (any backup, "
+                     "restore, listing or workflow write) recovers the "
+                     "record." % text)
+        else:
+            line += (" Its index record could not be written (%s); the copy "
+                     "is complete, and the next settlement (any backup, "
+                     "restore, listing or workflow write) records it." % text)
+    settled = backups.settled_note(state.settled if state is not None else None)
+    if retention_error:
+        line += (" Retention stopped part way (%s)%s; the backup itself is "
+                 "complete." % (retention_error,
+                                ", after removing the oldest pre-erasure "
+                                "cop%s %s" % ("y" if len(pruned) == 1 else
+                                              "ies", ", ".join(pruned))
+                                if pruned else ""))
+    elif pruned:
+        line += (" Retention removed the oldest pre-erasure cop%s: %s."
+                 % ("y" if len(pruned) == 1 else "ies", ", ".join(pruned)))
+    if settled:
+        line += " " + settled
+    elif not pruned and not retention_error and not index_error:
+        # With the terminal record missing no prune ran, so nothing else
+        # changed then either -- but the sentence would sit beside a warning
+        # about this very copy, and it is only said when all went to plan.
+        line += " No other backup copy was changed."
+    return line
+
+
+def _reapproval_lines(c) -> list:
+    """Per bank, what brings deep history back from the bank after a
+    whole-ledger purge -- derived from the binding state with the predicate
+    `link_bank` itself uses (`tools_auth.renewal_target`), because telling
+    the operator to renew a consent `link_bank` will refuse to renew sends
+    them into a refusal."""
+    lines = []
+    triples = c.execute(
+        "SELECT DISTINCT aspsp_name, country, psu_type FROM sessions"
+        " WHERE closed_at IS NULL ORDER BY aspsp_name, country, psu_type"
+    ).fetchall()
+    for aspsp, country, psu_type in triples:
+        bank = _safe(aspsp) or "an unnamed bank"
+        target, prior = tools_auth.renewal_target(c, aspsp, country, psu_type)
+        if target is not None:
+            lines.append("  %s: run link_bank for it — a renewal, which "
+                         "reopens the deep-history window." % bank)
+        elif prior is not None:
+            lines.append(
+                "  %s: its consent has no account bound to it, so link_bank "
+                "will not renew it — run unlink_bank consent_ref=%s, then "
+                "link_bank (a first link)."
+                % (bank, tools_auth._consent_ref(prior["session_id"])))
+    unbound = [_safe(r[0]) or "an unnamed bank" for r in c.execute(
+        "SELECT DISTINCT aspsp FROM accounts WHERE session_id IS NULL"
+        " OR session_id = '' ORDER BY aspsp")]
+    for bank in unbound:
+        lines.append("  %s: an account is bound to no consent — run link_bank "
+                     "for it." % bank)
+    if not lines:
+        return []
+    return (["History older than the routine 90-day refresh window comes "
+             "back from a bank only after a fresh approval, and only as far "
+             "back as the plugin's request window and the bank's own "
+             "retention reach:"] + lines)
+
+
 @register("purge",
-          "Really delete every transaction booked before a date, trim the "
-          "proven-coverage intervals to match, then VACUUM. Protected: casa "
+          "Really delete transactions — every one booked before a date, or "
+          "the whole ledger with before_date='all' — with their notes and "
+          "tags, trim or drop the proven-coverage intervals to match, then "
+          "VACUUM. user_work is required: 'keep' keeps auto-tagging rules and "
+          "account labels, categories and include flags; 'erase' erases ALL "
+          "of them and every note and tag, on surviving rows too. A backup is "
+          "taken first; restore_backup undoes the purge. Protected: casa "
           "demands an operator grant.",
           {"type": "object",
-           "properties": {"before_date": {"type": "string"}},
-           "required": ["before_date"]})
+           "properties": {"before_date": {"type": "string"},
+                          "user_work": {"type": "string",
+                                        "enum": list(USER_WORK)}},
+           "required": ["before_date", "user_work"]})
 def purge(args: dict) -> str:
     refusal = _require_declared("purge")
     if refusal:
         return refusal
-    before = _cutoff(args.get("before_date"))
-    if before is None:
-        return ("before_date must be exactly an ISO date, YYYY-MM-DD — not a "
-                "timestamp and not a compact form. Rows are compared to it as "
-                "text, so anything else would silently erase MORE than the "
-                "date names. Nothing has been changed.")
+    raw = args.get("before_date")
+    whole = raw == "all"
+    before = None if whole else _cutoff(raw)
+    if not whole and before is None:
+        return ("before_date must be exactly an ISO date, YYYY-MM-DD, or "
+                "'all' — not a timestamp and not a compact form. Rows are "
+                "compared to it as text, so anything else would silently "
+                "erase MORE than the date names. Nothing has been changed.")
+    user_work = args.get("user_work")
+    if user_work not in USER_WORK:
+        # Never echoed back: an arbitrary string in a line-oriented reply.
+        return ("user_work must be 'keep' (keep auto-tagging rules and account "
+                "labels, categories and include flags) or 'erase' (erase all "
+                "of them, and every note and tag). There is no default. "
+                "Nothing has been changed.")
+    erase = user_work == "erase"
     c = _conn()
-    # One transaction across rows, references and coverage — and it lives in
-    # `apply`, beside `apply_plan` and `record_coverage`, because those three
-    # tables are three views of the same claim and one owner is what keeps them
-    # from disagreeing.
-    stats = apply.purge_before(c, before)
-    lines = [
-        "Purged %d transaction(s) booked before %s, and %d stored provider "
-        "reference(s) with them."
-        % (stats["transactions"], before, stats["refs"]),
-        "Proven-coverage intervals were corrected to match: %d dropped and %d "
-        "trimmed to start at %s. Every span before that date now reads as NOT "
-        "PROVEN rather than as a period with no transactions — erased history "
-        "must never come back as a confident answer."
-        % (stats["coverage_dropped"], stats["coverage_trimmed"], before),
-        "Re-linking the bank can restore anything still inside that bank's own "
-        "retention window; anything older is gone for good.",
-        # Rules are counterparty knowledge, not row data: purge erases
-        # history, not the learned rulebook.
-        "Auto-tagging rules are unaffected.",
-        # Same decision, disclosed the same way: an evidence row is a
-        # measurement of the bank's reference behaviour -- aggregate counts
-        # and dates, no transaction content -- and purging history does not
-        # un-measure it. Revoking trust on a purge would demote for a reason
-        # that says nothing about the bank. forget_local_account and
-        # delete_all_data are the erasers that take evidence with them.
-        "Reference-trust evidence is unaffected: it describes the bank's "
-        "reference behaviour, not the purged rows.",
-    ]
-    # `occurrence_alloc` is deliberately NOT purged. It is the only record of
-    # the occurrence slots a re-keyed row vacated (store.py), the accounts are
-    # still here and still ingesting, and handing a purged slot back out would
-    # collide with UNIQUE (account_id, identity_key, occurrence).
+    paths = backups.paths_for(tools_read.ledger_path(c))
+    c.execute("BEGIN IMMEDIATE")
+    state = handle = None
+    try:
+        if _authorization_in_progress(c):
+            c.execute("ROLLBACK")
+            return ("A bank authorization is in progress (a link or renewal "
+                    "is completing), and a purge now could make its reply "
+                    "wrong about which consent is live. Try again in a few "
+                    "minutes. Nothing has been changed.")
+        # Settle, then copy the ledger as it stands. `take_backup` copies
+        # through a separate reader, which under WAL sees the last COMMITTED
+        # state: with the write lock held and nothing written yet, that is
+        # exactly the ledger before this erasure.
+        state, handle = backups.settle(c, paths)
+        b = backups.take_backup(c, paths, handle, backups.ERASURE_REASON)
+    except backups.BackupError as exc:
+        # NOTHING IS ERASED WITHOUT ITS BACKUP. `refusal_text` says what a
+        # settlement on the way removed, when it removed anything.
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
+        return backups.refusal_text(exc, state)
+    except Exception:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
+        raise
+
+    try:
+        notes_before = c.execute(
+            "SELECT COUNT(*) FROM transaction_notes").fetchone()[0]
+        tags_before = c.execute(
+            "SELECT COUNT(*) FROM transaction_tags").fetchone()[0]
+        # One transaction across rows, references and coverage — and it
+        # lives in `apply`, beside `apply_plan` and `record_coverage`, because
+        # those three tables are three views of the same claim and one owner
+        # is what keeps them from disagreeing.
+        stats = apply.purge_rows(c, before)
+        balances = 0
+        if whole:
+            balances = c.execute("DELETE FROM balances").rowcount
+            # No row remains that a reused occurrence slot could collide with.
+            c.execute("DELETE FROM occurrence_alloc")
+            note = PURGED_NOTE % (_dt.date.today().isoformat(), b.op_id)
+            # UPSERT, not UPDATE: an account whose first backfill was
+            # interrupted has no transactions row, and an UPDATE would skip
+            # it -- leaving a later routine refresh free to record the
+            # erased history as complete. The retry and success timestamps
+            # of an existing row stay: Retry-After still binds, and the last
+            # successful fetch really happened when it says.
+            c.execute(
+                "INSERT INTO sync_state(account_id, resource, completeness,"
+                " last_error) SELECT account_id, 'transactions', 'partial', ?"
+                " FROM accounts WHERE 1 ON CONFLICT(account_id, resource) DO"
+                " UPDATE SET completeness='partial',"
+                " last_error=excluded.last_error, last_success_session=NULL,"
+                " oldest_fetched=NULL", (note,))
+            c.execute("UPDATE sync_state SET last_success_at=NULL"
+                      " WHERE resource='balances'")
+        rules = relabelled = 0
+        reincluded = []
+        if erase:
+            c.execute("DELETE FROM transaction_notes")
+            c.execute("DELETE FROM transaction_tags")
+            rules = c.execute("DELETE FROM tag_rules").rowcount
+            reincluded = [_safe(r[0] or r[1]) or _safe(r[2][:10])
+                          for r in c.execute(
+                              "SELECT label, name, account_id FROM accounts"
+                              " WHERE included=0 ORDER BY account_id")]
+            relabelled = c.execute(
+                "UPDATE accounts SET label=NULL, category=NULL, included=1"
+                " WHERE label IS NOT NULL OR category IS NOT NULL"
+                " OR included=0").rowcount
+        notes_after = c.execute(
+            "SELECT COUNT(*) FROM transaction_notes").fetchone()[0]
+        tags_after = c.execute(
+            "SELECT COUNT(*) FROM transaction_tags").fetchone()[0]
+        # THE LIFE FENCE. A sync or backfill that read the ledger before
+        # this purge and applies after it must not record coverage or sync
+        # state over rows the purge removed; every late write in `flows` and
+        # `tools_refresh` is conditioned on the incarnation it captured, as
+        # for a restore, which rotates it the same way.
+        c.execute("UPDATE accounts SET incarnation = lower(hex(randomblob(8)))")
+        c.execute("COMMIT")
+    except Exception as exc:                 # noqa: BLE001 — class name only
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        # The copy stands for a ledger that did not change: an `orphan`, as a
+        # rolled-back mint is, and still a valid restore point.
+        _finish_pre_erasure(paths, handle, b, committed=False)
+        return _rolled_back("The purge failed (%s) and was rolled back: "
+                            "nothing was erased." % type(exc).__name__,
+                            b, state)
+    finished = _finish_pre_erasure(paths, handle, b, committed=True)
+
+    gone_notes, gone_tags = notes_before - notes_after, tags_before - tags_after
+    if whole:
+        lines = [
+            "Purged the whole ledger: %d transaction(s) and %d stored provider "
+            "reference(s), with %d note(s) and %d tag(s)%s. Every "
+            "proven-coverage interval (%d) was dropped, so no span reads as "
+            "PROVEN until a fetch proves it again."
+            % (stats["transactions"], stats["refs"], gone_notes, gone_tags,
+               "" if erase else " — notes and tags go with their rows",
+               stats["coverage_dropped"]),
+            "Reset: %d cached balance(s) and the sync state — every account's "
+            "transaction history is marked partial until a completed deep "
+            "fetch. Provider Retry-After holds were kept." % balances,
+        ]
+    else:
+        lines = [
+            "Purged %d transaction(s) booked before %s, and %d stored provider "
+            "reference(s) with them."
+            % (stats["transactions"], before, stats["refs"]),
+            "Proven-coverage intervals were corrected to match: %d dropped and "
+            "%d trimmed to start at %s. Every span before that date now reads "
+            "as NOT PROVEN rather than as a period with no transactions — "
+            "erased history must never come back as a confident answer."
+            % (stats["coverage_dropped"], stats["coverage_trimmed"], before),
+        ]
+    if erase:
+        lines.append(
+            "Erased with user_work=erase: %d note(s) and %d tag(s)%s, %d "
+            "auto-tagging rule(s), and every account label, category and "
+            "include flag (%d account(s) changed)."
+            % (gone_notes, gone_tags,
+               "" if whole else ", on surviving rows too", rules, relabelled))
+        if reincluded:
+            lines.append(
+                "These accounts were excluded and are included again, so the "
+                "next sync refreshes them: %s." % ", ".join(reincluded))
+    else:
+        lines.append(
+            "Kept with user_work=keep: auto-tagging rules and account labels, "
+            "categories and include flags. Notes and tags go with their rows"
+            "%s." % ("" if whole else
+                     ": %d note(s) and %d tag(s) went with the purged rows, "
+                     "and the surviving rows keep theirs"
+                     % (gone_notes, gone_tags)))
+    # An evidence row is a measurement of the bank's reference behaviour --
+    # aggregate counts and dates, no transaction content -- and purging
+    # history does not un-measure it. forget_local_account and
+    # delete_all_data are the erasers that take evidence with them.
+    lines.append("Reference-trust evidence is unaffected: it describes the "
+                 "bank's reference behaviour, not the purged rows.")
+    lines.append(_backup_line(b, state, finished,
+                              "everything this call erased"))
+    if whole:
+        lines.extend(_reapproval_lines(c))
+    # `occurrence_alloc` is deliberately NOT purged by a date purge. It is the
+    # only record of the occurrence slots a re-keyed row vacated (store.py),
+    # the accounts are still here and still ingesting, and handing a purged
+    # slot back out would collide with UNIQUE (account_id, identity_key,
+    # occurrence). A whole-ledger purge empties it: no row is left to collide.
     lines.append(_reclaim(c)[1])
     lines.append(GATE_NOTE)
     return "\n".join(lines)
@@ -511,10 +822,35 @@ def forget_local_account(args: dict) -> str:
     # lookup above to find), but "it is safe because of a check somewhere else"
     # is the reasoning this codebase has had to retract repeatedly.
     named = _safe(row["label"] or row["name"]) or _safe(account_id[:10])
-    count = c.execute("SELECT COUNT(*) FROM transactions WHERE account_id=?",
-                      (account_id,)).fetchone()[0]
+    paths = backups.paths_for(tools_read.ledger_path(c))
     c.execute("BEGIN IMMEDIATE")
+    state = handle = None
     try:
+        # THE BACKUP COMES FIRST, under the same write lock as the erasure
+        # (issue #47): the separate reader `take_backup` copies through sees
+        # the last committed state, which with nothing written yet is the
+        # ledger exactly before this call. No copy, no erasure.
+        state, handle = backups.settle(c, paths)
+        b = backups.take_backup(c, paths, handle, backups.ERASURE_REASON)
+    except backups.BackupError as exc:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
+        return backups.refusal_text(exc, state)
+    except Exception:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        if handle is not None:
+            handle.close()
+        raise
+    try:
+        # Counted inside the lock, so the report names what this
+        # transaction erased and nothing a concurrent write added after it.
+        count = c.execute("SELECT COUNT(*) FROM transactions WHERE"
+                          " account_id=?", (account_id,)).fetchone()[0]
+        attempts = c.execute("SELECT COUNT(*) FROM attempts WHERE"
+                             " account_id=?", (account_id,)).fetchone()[0]
         # `transaction_refs` — and now the two annotation tables — are keyed
         # by a GLOBAL row_id, so they are the tables here that cannot be
         # scoped by a column of their own: a row-keyed write that is not
@@ -535,9 +871,26 @@ def forget_local_account(args: dict) -> str:
             "SELECT COUNT(*) FROM tag_rules WHERE account_id=?",
             (account_id,)).fetchone()[0]
         c.execute("COMMIT")
-    except Exception:
-        c.execute("ROLLBACK")
-        raise
+    except Exception as exc:                 # noqa: BLE001 — class name only
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        _finish_pre_erasure(paths, handle, b, committed=False)
+        return _rolled_back("Erasing %s failed (%s) and was rolled back: "
+                            "nothing was erased."
+                            % (named, type(exc).__name__), b, state)
+    finished = _finish_pre_erasure(paths, handle, b, committed=True)
+    # What a restore of the copy brings back, and what it does not: a
+    # restore keeps bindings and authorization attempts LIVE, so the account
+    # comes back bound to whatever it is bound to when the restore runs, and
+    # the attempts this call erased stay erased.
+    restores = ("this account's transactions, notes, tags, balances, "
+                "coverage and sync state; the account comes back bound to "
+                "whatever consent it is bound to when the restore runs — "
+                "unbound, needing a re-link, if it has not been linked again "
+                "by then")
+    if attempts:
+        restores += (", and the %d authorization attempt(s) erased here stay "
+                     "erased, because a restore keeps attempts live" % attempts)
     lines = [
         "Erased %s LOCALLY: %d transaction(s), its balances, its coverage, its "
         "sync state, its occurrence allocations and any authorization attempt "
@@ -554,6 +907,7 @@ def forget_local_account(args: dict) -> str:
         "match nothing until the same account is linked again, and "
         "remove_rule removes them. Other rules are unaffected."
         % scoped_rules,
+        _backup_line(b, state, finished, restores),
     ]
     lines.append(_reclaim(c)[1])
     lines.append(GATE_NOTE)
