@@ -2637,7 +2637,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # it never measured -- the sweep stopped, so what is left is exactly
         # what this failure cannot say.
         self.assertIn("the erasure of the backup files stopped part way", out)
-        self.assertIn("this call cannot say which of them are still there", out)
+        # Its own first unlink is counted though a plain BackupError (the
+        # failed prune append) stopped the sweep (Astra, v5.2 code round 4).
+        self.assertIn("1 backup copy(ies) were erased too", out)
         # The settlement that opens the session-row sweep, later in the same
         # call, completes the stalled erasure — and the reply says so, below
         # the warning that it had stalled.
@@ -2827,9 +2829,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.fail_at("COMMIT")
         out = call("delete_all_data")
         self.assertIn("The ledger erasure failed (Boom) and was rolled back — "
-                      "the ledger is intact. The backup copies are still "
-                      "scheduled for erasure and will be removed at the next "
-                      "settlement.", out)
+                      "the ledger is intact. The record of the backup erasure "
+                      "was already written, so a settlement completes it and "
+                      "removes the backup copies.", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual(self.count("accounts"), 1)
         tools_read.CONN = self.conn
@@ -3255,6 +3257,41 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
         self.assertIn("did not finish: 1 pre-migration snapshot(s) went", out)
         self.assertIn("1 pre-migration snapshot(s) beside the ledger could "
                       "not be removed", out)
+
+    def test_the_second_sweeps_torn_terminal_record_is_not_called_unwritten(self):
+        # Terra, v5.2 code round 4: the second sweep hard-coded "could not be
+        # written" for a terminal append that failed part way (`written`
+        # None), whose bytes may still be in the index.
+        self._populate()
+        real = self.ais.delete_session
+        armed = []
+
+        def delete_session(sid):
+            (self.root / "f.sqlite.pre-migration-20260101T000001Z"
+             ).write_bytes(SESSION_ID.encode())
+            armed.append(True)
+            return real(sid)
+        self.ais.delete_session = delete_session
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+
+        def write(fd, data):
+            if armed and b" erase " in data and b"committed" in data:
+                armed.clear()
+                real_write(fd, data[:9])
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+
+        def ftruncate(fd, n):
+            if not armed and n and os.fstat(fd).st_size > n:
+                raise OSError(errno.EIO, "Input/output error")
+            return real_trunc(fd, n)
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("delete_all_data")
+        self.assertIn("but writing its completion record failed part way",
+                      out)
+        self.assertNotIn("but its completion record could not be written", out)
+        self.assertIn("the index ended in an incomplete line", out)
 
     def test_a_retry_says_what_its_settlement_removed(self):
         self._populate()

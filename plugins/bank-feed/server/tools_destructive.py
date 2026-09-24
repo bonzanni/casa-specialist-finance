@@ -1097,15 +1097,19 @@ def _second_sweep(paths, handle, state, erase_op):
     """Sweep the copies after the session rows went; -> a reply line or None.
     Never raises: the rows are already destroyed and the banks already asked,
     so a failure is reported after the erasure, with its count."""
+    er = backups.Erasure()
     try:
-        er = backups.erase_backups(paths, handle, state, erase_op)
+        er = backups.erase_backups(paths, handle, state, erase_op, out=er)
     except backups.ErasureRecordUnwritten as exc:
         er = exc.erasure or backups.Erasure()
+        # The sweep's terminal append, as the event it was: "not written"
+        # or "failed part way" (`written` None) — never hard-coded.
         return ("Every backup copy found after the banks were asked (%s) "
-                "was erased with the session rows destroyed here, but the "
-                "index record confirming it could not be written (%s); the "
-                "next settlement (any backup, restore, listing or workflow "
-                "write) writes it." % (er.went(), exc))
+                "was erased with the session rows destroyed here, but %s; "
+                "the next settlement (any backup, restore, listing or "
+                "workflow write) writes the record."
+                % (er.went(), backups.record_event("completion", exc.written,
+                                                   exc)))
     except backups.ErasureIncomplete as exc:
         # The sweep's own event; what is left afterwards, what it blocks and
         # how to finish it is the dispatcher's lock-release sentence (#48).
@@ -1114,12 +1118,14 @@ def _second_sweep(paths, handle, state, erase_op):
                 "banks were asked did not finish: %s went, and %s."
                 % (exc.erasure.went(), exc.residue()))
     except backups.BackupError as exc:
+        # The sweep's own event, with what it removed before stopping;
+        # whether its erasure is still pending is the dispatcher's
+        # lock-release sentence (Astra, v5.2 r4).
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
-                "banks were asked stopped part way (%s), and this call "
-                "cannot say which of them are still there. The sweep is "
-                "recorded as pending, so the next settlement (any backup, "
-                "restore, listing or workflow write) finishes it." % exc)
+                "banks were asked stopped part way (%s)%s."
+                % (exc, ", after removing %s" % er.went()
+                   if er.removed_any() else ""))
     line = None
     if er.removed_any():
         line = ("%s found after the banks were asked were erased too: a copy "
@@ -1299,8 +1305,9 @@ def delete_all_data(args: dict) -> str:
             # Raising here handed the operator a generic error for a state
             # with two specific halves, both of which they need to know.
             return ("The ledger erasure failed (%s) and was rolled back — the "
-                    "ledger is intact. The backup copies are still scheduled "
-                    "for erasure and will be removed at the next settlement."
+                    "ledger is intact. The record of the backup erasure was "
+                    "already written, so a settlement completes it and "
+                    "removes the backup copies."
                     % type(exc).__name__)
         raise
     else:
@@ -1312,9 +1319,14 @@ def delete_all_data(args: dict) -> str:
         # COMMIT, while the index handle from the settle above is still held;
         # the index itself is kept, append-only, so the record of the erasure
         # survives it and the restore generation stays monotonic.
+        # The account is allocated HERE and passed in, so a plain
+        # BackupError raised after some unlinks (a failed `prune` append)
+        # still carries what this call's own sweep removed (Astra, v5.2 r4).
+        erased_backups = backups.Erasure()
         try:
             erased_backups = backups.erase_backups(paths, handle, backup_state,
-                                                   erase_op)
+                                                   erase_op,
+                                                   out=erased_backups)
         except backups.BackupError as exc:
             # Reported, never raised: the ledger is already erased by the
             # COMMIT above, and raising here would discard the whole account
@@ -1326,10 +1338,10 @@ def delete_all_data(args: dict) -> str:
             # unlink, so "some went and some did not" is now the ordinary
             # shape of this failure and a reply that counted none of them
             # would understate what the retry still has to do.
-            erased_backups = (exc.erasure
-                              if isinstance(exc, (backups.ErasureIncomplete,
-                                                  backups.ErasureRecordUnwritten))
-                              else None)
+            if isinstance(exc, (backups.ErasureIncomplete,
+                                backups.ErasureRecordUnwritten)) \
+                    and exc.erasure is not None:
+                erased_backups = exc.erasure
             # `residue()`, not the whole account: the count sentences below
             # already say what went, so this line says only what is left — and
             # it splits whole copies from partials, because the alarm is true
@@ -1355,8 +1367,8 @@ def delete_all_data(args: dict) -> str:
                 # makes the unlinks outlive a power loss. "Could not be
                 # removed" would send the operator looking for a file that is
                 # not there; what is true is that the erasure is not finished.
-                left = ("the removal of the backup copies is not durable yet: "
-                        "%s" % exc.residue())
+                left = ("the removal of the backup copies could not be made "
+                        "durable: %s" % exc.residue())
             elif isinstance(exc, backups.ErasureRecordUnwritten):
                 # NOT A STALLED SWEEP. `ErasureRecordUnwritten` is raised only
                 # once every copy is already gone and the directory already
@@ -1377,9 +1389,10 @@ def delete_all_data(args: dict) -> str:
                 # so what went and what is left is precisely what this
                 # exception cannot say — and a count that was not measured is
                 # the one thing this reply must not invent.
+                # What it removed before stopping is the count line below
+                # (the account survives: it was passed in as `out`).
                 left = ("the erasure of the backup files stopped part way "
-                        "(%s), and this call cannot say which of them are "
-                        "still there" % exc)
+                        "(%s)" % exc)
             if left is not None:
                 # THIS CALL'S OWN SWEEP, as an event: what it could not do at
                 # that point. Whether copies are STILL there, what that blocks
