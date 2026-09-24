@@ -781,8 +781,8 @@ def forget_local_account(args: dict) -> str:
         # is the only route there is.
         ok, note = _reclaim(c)
         if not ok:
-            return "No account with that account_id, so nothing was deleted.\n" + note
-        return ("No account with that account_id, so nothing was deleted. The "
+            return "No account with that account_id, so no account data was deleted.\n" + note
+        return ("No account with that account_id, so no account data was deleted. The "
                 "database's free pages have been reclaimed (VACUUM), which is "
                 "what finishes an earlier erasure of this account whose VACUUM "
                 "did not run.")

@@ -59,9 +59,11 @@ failure so the ledger still opens) would drop the account with them (issues #48,
 exactly one dispatched `tools/call` (`backups.open_log`, a context variable; no call, no
 log). Recorded: the backups directory, index or index header it created; a torn tail it
 cut (as soon as the cut is made, with whether its flush landed); each `.partial` it
-unlinked; each pending `backup` or `restore` record it closed, when the append returned
-or failed with the line readable; and per erasure, what every attempt removed, the
-`prune` records for copies already gone, and whether the terminal record landed.
+unlinked; each pending `backup` or `restore` record it closed; a header it may have left
+part-written; and per erasure, what every attempt removed, the `prune` records for copies
+already gone (by copy id, so a retry is counted once), and whether the terminal record
+landed. A write whose outcome is unknown (`BackupError.written` None) is reported as one
+that *may* have happened, never as done.
 
 **It is rendered once, by `bank_feed_server.handle`, on every exit** — success, refusal
 or exception — as one sentence after the sandbox banner: "While settling the backup

@@ -24,6 +24,7 @@ import backups  # noqa: E402
 import store  # noqa: E402
 import tools_backup  # noqa: E402  (registration side effect)
 import tools_annotate  # noqa: E402  (registration side effect)
+import tools_destructive  # noqa: E402  (registration side effect)
 import tools_read  # noqa: E402
 from _toolbase import call, dispatch  # noqa: E402
 
@@ -84,6 +85,10 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         # Said once: the next call in the same process has nothing to say.
         again = dispatch("list_accounts", data_dir=self.data)
         self.assertNotIn(LEAD, again)
+        # And the log is gone with the call (Astra, code round 1): a direct
+        # call after it records into nothing, and its "nothing" is plain.
+        self.assertIsNone(backups._LOG.get())
+        self.assertEqual(backups.unchanged(), "Nothing was changed.")
 
     def test_a_refusal_after_an_open_time_closure_does_not_say_nothing_changed(self):
         # Issue #53, reproduced as filed: a cold refusal after settlement
@@ -115,6 +120,21 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         self.assertTrue(out.startswith(
             LEAD + "removed the unfinished copy of interrupted backup %s; "
             "recorded interrupted backup %s as aborted.\n" % (op, op)), out)
+
+    def test_forgetting_an_unknown_account_does_not_deny_what_settlement_removed(self):
+        # Terra, code round 1: "so nothing was deleted" stood under a
+        # settlement sentence naming a removed copy.
+        [bid] = self.backups_taken(1)
+        self.append_index("erase abcdefabcdefabcd pending")
+        with mock.patch("tools_auth.protected_tools",
+                        return_value={"forget_local_account"}):
+            out = dispatch("forget_local_account", data_dir=self.data,
+                           account_id="missing")
+        self.assertFalse(self.paths.backup_file(bid).exists())
+        self.assertIn(LEAD + "completed a pending erasure, removing 1 backup "
+                      "copy(ies).", out)
+        self.assertIn("so no account data was deleted", out)
+        self.assertNotIn("nothing was deleted", out)
 
     def test_a_refusal_before_the_ledger_opens_still_says_nothing_changed(self):
         # The argument check runs before the tool opens the ledger: nothing,
@@ -190,6 +210,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
         self.assertTrue(out.startswith(
             LEAD + "completed a pending erasure, removing 1 backup "
             "copy(ies).\nerror: RuntimeError: boom"), out)
+        self.assertIsNone(backups._LOG.get(), "an exception exit resets too")
 
     def test_a_successful_restore_names_the_record_its_settlement_closed(self):
         # Astra, round 1: the restore's success reply never rendered any
@@ -226,14 +247,99 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
         self.assertNotIn("changed nothing", out)
         self.assertEqual(list(self.paths.backups_dir.glob("*.partial")), [])
 
+class TestUncertainWritesAreWordedAsUncertain(Cold):
+    """Astra, code round 1: a write whose outcome is unknown (`written`
+    None) is reported as possible, never as done, and never counted twice."""
+
+    def _gone_copy_and_pending_erasure(self):
+        [bid] = self.backups_taken(1)
+        self.paths.backup_file(bid).unlink()
+        self.append_index("erase abcdefabcdefabcd pending")
+        return bid
+
+    def _prune_fails(self, times):
+        real = backups.IndexHandle.append
+        left = [times]
+
+        def append(handle, *fields):
+            if fields[:1] == ("prune",) and left[0]:
+                left[0] -= 1
+                raise backups.BackupError("torn", written=None)
+            return real(handle, *fields)
+        return mock.patch.object(backups.IndexHandle, "append", append)
+
+    def test_a_prune_retried_in_the_same_call_is_counted_once(self):
+        self._gone_copy_and_pending_erasure()
+        with self._prune_fails(1):          # the open-time attempt only
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertIn("recording the earlier removal of 1 backup copy", out)
+        self.assertNotIn("2 backup copies", out)
+        self.assertNotIn("may have been recorded", out)
+
+    def test_a_prune_that_may_not_have_landed_is_not_claimed(self):
+        self._gone_copy_and_pending_erasure()
+        with self._prune_fails(1):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertIn("the earlier removal of 1 backup copy may have been "
+                      "recorded", out)
+        self.assertNotIn("recording the earlier removal", out)
+
+    def test_a_header_that_could_not_be_cut_back_is_reported(self):
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_bytes(b"")
+        real_write = backups._write_whole
+
+        def write(fd, data):
+            real_write(fd, data[:9])
+            raise OSError(28, "No space left on device")
+
+        def ftruncate(fd, n):
+            raise OSError(5, "Input/output error")
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertEqual(self.paths.index.read_bytes(), b"bank-feed")
+        self.assertTrue(out.startswith(
+            LEAD + "may have left part of a header in the backup index "
+            "(the next settlement cuts it).\n"), out)
+
+    def test_a_rename_failure_whose_abort_record_is_unflushed_says_so(self):
+        self.warm()
+        real_rename, real_append = os.rename, backups.IndexHandle.append
+
+        def rename(src, dst):
+            if str(src).endswith(".partial"):
+                raise OSError(28, "No space left on device")
+            return real_rename(src, dst)
+
+        def append(handle, *fields):
+            real_append(handle, *fields)
+            if fields[:1] == ("backup",) and fields[2:3] == ("aborted",):
+                raise backups.BackupError("fsync failed", written=True)
+        with mock.patch.object(backups.os, "rename", rename), \
+                mock.patch.object(backups.IndexHandle, "append", append):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        last = self.index_lines()[-1].split()
+        self.assertEqual([last[1], last[3]], ["backup", "aborted"])
+        self.assertIn("its index records the attempt as aborted, though that "
+                      "record could not be flushed", out)
+        self.assertNotIn("pending index record stays", out)
+
 
 class TestTheClaimHasOneSpelling(unittest.TestCase):
     """A reply may claim "nothing was changed" only through
     `backups.unchanged`, which scopes the claim once settlement has written
     anything in the call. A literal anywhere else would say it unscoped."""
 
-    CLAIM = re.compile(r"(?i)\b(nothing|no other [a-z ]+?) (was|has been|"
-                       r"had been|is) (changed|erased)")
+    # Every verb settlement can make false — it creates, writes, removes
+    # and changes files and index records — in the report tenses. Terra's
+    # round-1 finding was a "nothing was deleted" the first gate, which knew
+    # only "changed" and "erased", could not see.
+    CLAIM = re.compile(r"(?i)\b(nothing|no other [a-z ]+?) (was|were|has "
+                       r"been|have been|had been) (changed|erased|deleted|"
+                       r"removed|written|created|modified|touched)")
     ALLOWED = {("backups.py", "unchanged"),
                ("backups.py", "no_other_copy_changed")}
 
@@ -255,31 +361,76 @@ class TestTheClaimHasOneSpelling(unittest.TestCase):
                 spans.append((node.lineno, node.end_lineno, node.name))
         return spans
 
-    def test_no_literal_claims_nothing_changed_outside_the_one_function(self):
-        hits = []
-        for path in sorted(SERVER.glob("*.py")):
-            tree = ast.parse(path.read_text())
-            docs, funcs = self._docstrings(tree), self._functions(tree)
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Constant)
-                        and isinstance(node.value, str)):
-                    continue
-                if id(node) in docs or not self.CLAIM.search(node.value):
-                    continue
-                inside = {n for s, e, n in funcs if s <= node.lineno <= e}
-                if any((path.name, f) in self.ALLOWED for f in inside):
-                    continue
-                hits.append("%s:%d %r" % (path.name, node.lineno,
-                                          node.value[-60:]))
-        self.assertEqual(hits, [])
+    HOLE = "\x00"
 
-    def test_the_gate_sees_a_claim_split_across_two_literals(self):
-        # Mutation check of the gate itself: the implicit concatenation the
-        # tree used most often ("Nothing was " "changed.") is ONE constant.
-        tree = ast.parse('x = ("a. Nothing was "\n     "changed.")')
-        values = [n.value for n in ast.walk(tree)
-                  if isinstance(n, ast.Constant)]
-        self.assertTrue(any(self.CLAIM.search(v) for v in values))
+    def _static(self, node):
+        """The text a string expression renders, with every part that is not
+        a constant as HOLE; None for anything that is not one. Folds what a
+        claim can be built from: `+`, `%`, `.format` and f-strings — Astra's
+        code round 1 built all three past a constants-only gate."""
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, str) else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = self._static(node.left), self._static(node.right)
+            if left is None and right is None:
+                return None
+            return (left or self.HOLE) + (right or self.HOLE)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            fmt = self._static(node.left)
+            if fmt is None:
+                return None
+            args = (node.right.elts if isinstance(node.right, ast.Tuple)
+                    else [node.right])
+            vals = iter([self._static(a) or self.HOLE for a in args])
+            return re.sub(r"%[-#0 +]*\d*(?:\.\d+)?[sdrfx]",
+                          lambda m: next(vals, self.HOLE), fmt)
+        if isinstance(node, ast.JoinedStr):
+            return "".join(
+                v.value if isinstance(v, ast.Constant)
+                else (self._static(v.value) or self.HOLE)
+                for v in node.values)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "format"):
+            fmt = self._static(node.func.value)
+            if fmt is None:
+                return None
+            vals = iter([self._static(a) or self.HOLE for a in node.args])
+            return re.sub(r"\{[^{}]*\}", lambda m: next(vals, self.HOLE), fmt)
+        return None
+
+    def _claims(self, source, name="<test>"):
+        tree = ast.parse(source)
+        docs, funcs = self._docstrings(tree), self._functions(tree)
+        hits = set()
+        for node in ast.walk(tree):
+            if id(node) in docs or not hasattr(node, "lineno"):
+                continue
+            text = self._static(node)
+            if text is None or not self.CLAIM.search(text):
+                continue
+            inside = {n for s, e, n in funcs if s <= node.lineno <= e}
+            if any((name, f) in self.ALLOWED for f in inside):
+                continue
+            hits.add("%s:%d" % (name, node.lineno))
+        return hits
+
+    def test_no_literal_claims_nothing_changed_outside_the_one_function(self):
+        hits = set()
+        for path in sorted(SERVER.glob("*.py")):
+            hits |= self._claims(path.read_text(), path.name)
+        self.assertEqual(sorted(hits), [])
+
+    def test_the_gate_sees_every_way_the_claim_can_be_built(self):
+        # Mutation check of the gate itself, one construction per line.
+        for source in ('x = ("a. Nothing was "\n     "changed.")',
+                       'x = "Nothing" + " was changed."',
+                       'x = "{} was changed.".format("Nothing")',
+                       "x = f\"{'Nothing'} was changed.\"",
+                       'x = "%s was deleted." % "nothing"',
+                       'x = "a; nothing has been " + "removed"'):
+            with self.subTest(source=source):
+                self.assertTrue(self._claims(source), source)
+        self.assertFalse(self._claims('x = "a " + backups.unchanged()'))
 
     def test_no_tool_renders_settlement_itself(self):
         # The dispatcher is the ONE renderer of settlement's work; a tool

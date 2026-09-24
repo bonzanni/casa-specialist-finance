@@ -1800,7 +1800,7 @@ def _reconcile(args: dict) -> str:
                 "4. Application: the application this setup previously "
                 "bound (%s) is NO LONGER in the control-panel list. "
                 "Registering a replacement would orphan every bank "
-                "session that rode it, so nothing was created — "
+                "session that rode it, so no application was created — "
                 "re-registration is an informed operator action. If "
                 "the app is truly gone and you accept "
                 "re-linking every bank, run the PROTECTED tool "

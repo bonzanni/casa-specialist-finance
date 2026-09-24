@@ -2143,7 +2143,7 @@ class TestReclaim(DestructiveBase):
             second = call("forget_local_account", account_id="acc1")
         finally:
             repair()
-        self.assertIn("nothing was deleted", second)
+        self.assertIn("no account data was deleted", second)
         self.assertIn("the reclaim did not finish", second)
         self.assertIn("may still be recoverable", second)
         self.assertNotIn("have been reclaimed", second)

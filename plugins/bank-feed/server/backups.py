@@ -91,18 +91,22 @@ class SettleLog:
         #: (kind, op_id, terminal, written) per pending record closed;
         #: `written` is True, or None for "may have been recorded".
         self.closed: list = []
-        #: erase op_id -> {"attempts": [Erasure, ...], "absent": [copy ids a
-        #: `prune` recorded as already gone], "completed": None | True |
-        #: "unflushed" | "maybe" | "unrecorded"}
+        #: A header write that failed part way and could not be cut back.
+        self.torn_header = False
+        #: erase op_id -> {"attempts": [Erasure, ...], "absent": {copy id:
+        #: True, or None when its `prune` record MAY have been written — a
+        #: later attempt that writes it replaces None}, "completed": None |
+        #: True | "unflushed" | "maybe" | "unrecorded"}
         self.erasures: dict = {}
 
     def any(self) -> bool:
-        return bool(self.created or self.torn or self.partials or self.closed
+        return bool(self.created or self.torn or self.torn_header
+                    or self.partials or self.closed
                     or any(_erasure_said(e) for e in self.erasures.values()))
 
     def erasure(self, op_id: str) -> dict:
         return self.erasures.setdefault(
-            op_id, {"attempts": [], "absent": [], "completed": None})
+            op_id, {"attempts": [], "absent": {}, "completed": None})
 
 
 def _erasure_said(e) -> bool:
@@ -164,6 +168,9 @@ def render_log(log) -> str:
     for flushed in log.torn:
         parts.append("cut an incomplete last line from the backup index%s"
                      % ("" if flushed else " (the cut could not be flushed)"))
+    if log.torn_header:
+        parts.append("may have left part of a header in the backup index "
+                     "(the next settlement cuts it)")
     for e in log.erasures.values():
         if _erasure_said(e):
             parts.append(_erasure_phrase(e))
@@ -200,10 +207,14 @@ def _erasure_phrase(e) -> str:
         text += ", removing %s" % total.went()
     elif done and not e["absent"]:
         text += " (no copy was left to remove)"
-    if e["absent"]:
-        n = len(e["absent"])
+    sure = sum(1 for w in e["absent"].values() if w)
+    maybe = len(e["absent"]) - sure
+    if sure:
         text += (", recording the earlier removal of %d backup cop%s"
-                 % (n, "y" if n == 1 else "ies"))
+                 % (sure, "y" if sure == 1 else "ies"))
+    if maybe:
+        text += (", and the earlier removal of %d backup cop%s may have "
+                 "been recorded" % (maybe, "y" if maybe == 1 else "ies"))
     if e["completed"] == "unflushed":
         text += ("; its completion record is written but could not be "
                  "flushed")
@@ -738,8 +749,15 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 try:
                     _write_whole(fd, header)
                 except OSError:
-                    os.ftruncate(fd, 0)
-                    os.fsync(fd)
+                    try:
+                        os.ftruncate(fd, 0)
+                        os.fsync(fd)
+                    except OSError:
+                        # Part of a header may be on disk: an index write
+                        # this call made, however small.
+                        if log is not None:
+                            log.torn_header = True
+                        raise
                     raise
                 if log is not None and had_index:
                     # An index that existed empty (a torn header cut back
@@ -933,9 +951,13 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         try:
             handle.append("backup", op_id, "aborted")
             how = "its index records the attempt as aborted"
-        except BackupError:
-            how = ("its pending index record stays until the next "
-                   "settlement closes it")
+        except BackupError as closing:
+            how = {True: "its index records the attempt as aborted, though "
+                         "that record could not be flushed",
+                   None: "its index may end in a partial record of the "
+                         "attempt; the next settlement closes it",
+                   False: "its pending index record stays until the next "
+                          "settlement closes it"}[closing.written]
         placed = BackupError("the backup could not be placed (%s); %s"
                              % (_oserr(exc), how))
         placed.recorded = True
@@ -1437,10 +1459,11 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
                 handle.append("prune", op, "done")
             except BackupError as exc:
                 if log is not None and exc.written is not False:
-                    log["absent"].append(op)
+                    # A definite record from an earlier attempt stays so.
+                    log["absent"][op] = log["absent"].get(op) or exc.written
                 raise
             if log is not None:
-                log["absent"].append(op)
+                log["absent"][op] = True
             b["pruned"] = True
         except OSError:
             out.failed += 1
