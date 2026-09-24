@@ -73,8 +73,32 @@ class TestBackupTool(Base):
                                side_effect=backups.BackupError("disk full")):
             out = call("backup", reason="manual")
         self.assertRegex(out, r"Backup [0-9a-f]{16} written \(manual, \d+ bytes\)")
-        self.assertIn("Retention could not prune: disk full — the backup itself "
+        self.assertIn("Retention could not prune: disk full; the backup itself "
                       "is complete.", out)
+
+    def test_a_retention_failure_after_a_removal_names_the_copy_that_went(self):
+        # Issue #52. `prune` unlinks, then appends its record; when that append
+        # fails the oldest copy is already gone, and "could not prune" alone
+        # reads as "nothing was pruned" — false about the backups directory.
+        with mock.patch.object(backups, "prune", return_value=[]):
+            ids = [call("backup", reason="manual").split()[1]
+                   for _ in range(backups.MANUAL_KEEP)]
+        real = backups.IndexHandle.append
+
+        def failing(handle, *fields):
+            if fields[:1] == ("prune",):
+                raise backups.BackupError("disk full")
+            return real(handle, *fields)
+
+        with mock.patch.object(backups.IndexHandle, "append", failing):
+            out = call("backup", reason="manual")
+        gone = [op for op in ids if not self.paths.backup_file(op).exists()]
+        self.assertEqual(gone, ids[:1], "the oldest manual copy was removed")
+        self.assertRegex(out, r"Backup [0-9a-f]{16} written \(manual, \d+ bytes\)")
+        self.assertIn("Retention stopped part way (disk full), after removing "
+                      "the oldest copy %s; the backup itself is complete."
+                      % gone[0], out)
+        self.assertNotIn("could not prune", out)
 
 
 class TestAnIncompleteErasureIsStillReported(Base):

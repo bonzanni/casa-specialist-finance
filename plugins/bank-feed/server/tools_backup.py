@@ -104,9 +104,9 @@ def backup(args: dict) -> str:
         # is never "nothing was changed" -- it is "one more thing than
         # retention managed to do", and the operator needs the id either way.
         return _with_settled(
-            "Backup %s written (%s, %d bytes). Retention could not "
-            "prune: %s — the backup itself is complete."
-            % (b.op_id, reason, b.size, exc), state)
+            "Backup %s written (%s, %d bytes). %s; the backup itself is "
+            "complete." % (b.op_id, reason, b.size,
+                           backups.retention_failed(exc)), state)
     finally:
         handle.close()
     out = "Backup %s written (%s, %d bytes)." % (b.op_id, reason, b.size)
