@@ -253,7 +253,9 @@ def _effects_phrase(effects) -> str:
     if n.get("header"):
         parts.append("wrote the backup index's header")
     if n.get("cut"):
-        parts.append("cut an incomplete last line from the backup index")
+        parts.append("cut %s from the backup index"
+                     % ("an incomplete last line" if n["cut"] == 1 else
+                        "%d incomplete last lines" % n["cut"]))
     gone = []
     for kind, one, many in (("copy", "backup copy", "backup copies"),
                             ("partial", "unfinished copy", "unfinished copies"),
@@ -307,10 +309,11 @@ def _state_phrase(log) -> str:
         text = "a recorded erasure of the backup copies was not finished"
         text += (": " + "; ".join(left)) if left else (
             " (every copy was gone; the next settlement records it complete)")
-        text += (". Until it completes, no backup, restore, total erasure or "
-                 "workflow write runs; reads and every other call do. Any "
-                 "backup, restore, listing or workflow write retries it, or "
-                 "delete %s by hand" % by_hand_for(st))
+        text += (". While an erasure is pending, no backup, restore, total "
+                 "erasure or workflow write runs (reads and every other call "
+                 "do); if it still is, any backup, restore, listing or "
+                 "workflow write retries it, or delete %s by hand"
+                 % by_hand_for(st))
         parts.append(text)
     if st is not None and st["partial_tail"]:
         parts.append("the index ended in an incomplete line, which the next "
@@ -468,17 +471,25 @@ def _acquire_index(paths: Paths) -> int:
     truncation lands at the real end, never past a NUL hole. Non-blocking,
     bounded: flock is not re-entrant in-process, and a blocking call from a
     path that already holds it would hang the MCP server for ever."""
-    existed = os.path.lexists(str(paths.index))
+    # CREATION IS AN EFFECT ONLY WHEN THIS CALL'S OWN SYSCALL DID IT: an
+    # exclusive create that succeeded. A pre-check of existence would claim
+    # a file another process created between the check and the open.
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+    created = False
     try:
-        fd = os.open(str(paths.index),
-                     os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            fd = os.open(str(paths.index), flags | os.O_CREAT | os.O_EXCL,
+                         0o600)
+            created = True
+        except FileExistsError:
+            fd = os.open(str(paths.index), flags)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.EMLINK):
             raise BackupError("refusing %s: it is a symlink" % paths.index.name
                               ) from None
         raise BackupError("cannot open the backup index: %s" % _oserr(exc)
                           ) from None
-    if not existed:
+    if created:
         _effect("created", "backup index")
     deadline = time.monotonic() + LOCK_WAIT_S
     while True:
@@ -497,7 +508,7 @@ def _acquire_index(paths: Paths) -> int:
     try:
         prior = stat.S_IMODE(os.fstat(fd).st_mode)
         os.fchmod(fd, 0o600)
-        if existed and prior != 0o600:
+        if not created and prior != 0o600:
             _effect("mode", "backup index", "0600", oct(prior)[2:].zfill(4))
         # Same durability note as `_prepare`: a freshly-CREATED index
         # file's directory entry needs its parent fsynced, or a crash right
@@ -505,6 +516,7 @@ def _acquire_index(paths: Paths) -> int:
         # itself fsynced.
         _fsync_dir(paths.index.parent)
     except OSError as exc:
+        _observe_release(paths)         # the lock is released here too
         os.close(fd)
         raise BackupError("cannot prepare the backup index: %s" % _oserr(exc)
                           ) from None
@@ -812,7 +824,6 @@ def settle(conn, paths: Paths, *, hold: bool = True):
         raise BackupError("settle() needs the caller's BEGIN IMMEDIATE: the "
                           "ledger lock is taken before the index lock, always")
     log = _LOG.get()
-    had_index = os.path.lexists(str(paths.index))
     _prepare(paths)
     fd = _acquire_index(paths)
     handle = None
@@ -856,10 +867,7 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                             log.unverified += 1
                         raise
                     raise
-                if had_index:
-                    # An index that existed empty got its header written; a
-                    # NEW index is already the "created" effect.
-                    _effect("header")
+                _effect("header")       # the write returned
                 _index_fsync(fd, settling=True)
                 raw = header
         except OSError as exc:
@@ -1048,12 +1056,13 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
             handle.append("backup", op_id, "aborted")
             how = "its index records the attempt as aborted"
         except BackupError as closing:
-            how = {True: "its index records the attempt as aborted, though "
-                         "that record could not be flushed",
-                   None: "its index may end in a partial record of the "
-                         "attempt; the next settlement closes it",
-                   False: "its pending index record stays until the next "
-                          "settlement closes it"}[closing.written]
+            # This call's own event only; what the index holds afterwards
+            # is the dispatcher's lock-release sentence (#48).
+            how = {True: "its abort record was written but could not be "
+                         "flushed",
+                   None: "writing its abort record failed part way",
+                   False: "its abort record could not be written; the next "
+                          "settlement closes the attempt"}[closing.written]
         placed = BackupError("the backup could not be placed (%s); %s"
                              % (_oserr(exc), how))
         placed.recorded = True

@@ -2515,9 +2515,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # Now stated once, by the dispatcher, as what this call saw when it
         # last released the index (rule 2b): the sweep's warning above is
         # only its own event.
-        self.assertIn("Until it completes, no backup, restore, total erasure "
-                      "or workflow write runs; reads and every other call do.",
-                      out)
+        self.assertIn("While an erasure is pending, no backup, restore, total "
+                      "erasure or workflow write runs (reads and every other "
+                      "call do); if it still is,", out)
         self.assertEqual(out.count("no backup, restore, total erasure"), 1)
         self.assertNotIn("Every other bank-feed call", out)
         self.assertNotIn(doomed, out)

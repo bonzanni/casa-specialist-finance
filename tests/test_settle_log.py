@@ -438,18 +438,26 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
     def test_an_unflushed_completion_a_later_flush_covered_is_not_reported(self):
         [bid] = self.backups_taken(1)
         self.append_index("erase abcdefabcdefabcd pending")
-        real = backups.IndexHandle.append
+        # Astra, v5.2 code round 1: the fault goes into the REAL fsync of the
+        # completion record, so the unflushed state is actually reached; the
+        # backup's own appends then flush the index.
+        real = os.fsync
         armed = [True]
 
-        def append(handle, *fields):
-            real(handle, *fields)
-            if fields[:1] == ("erase",) and armed[0]:
+        def fsync(fd):
+            path = os.readlink("/proc/self/fd/%d" % fd)
+            if (armed[0] and path.endswith(self.paths.index.name)
+                    and self.paths.index.read_text().endswith(
+                        "abcdefabcdefabcd committed\n")):
                 armed[0] = False
-                raise backups.BackupError("fsync failed", written=True)
-        with mock.patch.object(backups.IndexHandle, "append", append):
+                raise OSError(5, "Input/output error")
+            return real(fd)
+        with mock.patch.object(backups.os, "fsync", fsync):
             out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertFalse(armed[0], "the completion record's flush did fail")
         self.assertIn(LEAD + ERASED_ONE, out)
         self.assertNotIn("had not been flushed", out)
+        self.assertRegex(out, r"Backup [0-9a-f]{16} written")
 
     def test_a_tools_own_unflushed_record_is_not_called_settlements(self):
         # Once `settle` returns, what the handle appends is the tool's own
@@ -558,6 +566,76 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "back.", out)
         self.assertNotIn("as aborted", out)
 
+    def test_an_index_another_process_created_is_not_claimed(self):
+        # Terra, v5.2 code round 1: creation was inferred from a pre-check,
+        # so an index another process created in between was claimed. It is
+        # now the exclusive create's own success, and a new index's header
+        # write is logged as the effect it is.
+        self.warm()
+        real_open = os.open
+
+        def racing(path, flags, *a):
+            if str(path) == str(self.paths.index) and flags & os.O_EXCL:
+                fd = real_open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+                os.write(fd, (backups.INDEX_HEADER + "\n").encode())
+                os.close(fd)                 # "another process" made it
+            return real_open(path, flags, *a)
+        with mock.patch.object(backups.os, "open", racing):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertNotIn("created the backup index", out)
+        self.assertNotIn("wrote the backup index's header", out)
+
+    def test_a_new_index_reports_its_creation_and_its_header(self):
+        self.warm()
+        out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertIn(LEAD + "created the backups directory; created the "
+                      "backup index; wrote the backup index's header.", out)
+
+    def test_a_release_after_a_failed_fchmod_is_observed(self):
+        # Astra, v5.2 code round 1: `_acquire_index` released the lock on
+        # its fchmod failure without the observation every release makes.
+        [bid] = self.backups_taken(1)
+        self.append_index("erase abcdefabcdefabcd pending")
+
+        real = os.fchmod
+
+        def fchmod(fd, mode):
+            if os.readlink("/proc/self/fd/%d" % fd).endswith(
+                    self.paths.index.name):
+                raise OSError(5, "Input/output error")
+            return real(fd, mode)
+        with mock.patch.object(backups.os, "fchmod", fchmod):
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertTrue(self.paths.backup_file(bid).exists())
+        self.assertIn(STATE + "a recorded erasure of the backup copies was "
+                      "not finished: 1 whole copy still present", out)
+
+    def test_two_cuts_are_counted(self):
+        # Astra, v5.2 code round 1: two successful cuts read as one.
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_bytes(b"bank-fe")     # a torn header
+        os.chmod(str(self.paths.index), 0o600)
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+        armed = [True]
+
+        def write(fd, data):
+            if armed[0]:
+                real_write(fd, data[:5])
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        def ftruncate(fd, n):
+            if armed[0] and n == 0 and os.fstat(fd).st_size == 5:
+                armed[0] = False
+                raise OSError(5, "Input/output error")
+            return real_trunc(fd, n)
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertIn("cut 2 incomplete last lines from the backup index", out)
+
     def test_a_rename_failure_whose_abort_record_is_unflushed_says_so(self):
         self.warm()
         real_rename, real_append = os.rename, backups.IndexHandle.append
@@ -576,8 +654,8 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             out = dispatch("backup", data_dir=self.data, reason="manual")
         last = self.index_lines()[-1].split()
         self.assertEqual([last[1], last[3]], ["backup", "aborted"])
-        self.assertIn("its index records the attempt as aborted, though that "
-                      "record could not be flushed", out)
+        self.assertIn("its abort record was written but could not be "
+                      "flushed", out)
         self.assertNotIn("pending index record stays", out)
 
 
