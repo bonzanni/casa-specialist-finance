@@ -10,8 +10,8 @@
                       "CASA_PLUGIN_BANKFEED_EB_APP_ID"],
     "protectedTools": [
       {"name": "unlink_bank", "summary": "Revokes the Enable Banking consent identified by {consent_ref}. Refresh stops for that bank's accounts until it is re-linked. Local history is not erased."},
-      {"name": "purge", "summary": "Deletes every transaction booked before {before_date} (all = the whole ledger) with its notes and tags. user_work={user_work}: erase also deletes rules and labels. A backup is taken first."},
-      {"name": "forget_local_account", "summary": "Erases account {account_id} locally: transactions, notes, tags, balances, sync state. Nothing is revoked -- the bank stays connected. A backup is taken first."},
+      {"name": "purge", "summary": "Deletes transactions booked before {before_date}, with notes and tags; all = whole ledger, and resets balances and sync state. user_work={user_work}: erase also deletes rules and labels. Backup first."},
+      {"name": "forget_local_account", "summary": "Erases account {account_id} and everything stored for it locally: history, notes, tags, balances, coverage, sync and link-attempt records. Revokes no bank consent. Backup first."},
       {"name": "delete_all_data", "summary": "Erases the ENTIRE local finance ledger for every linked account: every transaction, balance, session and sync record. The most destructive of these actions. Cannot be undone."},
       {"name": "label_account", "summary": "Changes account {account_id}'s label, category or included status. Excluding it removes the account from every balance and transaction total shown until it is re-included."},
       {"name": "accept_app_reregistration", "summary": "Authorizes setup_bank_feed to REGISTER A REPLACEMENT Enable Banking application because the previously bound one vanished from the control panel. Every bank must be re-linked afterwards."},

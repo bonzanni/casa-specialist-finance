@@ -3785,6 +3785,32 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
                       % first, outs[-1])
         self.assertNotIn("No other backup copy was changed", outs[-1])
 
+    def test_a_failed_erasure_prunes_no_copy(self):
+        # Nine pre-erasure copies with retention held off: the class stands
+        # over its bound, so any prune on the next call would remove one.
+        with mock.patch.object(backups, "prune", lambda *a, **k: []):
+            for i in range(backups.ERASURE_KEEP + 1):
+                self.tx(ik="again%d" % i, booking_date="2021-06-01")
+                call("purge", before_date="2024-01-01", user_work="keep")
+        before = sorted(self.reasons())
+        self.tx(ik="last", booking_date="2021-06-01")
+        for name, args, needle in (
+                ("purge", {"before_date": "2024-01-01", "user_work": "keep"},
+                 "DELETE FROM transactions"),
+                ("forget_local_account", {"account_id": "acc1"},
+                 "DELETE FROM accounts")):
+            with self.subTest(tool=name):
+                self.fail_at(needle)
+                out = call(name, **args)
+                tools_read.CONN = self.conn
+                self.assertIn("rolled back: nothing was erased", out)
+                op = pre_erasure_id(out)
+                # Every copy that was there is still there; the only new one
+                # is this call's own, kept as an orphan.
+                self.assertEqual(sorted(set(self.reasons()) - {op}), before)
+                self.assertNotIn("Retention removed", out)
+                before = sorted(self.reasons())
+
     def test_the_backup_tool_does_not_accept_the_erasure_reason(self):
         out = call("backup", reason=backups.ERASURE_REASON)
         self.assertIn("reason must be", out)

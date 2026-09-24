@@ -403,16 +403,29 @@ def _authorization_in_progress(c) -> bool:
 
 
 def _finish_pre_erasure(paths, handle, b, *, committed: bool):
-    """Record the copy's terminal state and prune its OWN class only.
-    -> `(pruned ids, retention error text or None)`. Never raises: the copy
-    is already real, whatever retention does."""
+    """Record the copy's terminal state and prune its OWN class only -- and
+    only after an erasure that committed: a call that erased nothing must not
+    have removed an older copy either, or "nothing was erased" is false of
+    the backups directory. -> `(pruned ids, retention error text or None)`.
+    Never raises: the copy is already real, whatever retention does."""
     try:
-        return backups.finish_backup(paths, handle, b, committed=committed,
-                                     classes=(backups.ERASURE_REASON,)), None
+        return backups.finish_backup(
+            paths, handle, b, committed=committed,
+            classes=(backups.ERASURE_REASON,) if committed else ()), None
     except backups.BackupError as exc:
         return [], str(exc)
     finally:
         handle.close()
+
+
+def _rolled_back(head: str, b, state) -> str:
+    """A scoped erasure that rolled back: nothing of the ledger went, and no
+    backup copy was pruned (`_finish_pre_erasure` prunes nothing then) -- but
+    this call's settlement may have completed an earlier interrupted erasure
+    on the way, and that is said rather than covered by "nothing"."""
+    text = "%s Backup %s, taken for it, is kept." % (head, b.op_id)
+    settled = backups.settled_note(state.settled if state is not None else None)
+    return text + " " + settled if settled else text
 
 
 def _backup_line(b, state, pruned, retention_error, restores) -> str:
@@ -603,9 +616,9 @@ def purge(args: dict) -> str:
         # The copy stands for a ledger that did not change: an `orphan`, as a
         # rolled-back mint is, and still a valid restore point.
         _finish_pre_erasure(paths, handle, b, committed=False)
-        return ("The purge failed (%s) and was rolled back: nothing was "
-                "erased. Backup %s, taken for it, is kept."
-                % (type(exc).__name__, b.op_id))
+        return _rolled_back("The purge failed (%s) and was rolled back: "
+                            "nothing was erased." % type(exc).__name__,
+                            b, state)
     pruned, retention_error = _finish_pre_erasure(paths, handle, b,
                                                   committed=True)
 
@@ -819,9 +832,9 @@ def forget_local_account(args: dict) -> str:
         if c.in_transaction:
             c.execute("ROLLBACK")
         _finish_pre_erasure(paths, handle, b, committed=False)
-        return ("Erasing %s failed (%s) and was rolled back: nothing was "
-                "erased. Backup %s, taken for it, is kept."
-                % (named, type(exc).__name__, b.op_id))
+        return _rolled_back("Erasing %s failed (%s) and was rolled back: "
+                            "nothing was erased."
+                            % (named, type(exc).__name__), b, state)
     pruned, retention_error = _finish_pre_erasure(paths, handle, b,
                                                   committed=True)
     # What a restore of the copy brings back, and what it does not: a
