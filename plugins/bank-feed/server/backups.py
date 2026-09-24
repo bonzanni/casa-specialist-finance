@@ -173,16 +173,17 @@ def _observe(paths) -> dict:
         raw = paths.index.read_bytes()
         obs["partial_tail"] = bool(raw) and not raw.endswith(b"\n")
         cut = raw[:raw.rfind(b"\n") + 1] if raw else b""
+        # Through settlement's own parser: an index settlement rejects is
+        # "unknown" here, never a naive reading of its lines (Terra, r5).
         pending = set()
-        for line in cut.decode("ascii", "replace").splitlines()[1:]:
-            f = line.split()
-            if len(f) >= 4 and f[1] == "erase":
-                if f[3] == "pending":
-                    pending.add(f[2])
+        for rec in (_parse(cut) if cut else []):
+            if rec["kind"] == "erase":
+                if rec["state"] == "pending":
+                    pending.add(rec["op_id"])
                 else:
-                    pending.discard(f[2])
+                    pending.discard(rec["op_id"])
         obs["pending_erase"] = bool(pending)
-    except OSError:
+    except (OSError, BackupError):
         pass
     if obs["pending_erase"]:
         try:
@@ -521,8 +522,8 @@ def _acquire_index(paths: Paths) -> int:
             if time.monotonic() >= deadline:
                 os.close(fd)
                 raise BackupError(
-                    "the backup index is busy (another backup, restore or "
-                    "listing holds it); %s — try again"
+                    "the backup index was busy (another backup, restore or "
+                    "listing held it); %s — try again"
                     % unchanged(start=False, stop=False)
                     ) from None
             time.sleep(_LOCK_POLL_S)
@@ -567,10 +568,10 @@ class IndexHandle:
             if not f or any(ch.isspace() for ch in f):
                 raise BackupError("index field is empty or carries whitespace")
         if self._poisoned:
-            raise BackupError("the backup index may end in a partial record "
-                              "from an earlier failed write; nothing more is "
-                              "written until the next settlement removes it",
-                              written=False)
+            raise BackupError("an earlier write through this handle failed "
+                              "part way and could not be cut back, so it "
+                              "writes nothing more; the next settlement cuts "
+                              "what that write left", written=False)
         data = (now_ts() + " " + " ".join(fields) + "\n").encode("ascii")
         # A RECORD IS WHOLE OR ABSENT. A write can land a prefix of the line
         # (a full disk, a file-size limit); the operation's next append would
@@ -594,7 +595,15 @@ class IndexHandle:
             _write_whole(self.fd, data)
         except OSError as exc:
             try:
+                landed = os.fstat(self.fd).st_size > start
+            except OSError:
+                landed = True           # unknown: the cut may remove bytes
+            try:
                 os.ftruncate(self.fd, start)
+                if landed and self.settling:
+                    # A fragment of settlement's own write, removed: a cut
+                    # is an effect when bytes went (Astra, v5.2 code r5).
+                    _effect("cut")
             except OSError as cut:
                 self._poisoned = True
                 log = _LOG.get()
@@ -655,13 +664,13 @@ def _parse(raw: bytes) -> list:
     try:
         text = raw[:cut].decode("utf-8")
     except UnicodeDecodeError:
-        raise BackupError("the backup index is unreadable (a line is not "
+        raise BackupError("the backup index was unreadable (a line is not "
                           "UTF-8)") from None
     complete = text.split("\n")[:-1]
     if not complete:
         return []
     if complete[0] != INDEX_HEADER:
-        raise BackupError("the backup index is unreadable (bad header)")
+        raise BackupError("the backup index was unreadable (bad header)")
     records = []
     seen_terminal = set()
     seen_pending = set()
@@ -669,7 +678,7 @@ def _parse(raw: bytes) -> list:
         parts = line.split(" ")
         if len(parts) < 4 or not TS_RE.fullmatch(parts[0]) \
                 or parts[1] not in _TERMINAL or not OP_ID_RE.fullmatch(parts[2]):
-            raise BackupError("the backup index is unreadable (line %d)" % n)
+            raise BackupError("the backup index was unreadable (line %d)" % n)
         ts, kind, op, state = parts[0], parts[1], parts[2], parts[3]
         # `seq` is the record's position in the index: the durable ORDER of
         # events. Timestamps are second-resolution and two backups in one
@@ -678,7 +687,7 @@ def _parse(raw: bytes) -> list:
         rec = {"ts": ts, "kind": kind, "op_id": op, "state": state, "seq": n}
         if kind == "prune":
             if state != "done" or len(parts) != 4:
-                raise BackupError("the backup index is unreadable (line %d)" % n)
+                raise BackupError("the backup index was unreadable (line %d)" % n)
         elif state == "pending":
             # Every op id is a fresh secrets.token_hex(8) mint -- a SECOND
             # pending record for the same (kind, op_id) is never
@@ -689,7 +698,7 @@ def _parse(raw: bytes) -> list:
             # terminal lines for one id, and the index then refuses its
             # own output on the very next settle.
             if (kind, op) in seen_pending:
-                raise BackupError("the backup index is unreadable (line %d:"
+                raise BackupError("the backup index was unreadable (line %d:"
                                   " a second pending record)" % n)
             seen_pending.add((kind, op))
             if kind == "erase":
@@ -698,7 +707,7 @@ def _parse(raw: bytes) -> list:
                 # every copy there is. A junk field is unreadable here for the
                 # same reason a missing one is unreadable below.
                 if len(parts) != 4:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
             else:
                 # The grammar is closed, not best-effort: exactly one extra
                 # field, exactly the key this record kind takes, nothing else.
@@ -709,25 +718,25 @@ def _parse(raw: bytes) -> list:
                 expected_key = "reason" if kind == "backup" else "backup"
                 extra = parts[4:]
                 if len(extra) != 1 or "=" not in extra[0]:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
                 key, _, value = extra[0].partition("=")
                 if key != expected_key or not value:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
                 if kind == "backup":
                     if not reason_is_valid(value):
-                        raise BackupError("the backup index is unreadable (line %d)" % n)
+                        raise BackupError("the backup index was unreadable (line %d)" % n)
                     rec["reason"] = value
                 else:
                     if not OP_ID_RE.fullmatch(value):
-                        raise BackupError("the backup index is unreadable (line %d)" % n)
+                        raise BackupError("the backup index was unreadable (line %d)" % n)
                     rec["backup_id"] = value
         elif state in _TERMINAL[kind] and len(parts) == 4:
             if (kind, op) in seen_terminal:
-                raise BackupError("the backup index is unreadable (line %d:"
+                raise BackupError("the backup index was unreadable (line %d:"
                                   " a second terminal record)" % n)
             seen_terminal.add((kind, op))
         else:
-            raise BackupError("the backup index is unreadable (line %d)" % n)
+            raise BackupError("the backup index was unreadable (line %d)" % n)
         records.append(rec)
     return records
 
@@ -1080,7 +1089,7 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         # was not kept rather than that nothing happened.
         try:
             handle.append("backup", op_id, "aborted")
-            how = "its index records the attempt as aborted"
+            how = "this call recorded the attempt as aborted"
         except BackupError as closing:
             # This call's own event only; what the index holds afterwards
             # is the dispatcher's lock-release sentence (#48).
@@ -1319,12 +1328,12 @@ class ErasureIncomplete(BackupError):
         if self.erasure.failed:
             clauses.append(
                 "%d whole copy(ies) could not be removed — EVERY BACKUP IS A "
-                "WHOLE COPY OF THIS LEDGER, so the copies that may still be "
-                "on disk hold this ledger's data" % self.erasure.failed)
+                "WHOLE COPY OF THIS LEDGER, so each holds this ledger's data"
+                % self.erasure.failed)
         if self.erasure.failed_partials:
             clauses.append(
                 "%d unfinished copy(ies) could not be removed — a partial "
-                "cannot be restored, but it still holds this ledger's pages"
+                "cannot be restored, but it holds this ledger's pages"
                 % self.erasure.failed_partials)
         if self.erasure.failed_snapshots:
             clauses.append(
@@ -1344,8 +1353,8 @@ class ErasureIncomplete(BackupError):
             # No count: an earlier attempt's unlinks are as much at risk as
             # this one's, and this call cannot know how many those were.
             clauses.append(
-                "the directory holding them could not be flushed, so "
-                "removals made in this attempt are not yet durable")
+                "the directory holding them could not be flushed, so the "
+                "removals made in this attempt were not made durable")
         return "; ".join(clauses)
 
     def describe(self) -> str:

@@ -2679,7 +2679,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         pathlib.Path.unlink = selective
         out = call("delete_all_data")
         self.assertIn("1 unfinished copy(ies) could not be removed — a partial "
-                      "cannot be restored, but it still holds this ledger's "
+                      "cannot be restored, but it holds this ledger's "
                       "pages", out)
         self.assertNotIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
         # And what DID go is still counted, per audit shape.

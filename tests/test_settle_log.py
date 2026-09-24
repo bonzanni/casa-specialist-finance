@@ -261,7 +261,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
             out = dispatch("backup", data_dir=self.data, reason="manual")
         last = self.index_lines()[-1].split()
         self.assertEqual([last[1], last[3]], ["backup", "aborted"])
-        self.assertIn("its index records the attempt as aborted. This call's "
+        self.assertIn("this call recorded the attempt as aborted. This call's "
                       "backup copy was not kept.", out)
         self.assertNotIn("changed nothing", out)
         self.assertEqual(list(self.paths.backups_dir.glob("*.partial")), [])
@@ -681,6 +681,39 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertIs(cm.exception.written, False)
         self.assertNotIn("could not be removed", str(cm.exception))
         self.assertEqual(self.paths.index.read_bytes(), before)
+
+    def test_settlements_cut_back_fragment_is_an_effect(self):
+        # Astra, v5.2 code round 5: settlement's closure wrote nine bytes,
+        # the rest failed, and the cut-back removed them: a cut, unreported.
+        self.backups_taken(1)
+        self.append_index("backup 8888888888888888 pending reason=manual")
+        real_write = backups._write_whole
+
+        def write(fd, data):
+            if b"aborted" in data:
+                os.write(fd, data[:9])
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups, "_write_whole", write):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertTrue(self.index_lines()[-1].endswith("reason=manual"))
+        self.assertIn(LEAD + "cut an incomplete last line from the backup "
+                      "index", out)
+
+    def test_an_invalid_index_is_not_read_as_a_pending_erasure(self):
+        # Terra, v5.2 code round 5: a bad header followed by an
+        # erasure-shaped line read as "a recorded erasure" at the release,
+        # though settlement rejects that index.
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_text(
+            "not the header\n20260101T000000Z erase abcdefabcdefabcd "
+            "pending\n")
+        os.chmod(str(self.paths.index), 0o600)
+        out = dispatch("list_accounts", data_dir=self.data)
+        self.assertNotIn("recorded erasure", out)
+        self.assertNotIn("While an erasure is pending", out)
 
     def test_two_cuts_are_counted(self):
         # Astra, v5.2 code round 1: two successful cuts read as one.

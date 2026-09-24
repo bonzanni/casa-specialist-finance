@@ -991,7 +991,7 @@ class TestOpenTimeSettlement(Base):
                 out = tools_backup.list_backups({})
             finally:
                 tools_read.CONN = None
-            self.assertIn("the backup index is unreadable", out)
+            self.assertIn("the backup index was unreadable", out)
             self.assertFalse(conn.in_transaction)
         finally:
             conn.close()
