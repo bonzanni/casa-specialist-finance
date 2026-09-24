@@ -541,8 +541,10 @@ class TestTheErasureIsDurableBeforeItsRecord(Base):
         self.assertTrue(other.exists())      # the other mode's ledger's own
         self.assertEqual([e["state"] for e in state.erasures], ["committed"])
         self.assertEqual(state.settled.snapshots, 1)
-        self.assertIn("completed a pending erasure, removing 1 backup copy(ies) "
-                      "and 1 pre-migration snapshot(s).", said)
+        self.assertIn("this call removed 1 backup copy and 1 pre-migration "
+                      "snapshot; recorded the removal of 1 backup copy; "
+                      "recorded pending erasure abcdefabcdefabcd as complete.",
+                      said)
 
     def test_a_snapshot_only_sweep_is_still_reported(self):
         # No backup copy at all: the snapshot is the only thing that went,
@@ -636,13 +638,11 @@ class TestTheErasureIsDurableBeforeItsRecord(Base):
         # The one renderer of settlement's work (#48) must count every shape
         # a sweep removes, in one phrase (`Erasure.went`).
         log = backups.SettleLog()
-        e = log.erasure("abcdefabcdefabcd")
-        e["attempts"].append(backups.Erasure(removed=1, partials=1,
-                                             snapshots=1, snapshot_sidecars=1))
-        e["completed"] = True
-        self.assertIn("removing 1 backup copy(ies), 1 partial copy(ies), 1 "
-                      "pre-migration snapshot(s) and 1 snapshot journal "
-                      "file(s).", backups.render_log(log))
+        for kind in ("copy", "partial", "snapshot", "journal"):
+            log.effect("unlinked", kind)
+        self.assertIn("removed 1 backup copy, 1 unfinished copy, 1 "
+                      "pre-migration snapshot and 1 snapshot journal file.",
+                      backups.render_log(log))
         # A placed-but-unflushed copy's refusal says only what the backup
         # did; settlement is the dispatcher's sentence.
         exc = backups.BackupError("EIO")
@@ -1544,8 +1544,10 @@ class TestTwoProcesses(RestoreBase):
             said = backups.close_log(token)
             tools_read.CONN = None
         self.assertIn("no restorable backup %s" % bid, out)
-        self.assertEqual("While settling the backup index, this call completed "
-                         "a pending erasure, removing 1 backup copy(ies).", said)
+        self.assertTrue(said.startswith(
+            "While settling the backup index, this call removed 1 backup "
+            "copy; recorded the removal of 1 backup copy; recorded pending "
+            "erasure "), said)
         self.assertIn("This call's own operation changed nothing.", out)
         self.assertNotIn("Nothing was changed.", out)
         self.assertFalse(self.paths.backup_file(bid).exists())

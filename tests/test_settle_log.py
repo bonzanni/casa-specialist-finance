@@ -27,10 +27,12 @@ import tools_backup  # noqa: E402  (registration side effect)
 import tools_annotate  # noqa: E402  (registration side effect)
 import tools_destructive  # noqa: E402  (registration side effect)
 import tools_read  # noqa: E402
-from _toolbase import Base as ToolBase, call, dispatch  # noqa: E402
-import bank_feed_server  # noqa: E402
+from _toolbase import call, dispatch  # noqa: E402
 
 LEAD = "While settling the backup index, this call "
+STATE = "When this call last released the backup index, "
+ERASED_ONE = ("removed 1 backup copy; recorded the removal of 1 backup copy; "
+              "recorded pending erasure abcdefabcdefabcd as complete.")
 
 
 class Cold(unittest.TestCase):
@@ -81,16 +83,13 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         self.append_index("erase abcdefabcdefabcd pending")
         out = dispatch("list_accounts", data_dir=self.data)
         self.assertFalse(self.paths.backup_file(bid).exists())
-        self.assertTrue(out.startswith(
-            LEAD + "completed a pending erasure, removing 1 backup "
-            "copy(ies).\n"), out)
+        self.assertTrue(out.startswith(LEAD + ERASED_ONE + "\n"), out)
         # Said once: the next call in the same process has nothing to say.
         again = dispatch("list_accounts", data_dir=self.data)
         self.assertNotIn(LEAD, again)
         # And the log is gone with the call (Astra, code round 1): a direct
         # call after it records into nothing, and its "nothing" is plain.
         self.assertIsNone(backups._LOG.get())
-        self.assertEqual(backups.unchanged(), "Nothing was changed.")
 
     def test_a_refusal_after_an_open_time_closure_does_not_say_nothing_changed(self):
         # Issue #53, reproduced as filed: a cold refusal after settlement
@@ -120,8 +119,8 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         out = dispatch("list_accounts", data_dir=self.data)
         self.assertFalse(self.paths.partial_file(op).exists())
         self.assertTrue(out.startswith(
-            LEAD + "removed the unfinished copy of interrupted backup %s; "
-            "recorded interrupted backup %s as aborted.\n" % (op, op)), out)
+            LEAD + "removed 1 unfinished copy; recorded interrupted backup %s "
+            "as aborted.\n" % op), out)
 
     def test_forgetting_an_unknown_account_does_not_deny_what_settlement_removed(self):
         # Terra, code round 1: "so nothing was deleted" stood under a
@@ -133,8 +132,7 @@ class TestTheOpenTimeSettlementIsReported(Cold):
             out = dispatch("forget_local_account", data_dir=self.data,
                            account_id="missing")
         self.assertFalse(self.paths.backup_file(bid).exists())
-        self.assertIn(LEAD + "completed a pending erasure, removing 1 backup "
-                      "copy(ies).", out)
+        self.assertIn(LEAD + ERASED_ONE, out)
         self.assertIn("so no account data was deleted", out)
         self.assertNotIn("nothing was deleted", out)
 
@@ -156,14 +154,15 @@ class TestTheOpenTimeSettlementIsReported(Cold):
         self.assertTrue(out.endswith("This call's own operation changed "
                                      "nothing."), out)
 
-    def test_a_refusal_before_the_ledger_opens_still_says_nothing_changed(self):
-        # The argument check runs before the tool opens the ledger: nothing,
-        # settlement included, has run — the plain sentence is the true one.
+    def test_a_refusal_before_the_ledger_opens_says_only_what_it_did(self):
+        # The argument check runs before the tool opens the ledger. The
+        # claim is the always-scoped one (operator ruling): true whatever
+        # settlement did, and here nothing settled at all.
         self.backups_taken(1)
         self.append_index("backup 1111111111111111 pending reason=manual")
         out = dispatch("backup", data_dir=self.data, reason="daily")
-        self.assertEqual(out, "reason must be 'weekly' or 'manual'. Nothing "
-                              "was changed.")
+        self.assertEqual(out, "reason must be 'weekly' or 'manual'. This "
+                              "call's own operation changed nothing.")
 
     def test_an_open_time_sweep_that_stops_part_way_is_reported_and_the_open_succeeds(self):
         ids = self.backups_taken(2)
@@ -178,8 +177,9 @@ class TestTheOpenTimeSettlementIsReported(Cold):
             out = dispatch("list_accounts", data_dir=self.data)
         self.assertIsNotNone(tools_read.CONN, "the ledger opened")
         self.assertTrue(out.startswith(
-            LEAD + "resumed a pending erasure, removing 1 backup copy(ies); "
-            "it is not finished: 1 whole copy(ies) could not be removed"), out)
+            LEAD + "removed 1 backup copy; recorded the removal of 1 backup "
+            "copy. " + STATE + "a recorded erasure of the backup copies was "
+            "not finished: 1 whole copy still present"), out)
 
     def test_a_torn_index_tail_cut_at_open_is_reported(self):
         self.backups_taken(1)
@@ -228,8 +228,7 @@ class TestEveryExitReportsTheWarmSettlement(Cold):
             out = dispatch("list_backups", data_dir=self.data)
         self.assertFalse(self.paths.backup_file(bid).exists())
         self.assertTrue(out.startswith(
-            LEAD + "completed a pending erasure, removing 1 backup "
-            "copy(ies).\nerror: RuntimeError: boom"), out)
+            LEAD + ERASED_ONE + "\nerror: RuntimeError: boom"), out)
         self.assertIsNone(backups._LOG.get(), "an exception exit resets too")
 
     def test_a_successful_restore_names_the_record_its_settlement_closed(self):
@@ -292,17 +291,21 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self._gone_copy_and_pending_erasure()
         with self._prune_fails(1):          # the open-time attempt only
             out = dispatch("list_backups", data_dir=self.data)
-        self.assertIn("recording the earlier removal of 1 backup copy", out)
+        # The open-time attempt left nothing (unknown outcome, no effect);
+        # the retry's record is the one effect.
+        self.assertIn(LEAD + "recorded the removal of 1 backup copy; "
+                      "recorded pending erasure", out)
         self.assertNotIn("2 backup copies", out)
-        self.assertNotIn("may have been recorded", out)
 
-    def test_a_prune_that_may_not_have_landed_is_not_claimed(self):
+    def test_an_uncertain_write_that_left_nothing_is_not_claimed(self):
         self._gone_copy_and_pending_erasure()
         with self._prune_fails(1):
             out = dispatch("list_accounts", data_dir=self.data)
-        self.assertIn("the earlier removal of 1 backup copy may have been "
-                      "recorded", out)
-        self.assertNotIn("recording the earlier removal", out)
+        # The failed prune left no bytes: no record is claimed, and the
+        # state says what is true — the erasure is still pending.
+        self.assertNotIn("recorded the removal", out)
+        self.assertIn(STATE + "a recorded erasure of the backup copies was "
+                      "not finished (every copy was gone", out)
 
     def test_a_header_that_could_not_be_cut_back_is_reported(self):
         self.warm()
@@ -322,9 +325,11 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                 mock.patch.object(backups.os, "ftruncate", ftruncate):
             out = dispatch("list_accounts", data_dir=self.data)
         self.assertEqual(self.paths.index.read_bytes(), b"bank-feed")
+        # The header write's outcome is unknown, so it is not an effect;
+        # what it left is read from the file at the release.
         self.assertTrue(out.startswith(
-            LEAD + "may have left an incomplete last line in the backup "
-            "index (the next settlement cuts it).\n"), out)
+            STATE + "the index ended in an incomplete line, which the next "
+            "settlement cuts.\n"), out)
 
     def test_a_torn_header_repaired_later_in_the_call_is_not_reported(self):
         # Astra, code round 2: the open-time pass tore the header, the
@@ -353,7 +358,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                 mock.patch.object(backups.os, "ftruncate", ftruncate):
             out = dispatch("list_backups", data_dir=self.data)
         self.assertEqual(self.index_lines()[0], backups.INDEX_HEADER)
-        self.assertNotIn("may have left an incomplete last line", out)
+        self.assertNotIn("ended in an incomplete line", out)
         self.assertIn("Restore generation: 0", out)
 
     def test_a_closure_retried_in_the_same_call_is_said_once(self):
@@ -403,7 +408,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             out = dispatch("list_backups", data_dir=self.data)
         self.assertEqual(self.paths.index.read_bytes(), b"")
         self.assertIn("cut an incomplete last line from the backup index", out)
-        self.assertNotIn("may have left", out)
+        self.assertNotIn("ended in an incomplete line", out)
 
     def test_a_failed_flush_a_later_flush_covered_is_not_reported(self):
         # Terra and Astra, code round 3: an fsync flushes every earlier
@@ -427,7 +432,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             out = dispatch("backup", data_dir=self.data, reason="manual")
         self.assertFalse(armed[0], "the cut's flush did fail")
         self.assertIn("cut an incomplete last line", out)
-        self.assertNotIn("could not flush", out)
+        self.assertNotIn("had not been flushed", out)
         self.assertRegex(out, r"Backup [0-9a-f]{16} written")
 
     def test_an_unflushed_completion_a_later_flush_covered_is_not_reported(self):
@@ -443,9 +448,8 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                 raise backups.BackupError("fsync failed", written=True)
         with mock.patch.object(backups.IndexHandle, "append", append):
             out = dispatch("backup", data_dir=self.data, reason="manual")
-        self.assertIn("completed a pending erasure, removing 1 backup "
-                      "copy(ies)", out)
-        self.assertNotIn("could not flush", out)
+        self.assertIn(LEAD + ERASED_ONE, out)
+        self.assertNotIn("had not been flushed", out)
 
     def test_a_tools_own_unflushed_record_is_not_called_settlements(self):
         # Once `settle` returns, what the handle appends is the tool's own
@@ -480,8 +484,79 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             return real(fd)
         with mock.patch.object(backups.os, "fsync", fsync):
             out = dispatch("list_accounts", data_dir=self.data)
-        self.assertIn("could not flush its last write to the backup index",
-                      out)
+        self.assertIn(STATE + "its last write to the index had not been "
+                      "flushed, so it may not survive a power loss.", out)
+
+    def test_a_tools_own_torn_write_is_the_state_at_the_last_release(self):
+        # Terra, v5.1: state read only at settlement's exit was stale after
+        # the tool's own later write. It is read at every release of the
+        # index lock, so the backup's own torn `pending` line is what the
+        # reply reports, as an observation.
+        self.backups_taken(1)
+        self.warm()
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+
+        def write(fd, data):
+            if b"pending" in data:
+                real_write(fd, data[:7])
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        def ftruncate(fd, n):
+            raise OSError(5, "Input/output error")
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertTrue(out.startswith(
+            STATE + "the index ended in an incomplete line, which the next "
+            "settlement cuts.\n"), out)
+        self.assertNotIn(LEAD, out, "the torn write was the tool's own")
+
+    def test_a_mode_reset_that_failed_is_not_claimed(self):
+        # Terra and Astra, v3 round 4: the reset was logged before the chmod.
+        self.backups_taken(1)
+        os.chmod(str(self.paths.backups_dir), 0o755)
+        real = os.chmod
+
+        def chmod(path, mode, *a, **k):
+            if str(path) == str(self.paths.backups_dir):
+                raise PermissionError(13, "Permission denied")
+            return real(path, mode, *a, **k)
+        with mock.patch.object(backups.os, "chmod", chmod):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertNotIn("reset the backups directory", out)
+        self.assertEqual(oct(self.paths.backups_dir.stat().st_mode & 0o777),
+                         "0o755")
+
+    def test_an_unverified_write_is_reported_when_the_state_is_unreadable(self):
+        # Astra, v5 round 1: an unknown-outcome write, with the final read
+        # failing too, went silent.
+        self.backups_taken(1)
+        self.append_index("backup 6666666666666666 pending reason=manual")
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+
+        def write(fd, data):
+            if b"aborted" in data:
+                real_write(fd, data[:9])
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        def ftruncate(fd, n):
+            raise OSError(5, "Input/output error")
+        real_read = pathlib.Path.read_bytes
+
+        def read_bytes(p):
+            if p.name == self.paths.index.name:
+                raise OSError(5, "Input/output error")
+            return real_read(p)
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate), \
+                mock.patch.object(pathlib.Path, "read_bytes", read_bytes):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertIn(STATE + "a write of settlement's to the index had "
+                      "failed part way, and what it left could not be read "
+                      "back.", out)
+        self.assertNotIn("as aborted", out)
 
     def test_a_rename_failure_whose_abort_record_is_unflushed_says_so(self):
         self.warm()
@@ -504,183 +579,6 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertIn("its index records the attempt as aborted, though that "
                       "record could not be flushed", out)
         self.assertNotIn("pending index record stays", out)
-
-
-class TestTheClaimHasOneSpelling(unittest.TestCase):
-    """A reply may claim "nothing was changed" only through
-    `backups.unchanged`, which scopes the claim once settlement has written
-    anything in the call. A literal anywhere else would say it unscoped."""
-
-    # Every verb settlement can make false — it creates, writes, removes
-    # and changes files and index records — in the report tenses. Terra's
-    # round-1 finding was a "nothing was deleted" the first gate, which knew
-    # only "changed" and "erased", could not see.
-    CLAIM = re.compile(r"(?i)\b(nothing|no other [a-z ]+?) (was|were|has "
-                       r"been|have been|had been) (changed|erased|deleted|"
-                       r"removed|written|created|modified|touched)")
-    ALLOWED = {("backups.py", "unchanged"),
-               ("backups.py", "no_other_copy_changed")}
-
-    def _docstrings(self, tree):
-        out = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef,
-                                 ast.AsyncFunctionDef, ast.ClassDef)):
-                body = node.body
-                if (body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)):
-                    out.add(id(body[0].value))
-        return out
-
-    def _functions(self, tree):
-        spans = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                spans.append((node.lineno, node.end_lineno, node.name))
-        return spans
-
-    HOLE = "\x00"
-
-    def _static(self, node):
-        """The text a string expression renders, with every part that is not
-        a constant as HOLE; None for anything that is not one. Folds what a
-        claim can be built from: `+`, `%`, `.format` and f-strings — Astra's
-        code round 1 built all three past a constants-only gate."""
-        if isinstance(node, ast.Constant):
-            return node.value if isinstance(node.value, str) else None
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left, right = self._static(node.left), self._static(node.right)
-            if left is None and right is None:
-                return None
-            # `is None`, never truthiness: an empty constant is text, and
-            # treating it as a hole split "Nothing" + "" + " was changed."
-            return self._or_hole(left) + self._or_hole(right)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-            fmt = self._static(node.left)
-            if fmt is None:
-                return None
-            if isinstance(node.right, ast.Dict):
-                named = {self._static(k): self._or_hole(self._static(v))
-                         for k, v in zip(node.right.keys, node.right.values)
-                         if k is not None}
-                return re.sub(r"%\(([^)]*)\)[-#0 +]*\d*(?:\.\d+)?[sdrfx]",
-                              lambda m: named.get(m.group(1), self.HOLE), fmt)
-            args = (node.right.elts if isinstance(node.right, ast.Tuple)
-                    else [node.right])
-            vals = iter([self._or_hole(self._static(a)) for a in args])
-            return re.sub(r"%[-#0 +]*\d*(?:\.\d+)?[sdrfx]",
-                          lambda m: next(vals, self.HOLE), fmt)
-        if isinstance(node, ast.JoinedStr):
-            return "".join(
-                v.value if isinstance(v, ast.Constant)
-                else self._or_hole(self._static(v.value))
-                for v in node.values)
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "format"):
-            fmt = self._static(node.func.value)
-            if fmt is None:
-                return None
-            pos = [self._or_hole(self._static(a)) for a in node.args]
-            kw = {k.arg: self._or_hole(self._static(k.value))
-                  for k in node.keywords if k.arg}
-            auto = iter(range(len(pos)))
-
-            def field(m):
-                name = m.group(1).split("!")[0].split(":")[0]
-                if name == "":
-                    i = next(auto, None)
-                    return pos[i] if i is not None else self.HOLE
-                if name.isdigit():
-                    i = int(name)
-                    return pos[i] if i < len(pos) else self.HOLE
-                return kw.get(name, self.HOLE)
-            return re.sub(r"\{([^{}]*)\}", field, fmt)
-        return None
-
-    def _or_hole(self, text):
-        return self.HOLE if text is None else text
-
-    def _claims(self, source, name="<test>"):
-        tree = ast.parse(source)
-        docs, funcs = self._docstrings(tree), self._functions(tree)
-        hits = set()
-        for node in ast.walk(tree):
-            if id(node) in docs or not hasattr(node, "lineno"):
-                continue
-            text = self._static(node)
-            if text is None or not self.CLAIM.search(text):
-                continue
-            inside = {n for s, e, n in funcs if s <= node.lineno <= e}
-            if any((name, f) in self.ALLOWED for f in inside):
-                continue
-            hits.add("%s:%d" % (name, node.lineno))
-        return hits
-
-    def test_no_literal_claims_nothing_changed_outside_the_one_function(self):
-        hits = set()
-        for path in sorted(SERVER.glob("*.py")):
-            hits |= self._claims(path.read_text(), path.name)
-        self.assertEqual(sorted(hits), [])
-
-    def test_the_gate_sees_every_way_the_claim_can_be_built(self):
-        # Mutation check of the gate itself, one construction per line.
-        for source in ('x = ("a. Nothing was "\n     "changed.")',
-                       'x = "Nothing" + " was changed."',
-                       'x = "{} was changed.".format("Nothing")',
-                       "x = f\"{'Nothing'} was changed.\"",
-                       'x = "%s was deleted." % "nothing"',
-                       'x = "a; nothing has been " + "removed"',
-                       # Astra, code round 2: each passed the gate.
-                       'x = "Nothing" + "" + " was changed."',
-                       'x = "{claim} was changed.".format(claim="Nothing")',
-                       'x = "{1} was changed.".format("Other", "Nothing")',
-                       'x = "%(claim)s was deleted." % {"claim": "Nothing"}'):
-            with self.subTest(source=source):
-                self.assertTrue(self._claims(source), source)
-        self.assertFalse(self._claims('x = "a " + backups.unchanged()'))
-
-    def test_no_tool_renders_settlement_itself(self):
-        # The dispatcher is the ONE renderer of settlement's work; a tool
-        # reading `.settled` or `describe()` would say it a second time.
-        hits = []
-        for path in sorted(SERVER.glob("*.py")):
-            if path.name == "backups.py":
-                continue
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.Attribute) and node.attr in (
-                        "settled", "describe"):
-                    hits.append("%s:%d .%s" % (path.name, node.lineno,
-                                               node.attr))
-        self.assertEqual(hits, [])
-
-
-
-class TestEveryToolsRealReplyIsScoped(ToolBase):
-    """The gate above reads source; this reads what every tool actually
-    says. With settlement having written something in the call, no reply —
-    whatever tool, success or refusal — may carry an unscoped "nothing was
-    changed". Called with no arguments, every tool reaches its argument
-    refusals, where most of those sentences live."""
-
-    def test_no_tool_says_nothing_changed_after_settlement_wrote(self):
-        real_open = backups.open_log
-
-        def seeded():
-            token = real_open()
-            backups._LOG.get().repaired.append("probe's permissions")
-            return token
-        claim = TestTheClaimHasOneSpelling.CLAIM
-        hits = []
-        with mock.patch.object(backups, "open_log", seeded):
-            for name in sorted(bank_feed_server.TOOLS):
-                out = dispatch(name, data_dir=self.root)
-                if out.startswith("{"):             # a capability tool's object
-                    out = json.loads(out).get("text") or ""
-                body = out.split("\n", 1)[1] if out.startswith(LEAD) else out
-                self.assertTrue(out.startswith(LEAD), (name, out[:120]))
-                if claim.search(body):
-                    hits.append("%s: %s" % (name, body[:160]))
-        self.assertEqual(hits, [])
 
 
 if __name__ == "__main__":

@@ -76,12 +76,12 @@ class TestTagging(Base):
 
     def test_invalid_tag_refuses_whole_call(self):
         out = call("tag_transaction", row_ids=[self.rid], tags=["ok", "BAD!"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.rid), [])
 
     def test_empty_tags_array_refuses(self):
         out = call("tag_transaction", row_ids=[self.rid], tags=[])
-        self.assertIn("Nothing was changed", out.replace("changed.", "changed"))
+        self.assertIn("This call's own operation changed nothing", out.replace("changed.", "changed"))
         self.assertEqual(self.tags_of(self.rid), [])
 
     def test_more_than_16_tags_per_call_refuses(self):
@@ -127,7 +127,7 @@ class TestTagging(Base):
     def test_non_string_tags_refuse(self):
         for bad in ([None], [True], [123], ["ok", 7]):
             out = call("tag_transaction", row_ids=[self.rid], tags=bad)
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.rid), [])
 
     def test_unknown_row_state_fails_closed(self):
@@ -203,7 +203,7 @@ class TestNotes(Base):
     def test_non_string_note_refuses(self):
         for bad in (123, True, None, 0):
             out = call("add_note", row_ids=[self.rid], note=bad, author="user")
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self._notes(), [])
 
     def test_blank_note_refuses(self):
@@ -445,19 +445,19 @@ class TestBatchTagging(Base):
     def test_non_int_element_refuses_everything(self):
         for bad in ("7", True, None, 1.5):
             out = call("tag_transaction", row_ids=[self.r1, bad], tags=["a"])
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
             self.assertEqual(self.tags_of(self.r1), [])
 
     def test_empty_and_non_list_refuse(self):
         for bad in ([], "not-a-list", 7, None):
             out = call("tag_transaction", row_ids=bad, tags=["a"])
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
 
     def test_over_100_row_ids_refuse_before_dedupe(self):
         # 101 copies of one id dedupe to 1 — the cap must fire FIRST, on the
         # raw length, or the documented output bound is unenforced.
         out = call("tag_transaction", row_ids=[self.r1] * 101, tags=["a"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.r1), [])
 
     def test_one_bad_row_rolls_back_all_and_names_every_failure(self):
@@ -468,7 +468,7 @@ class TestBatchTagging(Base):
         self.conn.commit()
         out = call("tag_transaction",
                    row_ids=[self.r1, self.r2, 99999], tags=["a"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertIn("#%d" % self.r2, out)      # superseded, named
         self.assertIn("#99999", out)             # unknown, named
         self.assertIn("#%d" % replacement, out)  # pointer at the live row
@@ -480,7 +480,7 @@ class TestBatchTagging(Base):
         # r1 has 31 tags; two new ones would pass 32
         out = call("tag_transaction", row_ids=[self.r1, self.r2],
                    tags=["x1", "x2"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.r2), [])
 
     def test_state_and_cap_failures_are_named_in_the_same_refusal(self):
@@ -496,7 +496,7 @@ class TestBatchTagging(Base):
         self.conn.commit()
         out = call("tag_transaction", row_ids=[self.r1, self.r3],
                    tags=["x1", "x2"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertIn("#%d was superseded" % self.r3, out)   # state failure
         self.assertIn("row #%d already carries 31 tags" % self.r1, out)
         self.assertEqual(len(self.tags_of(self.r1)), 31)     # nothing written
@@ -537,7 +537,7 @@ class TestBatchUntagging(Base):
     def test_absent_tags_reported_rows_still_all_or_nothing(self):
         out = call("untag_transaction", row_ids=[self.r1, 99999],
                    tags=["a"])
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.r1), ["a", "b"])  # rolled back
 
 
@@ -567,7 +567,7 @@ class TestBatchNotes(Base):
         # journal entries no tool can remove.
         out = call("add_note", row_ids=[self.r1, 99999],
                    note="x", author="user")
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self._notes(self.r1), [])
 
 
@@ -595,7 +595,7 @@ class TestRenameTag(Base):
         call("tag_transaction", row_ids=[self.r1, self.r2],
              tags=["groceries"])
         out = call("rename_tag", old="ah", new="groceries")
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertIn("irreversible", out)
         self.assertEqual(self.tags_of(self.r1), ["ah", "groceries"])
 
@@ -611,7 +611,7 @@ class TestRenameTag(Base):
         call("tag_transaction", row_ids=[self.r1], tags=["ah"])
         call("tag_transaction", row_ids=[self.r2], tags=["groceries"])
         out = call("rename_tag", old="ah", new="groceries", merge="true")
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
 
     def test_merge_as_number_refuses_and_writes_nothing(self):
         # `merge in (True, False)` passed merge=1 because Python equates 1 ==
@@ -620,14 +620,14 @@ class TestRenameTag(Base):
         call("tag_transaction", row_ids=[self.r1], tags=["ah"])
         for bad in (1, 0, 1.0):
             out = call("rename_tag", old="ah", new="groceries", merge=bad)
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
             self.assertEqual(self.tags_of(self.r1), ["ah"])
 
     def test_unknown_old_and_same_name_refuse(self):
-        self.assertIn("Nothing was changed",
+        self.assertIn("This call's own operation changed nothing",
                       call("rename_tag", old="ghost", new="x"))
         call("tag_transaction", row_ids=[self.r1], tags=["ah"])
-        self.assertIn("Nothing was changed",
+        self.assertIn("This call's own operation changed nothing",
                       call("rename_tag", old="ah", new=" AH "))
 
     def test_superseded_rows_renamed_too(self):
@@ -673,7 +673,7 @@ class TestDeleteTag(Base):
                              for l in out.splitlines()))
 
     def test_unused_tag_refuses(self):
-        self.assertIn("Nothing was changed", call("delete_tag", tag="ghost"))
+        self.assertIn("This call's own operation changed nothing", call("delete_tag", tag="ghost"))
 
     def test_other_tags_untouched(self):
         call("tag_transaction", row_ids=[self.r1], tags=["ah", "keep"])
@@ -737,7 +737,7 @@ class TestTaxonomyOpsPropagateToRules(Base):
                           " (?, 'movement', 't')", (self.rid,))
         reply = call("rename_tag", old="movement", new="sport")
         self.assertIn("merge", reply)
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
 
     def test_delete_removes_from_rules_and_deletes_empty_rule(self):
         self._rule(tags="food")
@@ -766,23 +766,23 @@ class TestWorkflowArguments(Base):
             out = call(tool, row_ids=[self.rid], tags=["acct::matched"])
             self.assertIn("belongs to another workflow", out)
             self.assertIn("workflow", out)
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.rid), [])
 
     def test_workflow_requires_expected_generation_and_vice_versa(self):
         out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                    workflow="acct@1.0.0")
-        self.assertIn("expected_generation", out); self.assertIn("Nothing was changed", out)
+        self.assertIn("expected_generation", out); self.assertIn("This call's own operation changed nothing", out)
         out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                    expected_generation=0)
-        self.assertIn("workflow", out); self.assertIn("Nothing was changed", out)
+        self.assertIn("workflow", out); self.assertIn("This call's own operation changed nothing", out)
         for bad in (True, -1, "0", 1.5):
             out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                        workflow="acct@1.0.0", expected_generation=bad)
-            self.assertIn("Nothing was changed", out, repr(bad))
+            self.assertIn("This call's own operation changed nothing", out, repr(bad))
         out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                    workflow="Acct 1", expected_generation=0)
-        self.assertIn("workflow", out); self.assertIn("Nothing was changed", out)
+        self.assertIn("workflow", out); self.assertIn("This call's own operation changed nothing", out)
 
     def test_a_workflow_write_refused_by_an_incomplete_erasure_says_what_went(self):
         # The fence settles before it validates, so a settlement that unlinks
@@ -807,8 +807,8 @@ class TestWorkflowArguments(Base):
                        author="agent", workflow="acct@1.0.0",
                        expected_generation=0)
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("this call resumed a pending erasure, removing 1 "
-                      "backup copy(ies); it is not finished", out)
+        self.assertIn("this call removed 1 backup copy", out)
+        self.assertIn("was not finished: 1 whole copy still present", out)
         self.assertIn("so this call did not run.", out)
         self.assertEqual(
             self.conn.execute("SELECT count(*) FROM transaction_notes WHERE"
@@ -843,7 +843,7 @@ class TestWorkflowArguments(Base):
         out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                    workflow="acct@1.0.0", expected_generation=3)
         self.assertIn("the ledger was restored since this pass began", out)
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM transaction_notes").fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM workflow_registrations").fetchone()[0], 0)
         self.assertFalse(self.paths.backups_dir.exists() and any(self.paths.backups_dir.iterdir()))
@@ -900,7 +900,7 @@ class TestWorkflowArguments(Base):
             f.write("garbage line\n")
         out = call("add_note", row_ids=[self.rid], note="x", author="agent",
                    workflow="acct@1.0.0", expected_generation=0)
-        self.assertIn("unreadable", out); self.assertIn("Nothing was changed", out)
+        self.assertIn("unreadable", out); self.assertIn("This call's own operation changed nothing", out)
         out = call("add_note", row_ids=[self.rid], note="plain", author="agent")
         self.assertIn("Note added", out, "ordinary writes are unaffected")
 

@@ -51,7 +51,7 @@ class TestAddRule(Base):
                     dict(counterparty="X", tags=["a"],
                          direction="DBIT")):
             reply = call("add_rule", **bad)
-            self.assertIn("Nothing was changed.", reply)
+            self.assertIn("This call's own operation changed nothing.", reply)
         self.assertEqual(self.n_rules(), 0)
 
     def test_duplicate_signature_refused_with_pointer(self):
@@ -59,7 +59,7 @@ class TestAddRule(Base):
         reply = call("add_rule", counterparty="ALBERT  heijn",
                      tags=["different"])
         self.assertIn("#1", reply)
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
         self.assertEqual(self.n_rules(), 1)
 
     def test_rulebook_cap(self):
@@ -71,7 +71,7 @@ class TestAddRule(Base):
         self.conn.execute("COMMIT")
         reply = call("add_rule", counterparty="X", tags=["a"])
         self.assertIn("500", reply)
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
 
 
 class TestRemoveRule(Base):
@@ -82,11 +82,11 @@ class TestRemoveRule(Base):
         self.assertEqual(self.n_rules(), 0)
 
     def test_unknown_and_type_refusals(self):
-        self.assertIn("Nothing was changed.",
+        self.assertIn("This call's own operation changed nothing.",
                       call("remove_rule", rule_id=99))
-        self.assertIn("Nothing was changed.",
+        self.assertIn("This call's own operation changed nothing.",
                       call("remove_rule", rule_id=True))
-        self.assertIn("Nothing was changed.",
+        self.assertIn("This call's own operation changed nothing.",
                       call("remove_rule", rule_id="1"))
 
 
@@ -105,7 +105,7 @@ class TestReplaceRule(Base):
         call("add_rule", counterparty="X", tags=["a"])
         reply = call("replace_rule", rule_id=1, counterparty="X",
                      tags=["awaiting-operator"])
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
         self.assertEqual(self.conn.execute(
             "SELECT tags FROM tag_rules").fetchone()[0], "a")
 
@@ -115,10 +115,10 @@ class TestReplaceRule(Base):
         reply = call("replace_rule", rule_id=2, counterparty="X",
                      tags=["b"])
         self.assertIn("#1", reply)
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
 
     def test_unknown_rule_id(self):
-        self.assertIn("Nothing was changed.",
+        self.assertIn("This call's own operation changed nothing.",
                       call("replace_rule", rule_id=9, counterparty="X",
                            tags=["a"]))
 
@@ -299,14 +299,14 @@ class TestAccountScopedRules(TestApplyRules):
         reply = call("add_rule", counterparty="X", tags=["a"],
                      account="nope")
         self.assertIn("list_accounts", reply)
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
         self.assertEqual(self.n_rules(), 0)
 
     def test_replace_onto_an_unknown_account_is_refused(self):
         call("add_rule", counterparty="X", tags=["a"])
         reply = call("replace_rule", rule_id=1, counterparty="X",
                      tags=["a"], account="nope")
-        self.assertIn("Nothing was changed.", reply)
+        self.assertIn("This call's own operation changed nothing.", reply)
         self.assertIsNone(self.conn.execute(
             "SELECT account_id FROM tag_rules").fetchone()[0])
 

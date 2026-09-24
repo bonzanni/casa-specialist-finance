@@ -181,8 +181,9 @@ each left out whichever shape was added after them. What a *settlement* removed 
 earlier erasure completed on the way, or this call's own stalled sweep finished by the
 settlement that opens `delete_all_data`'s row sweep — is never rendered by the tool: the
 dispatcher says it once, for every call, success or refusal
-([`architecture/backups-settlement.md`](../architecture/backups-settlement.md)), and
-`backups.unchanged` scopes each "Nothing was erased" to the call's own erasure then. The
+([`architecture/backups-settlement.md`](../architecture/backups-settlement.md)). Every
+refusal claims only its own erasure ("this call's own erasure erased nothing"), and the
+reply's account of what is still left is the dispatcher's lock-release sentence. The
 `WARNING` is reported, never raised: the ledger is already gone, and raising would discard
 the only account of it.
 

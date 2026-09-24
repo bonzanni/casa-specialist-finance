@@ -837,7 +837,7 @@ class TestPurge(DestructiveBase):
                 self.tx(ik="jun", booking_date="2025-06-01")
                 out = call("purge", before_date=value, user_work="keep")
                 self.assertIn("YYYY-MM-DD", out)
-                self.assertIn("Nothing", out)
+                self.assertIn("changed nothing", out)
                 self.assertEqual(self.count("transactions"), 2)
 
     def test_purge_touches_neither_accounts_nor_consents_nor_balances(self):
@@ -876,7 +876,7 @@ class TestPurge(DestructiveBase):
         apply.record_coverage(self.raw, "acc1", "2020-01-01", "2026-01-01", "s1", incarnation="")
         self.fail_at("DELETE FROM transactions")
         out = call("purge", before_date="2024-01-01", user_work="keep")
-        self.assertIn("rolled back: nothing was erased", out)
+        self.assertIn("rolled back: this call's own erasure erased nothing", out)
         self.assertNotIn("Purged", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual(self.coverage(), [("2020-01-01", "2026-01-01")])
@@ -1267,7 +1267,7 @@ class TestForgetLocalAccount(DestructiveBase):
         out = call("forget_local_account", account_id="drop")
         # Reported, not raised: the pre-erasure copy already exists, and the
         # operator needs its id as much as the news that nothing was erased.
-        self.assertIn("rolled back: nothing was erased", out)
+        self.assertIn("rolled back: this call's own erasure erased nothing", out)
         self.assertNotIn("Erased", out)
         self.assertEqual(self.count("accounts"), 2)
         self.assertEqual(self.count("transactions"), 2)
@@ -2378,7 +2378,7 @@ class TestDeleteAllDataSettlesFirst(DestructiveBase):
         self.addCleanup(setattr, backups, "settle", original)
 
         out = call("delete_all_data")
-        self.assertIn("Nothing was erased", out)
+        self.assertIn("This call's own erasure erased nothing", out)
         # Every table the erasure would have emptied is still full, and no
         # bank was ever asked: a settlement refusal happens before the
         # erasure loop even starts, so it must be as if the call never ran.
@@ -2495,14 +2495,14 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         repair = lambda: setattr(pathlib.Path, "unlink", real_unlink)  # noqa: E731
         self.addCleanup(repair)
         pathlib.Path.unlink = selective
-        out = call("delete_all_data")
+        out = dispatch("delete_all_data")
         # The other copy went, and its audit line with it.
         self.assertEqual([p.name for p in paths.backups_dir.iterdir()], [doomed])
         self.assertEqual(len(self._prunes(paths)), 1)
         # The count sentence counts ONLY what was removed; the failure is the
         # warning's subject, with a count and never a path.
         self.assertIn("1 backup copy(ies) were erased too", out)
-        self.assertIn("WARNING — the local ledger IS erased, but at least one "
+        self.assertIn("WARNING — the local ledger IS erased, but when this call's own sweep ran, at least one "
                       "backup file beside it could not be removed: 1 whole "
                       "copy(ies) could not be removed — EVERY BACKUP IS A "
                       "WHOLE COPY OF THIS LEDGER", out)
@@ -2512,9 +2512,13 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # the set it really is -- "every other bank-feed call" was false of
         # every read, of `sync`, and of every write carrying no workflow,
         # which sent an operator looking for a fault that is not there.
-        self.assertIn("No backup, restore, total erasure or workflow write "
-                      "runs until the erasure completes; every other call, "
-                      "reads included, is unaffected.", out)
+        # Now stated once, by the dispatcher, as what this call saw when it
+        # last released the index (rule 2b): the sweep's warning above is
+        # only its own event.
+        self.assertIn("Until it completes, no backup, restore, total erasure "
+                      "or workflow write runs; reads and every other call do.",
+                      out)
+        self.assertEqual(out.count("no backup, restore, total erasure"), 1)
         self.assertNotIn("Every other bank-feed call", out)
         self.assertNotIn(doomed, out)
         # THE RETRY NOW MAKES PROGRESS. The erasure's pending record is still
@@ -2544,12 +2548,12 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # "nothing was erased" there would be false about the copies this call
         # just retried and silent about the only residue there is.
         out = dispatch("delete_all_data")
-        self.assertIn("this call resumed a pending erasure; it is not "
-                      "finished: 2 whole copy(ies) could not be removed — "
-                      "EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER, so the "
-                      "copies that may still be on disk hold this ledger's "
-                      "data.", out)
-        self.assertIn("\nAn erasure recorded earlier is not finished.", out)
+        self.assertIn("When this call last released the backup index, a "
+                      "recorded erasure of the backup copies was not "
+                      "finished: 2 whole copies still present — EVERY BACKUP "
+                      "IS A WHOLE COPY OF THIS LEDGER", out)
+        self.assertIn("\nAn erasure recorded earlier could not be finished, "
+                      "so this call's own erasure did not run.", out)
         self.assertIn(paths.backups_dir.name, out)
         self.assertNotIn("Nothing was erased", out)
         self.assertFalse(tools_read.CONN.in_transaction)
@@ -2587,7 +2591,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # raised, and never as "nothing happened".
         self.assertEqual(self.count("transactions"), 0)
         self.assertEqual(self.count("accounts"), 0)
-        self.assertIn("WARNING — the local ledger IS erased, but at least one "
+        self.assertIn("WARNING — the local ledger IS erased, but when this call's own sweep ran, at least one "
                       "backup file beside it could not be removed", out)
         self.assertIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
         self.assertNotIn("were erased too — each is a copy", out)
@@ -2597,8 +2601,10 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # The settlement also resets the directory this test sealed (0500),
         # and says so in the same sentence.
         self.assertIn("reset the backups directory's permissions to 0700 "
-                      "(they were 0500); completed a pending erasure, "
-                      "removing 2 backup copy(ies)", out)
+                      "(they were 0500); removed 2 backup copies", out)
+        # The erasure finished later in the call, so no state sentence
+        # contradicts the sweep's own warning above (rule 2b).
+        self.assertNotIn("When this call last released", out)
         self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 0)
 
     def test_an_index_append_that_fails_after_its_unlink_still_gets_its_record(self):
@@ -2635,9 +2641,11 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # The settlement that opens the session-row sweep, later in the same
         # call, completes the stalled erasure — and the reply says so, below
         # the warning that it had stalled.
-        self.assertIn("While settling the backup index, this call completed "
-                      "a pending erasure, removing 1 backup copy(ies), "
-                      "recording the earlier removal of 1 backup copy", out)
+        # One copy removed now; two prune records — this removal's and the
+        # earlier one's that never got its record.
+        self.assertIn("While settling the backup index, this call removed 1 "
+                      "backup copy; recorded the removal of 2 backup copies",
+                      out)
         listing = call("list_backups")
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
         # EXACTLY ONE `prune` PER INDEXED COPY, including the one whose file
@@ -2689,7 +2697,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
             return real_write(fd, data)
         with mock.patch.object(backups.os, "write", write):
             out = call("delete_all_data")
-        self.assertIn("Nothing was erased", out)
+        self.assertIn("This call's own erasure erased nothing", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual([l for l in paths.index.read_text().splitlines()
                           if l.split()[1:2] == ["erase"]], [])
@@ -2970,7 +2978,7 @@ class TestTheEraseRecordIsWholeOrAbsent(DestructiveBase):
         with mock.patch.object(backups.os, "write", write), \
                 mock.patch.object(backups.os, "ftruncate", trunc):
             out = call("delete_all_data")
-        self.assertIn("Nothing was erased", out)
+        self.assertIn("This call's own erasure erased nothing", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual(self.count("accounts"), 1)
         self.assertEqual(paths.index.read_bytes(), before)
@@ -3172,7 +3180,7 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
                 raise OSError(errno.EACCES, "Permission denied")
             return real_unlink(p, *a, **kw)
         with mock.patch.object(pathlib.Path, "unlink", unlink):
-            out = call("delete_all_data")
+            out = dispatch("delete_all_data")
         self.assertTrue(snap.exists())
         self.assertIn("1 pre-migration snapshot(s) beside the ledger could "
                       "not be removed", out)
@@ -3183,8 +3191,8 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
         # The next settlement, in any call that settles, finishes the sweep,
         # and the listing says what it removed on the way.
         listing = dispatch("list_backups")
-        self.assertIn("this call completed a pending erasure, removing 1 "
-                      "pre-migration snapshot(s).", listing)
+        self.assertIn("this call removed 1 pre-migration snapshot; recorded "
+                      "pending erasure", listing)
         self.assertFalse(snap.exists())
         self.assertEqual(self._erase_states(paths), ["pending", "committed"])
         # The session row the first call kept (its sweep could not be
@@ -3218,7 +3226,7 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
                 raise OSError(errno.EACCES, "Permission denied")
             return real_unlink(p, *a, **kw)
         with mock.patch.object(pathlib.Path, "unlink", unlink):
-            out = call("delete_all_data")
+            out = dispatch("delete_all_data")
         self.assertIn("1 file(s) beside a pre-migration snapshot (its "
                       "journal) could not be removed", out)
         self.assertNotIn("WHOLE COPY", out)
@@ -3263,8 +3271,8 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
         with mock.patch.object(pathlib.Path, "unlink", unlink):
             call("delete_all_data")
         out = dispatch("delete_all_data")
-        self.assertIn("this call completed a pending erasure, removing 1 "
-                      "pre-migration snapshot(s).", out)
+        self.assertIn("this call removed 1 pre-migration snapshot; recorded "
+                      "pending erasure", out)
         self.assertFalse(snap.exists())
         self.assertEqual(self._files_holding(SESSION_ID), [])
 
@@ -3281,8 +3289,8 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
             call("delete_all_data")
         out = dispatch("backup", reason="manual")
         self.assertIn("written (manual", out)
-        self.assertIn("this call completed a pending erasure, removing 1 "
-                      "pre-migration snapshot(s).", out)
+        self.assertIn("this call removed 1 pre-migration snapshot; recorded "
+                      "pending erasure", out)
         self.assertFalse(snap.exists())
 
     def test_a_terminal_record_that_cannot_be_written_keeps_the_count(self):
@@ -3318,7 +3326,7 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
                 raise OSError(errno.EACCES, "Permission denied")
             return real_iterdir(p)
         with mock.patch.object(pathlib.Path, "iterdir", iterdir):
-            out = call("delete_all_data")
+            out = dispatch("delete_all_data")
         self.assertIn("the ledger's directory could not be read", out)
         self.assertIn("f.sqlite.pre-migration-*", out)
 
@@ -3463,11 +3471,11 @@ class TestRecoveryThatErasedCopiesIsNotNothing(DestructiveBase):
             out = dispatch("delete_all_data")
         self.assertFalse(paths.backup_file(bid).exists())
         self.assertNotIn("Nothing was erased", out)
-        self.assertIn("this call resumed a pending erasure, removing 1 backup "
-                      "copy(ies); every copy is gone, but the record that the "
-                      "erasure is complete could not be written, and the next "
-                      "settlement (any backup, restore, listing or workflow "
-                      "write) writes it.", out)
+        self.assertIn("this call removed 1 backup copy; recorded the removal "
+                      "of 1 backup copy. When this call last released the "
+                      "backup index, a recorded erasure of the backup copies "
+                      "was not finished (every copy was gone; the next "
+                      "settlement records it complete).", out)
         self.assertIn("the backup index could not be written: ENOSPC. This "
                       "call's own erasure did not run: the ledger was not "
                       "erased.", out)
@@ -3506,8 +3514,9 @@ class TestARetryAfterAnInterruptedErasure(DestructiveBase):
         self.assertFalse(paths.backup_file(bid).exists())
         self.assertNotIn("Nothing was erased", out)
         self.assertTrue(out.startswith(
-            "While settling the backup index, this call completed a pending "
-            "erasure, removing 1 backup copy(ies)."), out)
+            "While settling the backup index, this call removed 1 backup "
+            "copy; recorded the removal of 1 backup copy; recorded pending "
+            "erasure "), out)
         self.assertIn("the backup index could not be written: ENOSPC. This "
                       "call's own erasure erased nothing.", out)
         self.assertFalse(tools_read.CONN.in_transaction)
@@ -3572,7 +3581,7 @@ class TestPurgeArguments(PurgeRestartBase):
             with self.subTest(args=args):
                 out = call("purge", before_date="2024-01-01", **args)
                 self.assertIn("There is no default", out)
-                self.assertIn("Nothing has been changed", out)
+                self.assertIn("This call's own operation has changed nothing", out)
                 # Never echoed: the caller's string cannot forge a line.
                 self.assertNotIn("Forged", out)
                 self.assertEqual(self.count("transactions"), 1)
@@ -3586,7 +3595,7 @@ class TestPurgeArguments(PurgeRestartBase):
             with self.subTest(value=value):
                 out = call("purge", before_date=value, user_work="keep")
                 self.assertIn("'all'", out)
-                self.assertIn("Nothing has been changed", out)
+                self.assertIn("This call's own operation has changed nothing", out)
                 self.assertEqual(self.count("transactions"), 1)
 
 
@@ -3752,7 +3761,7 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
                 out = call(name, **args)
                 op = pre_erasure_id(out)
                 self.assertEqual(self.reasons()[op], backups.ERASURE_REASON)
-                self.assertIn("No other backup copy was changed", out)
+                self.assertIn("This call's own erasure changed no other backup copy", out)
 
     def test_a_failed_backup_erases_nothing(self):
         before = self.table_counts()
@@ -3766,7 +3775,7 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
                     mock.patch.object(backups, "take_backup", refuse):
                 out = call(name, **args)
                 self.assertIn("the backup copy failed", out)
-                self.assertIn("Nothing was changed", out)
+                self.assertIn("This call's own operation changed nothing", out)
                 self.assertEqual(self.table_counts(), before)
                 self.assertFalse(self.raw.in_transaction)
 
@@ -3814,7 +3823,7 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
                 self.fail_at(needle)
                 out = call(name, **args)
                 tools_read.CONN = self.conn
-                self.assertIn("rolled back: nothing was erased", out)
+                self.assertIn("rolled back: this call's own erasure erased nothing", out)
                 op = pre_erasure_id(out)
                 # Every copy that was there is still there; the only new one
                 # is this call's own, kept as an orphan.
@@ -3930,7 +3939,7 @@ class TestPurgeWaitsForAnAuthorization(PurgeRestartBase):
 
     def assert_refused(self, out):
         self.assertIn("authorization is in progress", out)
-        self.assertIn("Nothing has been changed", out)
+        self.assertIn("This call's own operation has changed nothing", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual(self.backup_files(), [])
 
@@ -3967,7 +3976,7 @@ class TestRestoreWaitsForAnAuthorization(TestPurgeWaitsForAnAuthorization):
 
     def assert_restore_refused(self, out):
         self.assertIn("authorization is in progress", out)
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.count("transactions"), 2)
         self.assertEqual(self.backup_files(), self.files)
         self.assertEqual(self.paths().index.read_text(), self.index)
@@ -3975,7 +3984,7 @@ class TestRestoreWaitsForAnAuthorization(TestPurgeWaitsForAnAuthorization):
     def assert_refused(self, out):
         # The inherited purge refusals, re-based on this setUp's ledger.
         self.assertIn("authorization is in progress", out)
-        self.assertIn("Nothing has been changed", out)
+        self.assertIn("This call's own operation has changed nothing", out)
         self.assertEqual(self.count("transactions"), 2)
         self.assertEqual(self.backup_files(), self.files)
 

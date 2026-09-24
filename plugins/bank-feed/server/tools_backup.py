@@ -154,11 +154,11 @@ def list_backups(args: dict) -> str:
             # pending erase: the `erase <op> pending` line is appended on the
             # handle of a settle that has already terminated every pending
             # restore, and no restore can start one while that record stands.
-            return ("Backup erasure incomplete. No backup, restore, total "
-                    "erasure or workflow write runs until the erasure "
-                    "completes; reads, this one included, still answer. Every "
-                    "INDEXED copy is listed below — a copy in flight never "
-                    "reached the index and has no row.\n%s"
+            # What is left, what that blocks and how to finish it is the
+            # dispatcher's lock-release sentence (state is said once, #48).
+            return ("A recorded erasure of the backup copies could not be "
+                    "finished. Every INDEXED copy is listed below — a copy in "
+                    "flight never reached the index and has no row.\n%s"
                     % render_listing(exc.state))
         return "%s." % exc
     except Exception:

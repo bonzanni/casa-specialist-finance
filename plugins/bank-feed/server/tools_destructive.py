@@ -1116,14 +1116,12 @@ def _second_sweep(paths, handle, state, erase_op):
                 "next settlement (any backup, restore, listing or workflow "
                 "write) writes it." % (er.went(), exc))
     except backups.ErasureIncomplete as exc:
+        # The sweep's own event; what is left afterwards, what it blocks and
+        # how to finish it is the dispatcher's lock-release sentence (#48).
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
-                "banks were asked did not finish: %s went, and %s. No "
-                "backup, restore, total erasure or workflow write runs until "
-                "the erasure completes; every other call, reads included, is "
-                "unaffected. Run delete_all_data again to retry, or delete %s "
-                "by hand." % (exc.erasure.went(), exc.residue(),
-                              backups.by_hand(paths, exc.erasure)))
+                "banks were asked did not finish: %s went, and %s."
+                % (exc.erasure.went(), exc.residue()))
     except backups.BackupError as exc:
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
@@ -1215,9 +1213,8 @@ def delete_all_data(args: dict) -> str:
             # settle the index — `backup`, `restore_backup`, `delete_all_data`
             # and a workflow-bearing write — refuse, and an operator told the
             # plugin was wholly wedged goes looking for a different fault.
-            return ("An erasure recorded earlier is not finished. No "
-                    "backup, restore, total erasure or workflow write runs "
-                    "until the erasure completes. Check the backups "
+            return ("An erasure recorded earlier could not be finished, so "
+                    "this call's own erasure did not run. Check the backups "
                     "directory (%s)%s: make it writable, repair the disk it "
                     "is on, or delete its contents by hand; then run any "
                     "backup, restore, listing or workflow write to finish "
@@ -1404,13 +1401,14 @@ def delete_all_data(args: dict) -> str:
                         "(%s), and this call cannot say which of them are "
                         "still there" % exc)
             if left is not None:
+                # THIS CALL'S OWN SWEEP, as an event: what it could not do at
+                # that point. Whether copies are STILL there, what that blocks
+                # and how to finish it is state — a later settlement in this
+                # same call can complete the erasure — so it is the
+                # dispatcher's lock-release sentence, said once (#48).
                 backups_warning = (
-                    "WARNING — the local ledger IS erased, but %s. No backup, "
-                    "restore, total erasure or workflow write runs until the "
-                    "erasure completes; every other call, reads included, is "
-                    "unaffected. Run delete_all_data again to retry, or delete "
-                    "%s by hand." % (left, backups.by_hand(
-                        paths, erased_backups)))
+                    "WARNING — the local ledger IS erased, but when this "
+                    "call's own sweep ran, %s." % left)
     finally:
         handle.close()
     # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" TWO OF

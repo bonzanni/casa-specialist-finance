@@ -50,44 +50,43 @@ write, and before `list_backups` answers.
 
 Settlement changes the index and the directory before the tool that triggered it does
 anything, and the first call of a process triggers it with no reply of its own: the
-open-time pass runs inside `store.open_db`, inside that call's `tools_read.conn()`. So
-settlement's work is not carried on what it returns or raises — an exit that drops those
-(a raw `OSError`, a failed COMMIT after settlement, the open-time pass swallowing its own
-failure so the ledger still opens) would drop the account with them (issues #48, #53).
+open-time pass runs inside `store.open_db`, inside that call's `tools_read.conn()` (issues
+#48, #53). What it did is kept in a `backups.SettleLog` that lives for exactly one
+dispatched `tools/call`, and `bank_feed_server.handle` renders it once, on every exit
+(success, refusal or exception), after the sandbox banner. No tool renders settlement.
 
-**Each write is recorded where it happens** into a `backups.SettleLog` that lives for
-exactly one dispatched `tools/call` (`backups.open_log`, a context variable; no call, no
-log). Recorded: the backups directory, index or index header it created; a mode it
-reset (the directory to 0700, the index to 0600, only when either had drifted); a torn
-tail it cut; each `.partial` it unlinked; each pending `backup` or `restore` record it
-closed; and per erasure, what every attempt removed, the `prune` records for copies
-already gone, and whether the terminal record landed. The log holds the **latest state
-per object**, never a list of attempts — a call settles twice (the open-time pass, then
-the tool's own), and a retry that landed supersedes an uncertain attempt instead of being
-published beside it. A write whose outcome is unknown (`BackupError.written` None) is
-reported as one that *may* have happened. Two facts are read from the truth rather than
-tracked per write: **durability** is one fact about the index (a failed flush of
-settlement's sets it, any later successful flush of the index in the call clears it,
-because an fsync flushes every earlier write), and a partial last line is reported only
-if the index **still ends in one** when the call ends.
+The log holds two kinds of fact and never mixes them:
 
-**It is rendered once, by `bank_feed_server.handle`, on every exit** — success, refusal
-or exception — as one sentence after the sandbox banner: "While settling the backup
-index, this call …" (`backups.render_log`). It makes no ordering claim, because
-`delete_all_data` settles again after its own sweep. An erasure's removals are summed
-across attempts and its residue is the latest attempt's, so a retry that succeeded
-supersedes an earlier attempt's alarm. No tool renders settlement itself.
+- **Effects** are events: the backups directory or the index created; a mode reset (only
+  when it had drifted); the index header written into an empty index; a torn tail cut; a
+  copy, `.partial`, snapshot or journal unlinked; a record settlement appended (a
+  closure, a `prune`, an erasure's completion). Each is logged by the code that performed
+  it, **once, after the syscall that makes the change returned**: never before it, and
+  never on an uncertain outcome. Whether it was flushed is state, not part of the effect.
+  Effects are counted, not de-duplicated, and only settlement logs them. A tool's own
+  writes are the tool's to report.
+- **State** is read, never recorded: whether the index ends in an incomplete line,
+  whether a recorded erasure is still pending and what is still present. It is read at
+  **every release of the index lock**. Every writer holds that lock, so the last release
+  follows the call's last write, whether the write was settlement's or the tool's own.
+  The state is worded as what the call *saw* then ("When this call last released the
+  backup index, …"), because another process can change it the moment the lock is gone.
+  A part that cannot be read claims nothing, and never cancels an effect.
+  **Durability** is the one state no read can see. A failed index flush by settlement
+  sets it, and any later successful index flush in the call clears it.
 
-**"Nothing was changed" has one spelling, `backups.unchanged`.** It is evaluated when a
-reply is built; once the call's log holds anything it says "This call's own operation
-changed nothing." instead, because the call did change something. A refusal built before
-the ledger opens keeps the plain sentence, which is then true. `tests/test_settle_log.py`
-fails on any literal of the claim outside that function (folding the ordinary ways a
-string is built: `+`, `%`, `.format`, f-strings; deliberate obfuscation is out of its
-scope), on any tool that reads settlement's account itself, and — reading what the tools
-actually say rather than their source — on any registered tool whose reply carries an
-unscoped claim after settlement wrote something. A `take_backup` whose rename fails closes its own `pending`
-record `aborted`, and its refusal says the copy was not kept.
+A write whose outcome is unknown (`BackupError.written` None) is not an effect. What it
+left is read back as the tail state, and it is mentioned only when that read fails.
+Tools report only their own events, never state. `delete_all_data`'s warning says what
+its own sweep could not remove *when it ran*; whether copies are still there, what that
+blocks and how to finish it is the lock-release sentence, because a later settlement in
+the same call can finish the erasure.
+
+**A refusal claims only what is always true.** `backups.unchanged` is a constant: "This
+call's own operation changed nothing." It is true whatever settlement did, so no
+refusal's claim can contradict the settlement sentence, and nothing needs to recognize
+English to enforce it. `take_backup` closes its own `pending` record when its rename
+fails, and its refusal says the copy was not kept.
 
 ## Source & test map
 
