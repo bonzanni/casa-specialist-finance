@@ -689,16 +689,78 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.append_index("backup 8888888888888888 pending reason=manual")
         real_write = backups._write_whole
 
-        def write(fd, data):
-            if b"aborted" in data:
-                os.write(fd, data[:9])
+        real_os_write = os.write
+        calls = []
+
+        def oswrite(fd, data):
+            # The closure's first write lands 9 bytes; the next one fails.
+            if b"aborted" in data or calls:
+                calls.append(1)
+                if len(calls) == 1:
+                    return real_os_write(fd, data[:9])
                 raise OSError(28, "No space left on device")
-            return real_write(fd, data)
-        with mock.patch.object(backups, "_write_whole", write):
+            return real_os_write(fd, data)
+        with mock.patch.object(backups.os, "write", oswrite):
             out = dispatch("list_accounts", data_dir=self.data)
         self.assertTrue(self.index_lines()[-1].endswith("reason=manual"))
         self.assertIn(LEAD + "cut an incomplete last line from the backup "
                       "index", out)
+
+    def test_settlements_header_cut_back_is_an_effect(self):
+        # Astra, v5.2 code round 6: the header path cut back nine landed
+        # bytes and said nothing.
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_bytes(b"")
+        os.chmod(str(self.paths.index), 0o600)
+        real_os_write = os.write
+        calls = []
+
+        def oswrite(fd, data):
+            if data.startswith(backups.INDEX_HEADER.encode()[:5]) or calls:
+                calls.append(1)
+                if len(calls) == 1:
+                    return real_os_write(fd, data[:9])
+                raise OSError(28, "No space left on device")
+            return real_os_write(fd, data)
+        with mock.patch.object(backups.os, "write", oswrite):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertEqual(self.paths.index.read_bytes(), b"")
+        self.assertIn(LEAD + "cut an incomplete last line from the backup "
+                      "index", out)
+
+    def test_a_write_that_landed_nothing_claims_no_cut(self):
+        # Terra, v5.2 code round 6: a write that failed before landing a
+        # byte, with the post-failure fstat failing too, was claimed as a
+        # cut. The proof is `os.write`'s own count.
+        self.backups_taken(1)
+        self.append_index("backup 9999999999999999 pending reason=manual")
+        real_os_write = os.write
+
+        def oswrite(fd, data):
+            if b"aborted" in data:
+                raise OSError(28, "No space left on device")
+            return real_os_write(fd, data)
+        real_fstat = os.fstat
+
+        def fstat(fd):
+            if os.readlink("/proc/self/fd/%d" % fd).endswith(
+                    self.paths.index.name) and oswrite.failed:
+                raise OSError(5, "Input/output error")
+            return real_fstat(fd)
+        oswrite.failed = False
+
+        def oswrite2(fd, data):
+            try:
+                return oswrite(fd, data)
+            except OSError:
+                oswrite.failed = True
+                raise
+        with mock.patch.object(backups.os, "write", oswrite2), \
+                mock.patch.object(backups.os, "fstat", fstat):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertNotIn("cut an incomplete last line", out)
 
     def test_an_invalid_index_is_not_read_as_a_pending_erasure(self):
         # Terra, v5.2 code round 5: a bad header followed by an

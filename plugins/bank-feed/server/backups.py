@@ -441,12 +441,50 @@ def _write_whole(fd: int, data: bytes) -> None:
     """Write every byte of `data` or raise OSError. `os.write` may write a
     prefix and report it (a full disk, a file-size limit): the loop goes on
     while writes make progress, and a write that makes none is a failure,
-    never a silent stop with a prefix on disk."""
-    while data:
-        n = os.write(fd, data)
-        if n <= 0:
-            raise OSError(errno.EIO, "a write made no progress")
-        data = data[n:]
+    never a silent stop with a prefix on disk.
+
+    The OSError it raises carries `landed`: how many bytes `os.write`
+    returned before the failure — the only proof a later cut-back removed
+    anything (Terra, v5.2 code round 6)."""
+    landed = 0
+    try:
+        while data:
+            n = os.write(fd, data)
+            if n <= 0:
+                raise OSError(errno.EIO, "a write made no progress")
+            landed += n
+            data = data[n:]
+    except OSError as exc:
+        exc.landed = landed
+        raise
+
+
+def _write_or_cut(fd: int, data: bytes, start: int, *, settling: bool) -> None:
+    """Write every byte of `data`, or cut the file back to `start`. THE ONE
+    write-and-cut-back of the index: its two callers (a record append, the
+    header) each reported the cut differently until it lived here (Astra,
+    v5.2 code rounds 5-6).
+
+    On failure the OSError is re-raised carrying `cut`: None when the
+    cut-back returned, else the OSError of the cut that failed. For a
+    settlement write, a cut that removed bytes `os.write` PROVED landed is a
+    "cut" effect; a cut that failed is an unverified attempt, read back as
+    the index's tail at the release."""
+    try:
+        _write_whole(fd, data)
+    except OSError as exc:
+        try:
+            os.ftruncate(fd, start)
+        except OSError as cut:
+            exc.cut = cut
+            log = _LOG.get()
+            if log is not None and settling:
+                log.unverified += 1
+            raise exc
+        exc.cut = None
+        if settling and getattr(exc, "landed", 0) > 0:
+            _effect("cut")
+        raise
 
 
 def _fsync_dir(d: Path) -> None:
@@ -592,29 +630,14 @@ class IndexHandle:
             raise BackupError("the backup index could not be written: %s"
                               % _oserr(exc), written=False) from None
         try:
-            _write_whole(self.fd, data)
+            _write_or_cut(self.fd, data, start, settling=self.settling)
         except OSError as exc:
-            try:
-                landed = os.fstat(self.fd).st_size > start
-            except OSError:
-                landed = True           # unknown: the cut may remove bytes
-            try:
-                os.ftruncate(self.fd, start)
-                if landed and self.settling:
-                    # A fragment of settlement's own write, removed: a cut
-                    # is an effect when bytes went (Astra, v5.2 code r5).
-                    _effect("cut")
-            except OSError as cut:
+            if exc.cut is not None:
                 self._poisoned = True
-                log = _LOG.get()
-                if log is not None and self.settling:
-                    # Unknown outcome: not an effect. The partial line it may
-                    # have left is read at the lock's release instead.
-                    log.unverified += 1
                 raise BackupError(
                     "the backup index could not be written (%s) and the "
                     "partial record could not be removed (%s)"
-                    % (_oserr(exc), _oserr(cut)), written=None) from None
+                    % (_oserr(exc), _oserr(exc.cut)), written=None) from None
             # THE CUT RETURNED: the partial record is gone, and the append is
             # "not written". Whether the cut is durable is state (the call's
             # index-level flush fact), not a different outcome of this write.
@@ -890,17 +913,15 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 # starts from) and this settle refuses, returning no handle.
                 header = (INDEX_HEADER + "\n").encode("ascii")
                 try:
-                    _write_whole(fd, header)
-                except OSError:
-                    try:
-                        os.ftruncate(fd, 0)
-                        _index_fsync(fd, settling=True)
-                    except OSError:
-                        # Part of a header may be on disk: unknown outcome,
-                        # read back at the release as the index's tail.
-                        if log is not None:
-                            log.unverified += 1
-                        raise
+                    _write_or_cut(fd, header, 0, settling=True)
+                except OSError as exc:
+                    if exc.cut is None:
+                        # Cut back to empty: flush it (durability is
+                        # state, a failed flush sets the call's fact).
+                        try:
+                            _index_fsync(fd, settling=True)
+                        except OSError:
+                            pass
                     raise
                 _effect("header")       # the write returned
                 _index_fsync(fd, settling=True)
