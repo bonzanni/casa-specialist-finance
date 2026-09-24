@@ -403,17 +403,33 @@ def _authorization_in_progress(c) -> bool:
 
 
 def _finish_pre_erasure(paths, handle, b, *, committed: bool):
-    """Record the copy's terminal state and prune its OWN class only -- and
+    """Record the copy's terminal state, then prune its OWN class only -- and
     only after an erasure that committed: a call that erased nothing must not
     have removed an older copy either, or "nothing was erased" is false of
-    the backups directory. -> `(pruned ids, retention error text or None)`.
-    Never raises: the copy is already real, whatever retention does."""
+    the backups directory.
+
+    -> `(pruned ids, retention error or None, index error or None)`. The two
+    failures are different facts: a terminal record that could not be written
+    leaves the copy `pending`, which the next settlement closes `committed`
+    because its file is present, and NO prune ran; a prune that failed ran
+    after a recorded copy. Never raises: the copy is already real.
+
+    `backups.finish_backup` is the same two steps; they are taken apart here
+    only so a failure of each can be told apart."""
     try:
-        return backups.finish_backup(
-            paths, handle, b, committed=committed,
-            classes=(backups.ERASURE_REASON,) if committed else ()), None
-    except backups.BackupError as exc:
-        return [], str(exc)
+        try:
+            handle.append("backup", b.op_id,
+                          "committed" if committed else "orphan")
+        except backups.BackupError as exc:
+            return [], None, str(exc)
+        if not committed:
+            return [], None, None
+        try:
+            b.pruned = backups.prune(paths, handle,
+                                     classes=(backups.ERASURE_REASON,))
+            return b.pruned, None, None
+        except backups.BackupError as exc:
+            return [], str(exc), None
     finally:
         handle.close()
 
@@ -423,20 +439,26 @@ def _rolled_back(head: str, b, state) -> str:
     backup copy was pruned (`_finish_pre_erasure` prunes nothing then) -- but
     this call's settlement may have completed an earlier interrupted erasure
     on the way, and that is said rather than covered by "nothing"."""
-    text = "%s Backup %s, taken for it, is kept." % (head, b.op_id)
+    text = ("%s Backup %s, taken for it, is kept (it is a copy of the "
+            "unchanged ledger)." % (head, b.op_id))
     settled = backups.settled_note(state.settled if state is not None else None)
     return text + " " + settled if settled else text
 
 
-def _backup_line(b, state, pruned, retention_error, restores) -> str:
+def _backup_line(b, state, finished, restores) -> str:
     """The reply's account of the backup copies (issue #47): the copy this
     call took and what a restore of it brings back, and what else changed in
     the backups directory -- which is nothing, unless retention pruned an
     older pre-erasure copy or this call's settlement completed an earlier
     interrupted total erasure. "No other backup copy was changed" is said
     only when both are false."""
+    pruned, retention_error, index_error = finished
     line = ("Backup %s was taken just before this erasure: restore_backup "
             "backup_id=%s puts back %s." % (b.op_id, b.op_id, restores))
+    if index_error:
+        line += (" Its index record could not be written (%s); the copy is "
+                 "complete, and the next settlement (any backup, restore, "
+                 "listing or workflow write) records it." % index_error)
     settled = backups.settled_note(state.settled if state is not None else None)
     if retention_error:
         line += (" Retention could not prune older pre-erasure copies (%s); "
@@ -446,7 +468,10 @@ def _backup_line(b, state, pruned, retention_error, restores) -> str:
                  % ("y" if len(pruned) == 1 else "ies", ", ".join(pruned)))
     if settled:
         line += " " + settled
-    elif not pruned and not retention_error:
+    elif not pruned and not retention_error and not index_error:
+        # With the terminal record missing no prune ran, so nothing else
+        # changed then either -- but the sentence would sit beside a warning
+        # about this very copy, and it is only said when all went to plan.
         line += " No other backup copy was changed."
     return line
 
@@ -619,8 +644,7 @@ def purge(args: dict) -> str:
         return _rolled_back("The purge failed (%s) and was rolled back: "
                             "nothing was erased." % type(exc).__name__,
                             b, state)
-    pruned, retention_error = _finish_pre_erasure(paths, handle, b,
-                                                  committed=True)
+    finished = _finish_pre_erasure(paths, handle, b, committed=True)
 
     gone_notes, gone_tags = notes_before - notes_after, tags_before - tags_after
     if whole:
@@ -672,7 +696,7 @@ def purge(args: dict) -> str:
     # delete_all_data are the erasers that take evidence with them.
     lines.append("Reference-trust evidence is unaffected: it describes the "
                  "bank's reference behaviour, not the purged rows.")
-    lines.append(_backup_line(b, state, pruned, retention_error,
+    lines.append(_backup_line(b, state, finished,
                               "everything this call erased"))
     if whole:
         lines.extend(_reapproval_lines(c))
@@ -835,8 +859,7 @@ def forget_local_account(args: dict) -> str:
         return _rolled_back("Erasing %s failed (%s) and was rolled back: "
                             "nothing was erased."
                             % (named, type(exc).__name__), b, state)
-    pruned, retention_error = _finish_pre_erasure(paths, handle, b,
-                                                  committed=True)
+    finished = _finish_pre_erasure(paths, handle, b, committed=True)
     # What a restore of the copy brings back, and what it does not: a
     # restore keeps bindings and authorization attempts LIVE, so the account
     # comes back bound to whatever it is bound to when the restore runs, and
@@ -865,7 +888,7 @@ def forget_local_account(args: dict) -> str:
         "match nothing until the same account is linked again, and "
         "remove_rule removes them. Other rules are unaffected."
         % scoped_rules,
-        _backup_line(b, state, pruned, retention_error, restores),
+        _backup_line(b, state, finished, restores),
     ]
     lines.append(_reclaim(c)[1])
     lines.append(GATE_NOTE)

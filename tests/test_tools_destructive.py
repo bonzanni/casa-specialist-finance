@@ -3811,6 +3811,26 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
                 self.assertNotIn("Retention removed", out)
                 before = sorted(self.reasons())
 
+    def test_an_unwritten_index_record_is_not_called_a_retention_failure(self):
+        real = backups.IndexHandle.append
+
+        def refuse_terminal(handle, *fields):
+            if fields[:1] == ("backup",) and fields[2:3] == ("committed",):
+                raise backups.BackupError("the backup index could not be "
+                                          "written: ENOSPC")
+            return real(handle, *fields)
+        with mock.patch.object(backups.IndexHandle, "append", refuse_terminal):
+            out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertEqual(self.count("transactions"), 0)
+        self.assertIn("Its index record could not be written", out)
+        self.assertNotIn("Retention", out)
+        self.assertNotIn("No other backup copy was changed", out)
+        # The next settlement closes the pending copy as committed.
+        self.assertEqual(self.reasons()[pre_erasure_id(out)],
+                         backups.ERASURE_REASON)
+        self.assertEqual(backup_state(self.raw, pre_erasure_id(out)),
+                         "committed")
+
     def test_the_backup_tool_does_not_accept_the_erasure_reason(self):
         out = call("backup", reason=backups.ERASURE_REASON)
         self.assertIn("reason must be", out)
