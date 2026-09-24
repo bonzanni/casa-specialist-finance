@@ -39,7 +39,8 @@ flush that fails after its write leaves a line the next reader acts on, so
 irreversible honour it — a restore's terminal one (`backups.RestoreResult.index_error`)
 and both of an erasure's — so none of them reports "nothing happened" over a readable
 line. A `backup`'s `pending` record does not have to: no copy was placed, so nothing was
-changed, and settlement writes that operation's `aborted` line.
+changed, and settlement writes that operation's `aborted` line. Its `.partial` is removed on
+the spot whatever `written` says: a line that never landed names nothing settlement cleans.
 
 **An append is whole or absent.** A write can land a prefix of a line and report it; the
 next append would complete it into a malformed line every settlement refuses. So the size
@@ -111,46 +112,8 @@ released by the commit itself, an ordering release rather than a second acquisit
 
 ## Settlement
 
-`backups.settle(conn, paths)` is recovery: the caller must already hold
-`BEGIN IMMEDIATE`, and it raises if they do not. It reads the index, truncates a torn
-tail if there is one, and appends the terminal record for every operation that has a
-`pending` line and no terminal one yet:
-
-| Operation | Condition | Terminal |
-|---|---|---|
-| `backup`, reason `install:<w>` | final file present, `<w>` registered against this op | `committed` |
-| `backup`, reason `install:<w>` | final file present, no such registration | `orphan` — the copy is consistent, so it is kept |
-| `backup`, other reasons | final file present | `committed` |
-| `backup`, any reason | final file absent | `aborted`, and the `.partial` file is removed |
-| `restore` | the ledger's `meta.backup_restore_op` marker equals this operation id | `committed` |
-| `restore` | anything else | `aborted` |
-| `erase` | always | `committed`, once every copy and partial is unlinked, the backups directory is flushed, and every *indexed* copy carries a `prune` — written for one this settlement removed and for one it can read as already gone |
-
-**A pending `erase` is completed before any other row of that table is applied** — until the
-copies are gone a `restore` could put an erased ledger back. Settlement then re-reads
-presence, size and `broken` (`backups._restat`), so the rest of the table and `restore`'s
-preflight see the directory *after* the copies went. An erasure never moves `generation`,
-which counts committed *restores*. A copy that cannot be unlinked leaves the `pending` record
-and makes settlement itself refuse — fail closed, as an unreadable index does, rather than
-answer normally while copies of a supposedly erased ledger sit beside it. The refusal carries the
-state settlement built, so `list_backups`, which changes nothing, still renders the listing
-rather than hiding the residue. What completing an erasure removed is carried too
-(`LedgerState.settled`, or `BackupError.settled` when settlement then refuses), so a call that
-refuses after it — a restore of an id that erasure just removed — says "This call did not
-run; settlement first completed an interrupted erasure and removed N backup copy(ies).",
-never "Nothing was changed." (`backups.refusal_text`).
-
-Exactly one terminal record is ever appended per operation id — a process finding one
-already present appends nothing — and since every appender holds the ledger writer lock
-first, the appends are serialized by that lock alone; the index lock is the second belt.
-
-`settle` returns a `LedgerState`: `generation`, `backups` (op id to time, reason, state,
-presence and size), `restores`, `registrations` (workflow to backup id and time), and
-`broken` — the set of workflows whose registered backup file is gone. Settlement runs
-at every `open_db` — best effort: skipped when there is no index file or either lock is
-unavailable, never failing the open, because every consumer settles under both locks
-itself — and at the start of every mint, restore, `backup(reason)` and workflow-bearing
-write, and before `list_backups` answers.
+Recovery of the index — which terminal record each pending operation gets, and what
+settlement reports — is [`architecture/backups-settlement.md`](../architecture/backups-settlement.md).
 
 ## The mint
 
@@ -309,6 +272,9 @@ throughout: unlink the file, then append `prune <op_id> done`. Ordering is by in
 never the second-resolution timestamp — several backups can land in one second, and sorting
 by timestamp there pruned the newest instead of the oldest.
 
+A prune refusing part way has already unlinked some copies; its refusal carries their ids
+and every reply names them (`backups.retention_failed`).
+
 **An erasure's prune touches its own class only.** `prune` sweeps every class on every call,
 so the copy a scoped erasure takes would otherwise remove the oldest `manual` copy whenever
 that class stood over its bound — a scoped eraser deleting a recovery point the operator
@@ -393,6 +359,7 @@ subsystem is never a *dangerous* one.
 **Related**
 - [`architecture/annotations-and-rules.md`](../architecture/annotations-and-rules.md)
 - [`architecture/backups-erasure.md`](../architecture/backups-erasure.md)
+- [`architecture/backups-settlement.md`](../architecture/backups-settlement.md)
 - [`architecture/ingestion-and-identity.md`](../architecture/ingestion-and-identity.md)
 - [`reference/tool-surface.md`](../reference/tool-surface.md)
 <!-- END SOURCEMAP -->

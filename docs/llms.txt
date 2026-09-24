@@ -8,6 +8,7 @@ repository. Code is the source of truth; these files are a map.
 - [architecture/annotations-and-rules.md](architecture/annotations-and-rules.md): Tags, the append-only note journal, the deterministic rulebook, and the classifier split.
 - [architecture/backups-and-restore.md](architecture/backups-and-restore.md): Backups, the event index beside the ledger, settlement, the minted restore point, and the in-place restore.
 - [architecture/backups-erasure.md](architecture/backups-erasure.md): What delete_all_data removes beside the ledger, in what order, what is durable when, and what each failure may say.
+- [architecture/backups-settlement.md](architecture/backups-settlement.md): Settlement of the backup index — the terminal record each pending operation gets, and what settlement reports.
 - [architecture/bank-linking.md](architecture/bank-linking.md): Two approvals, a callback that never waits, and why backfill runs first.
 - [architecture/credentials.md](architecture/credentials.md): Four credentials, two provider surfaces, one vault, and one mode authority.
 - [architecture/ingestion-and-identity.md](architecture/ingestion-and-identity.md): How a provider page becomes a ledger row, what coverage proves, and the identity limitation.

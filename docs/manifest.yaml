@@ -123,7 +123,7 @@
     - tests/test_backups.py
     - tests/test_tools_backup.py
     - tests/test_tools_annotate.py
-  related: [architecture/annotations-and-rules.md, architecture/backups-erasure.md, architecture/ingestion-and-identity.md, reference/tool-surface.md]
+  related: [architecture/annotations-and-rules.md, architecture/backups-erasure.md, architecture/backups-settlement.md, architecture/ingestion-and-identity.md, reference/tool-surface.md]
   defines_invariants: [INV-BACKUP-001, INV-BACKUP-002, INV-BACKUP-003, INV-BACKUP-004]
   invariant_tests:
     INV-BACKUP-001: [tests/test_backups.py::test_lock_order_is_ledger_then_index_and_settle_requires_the_ledger_lock]
@@ -143,6 +143,17 @@
     - tests/test_tools_backup.py
     - tests/test_tools_destructive.py
   related: [architecture/backups-and-restore.md, reference/tool-surface.md]
+
+- doc: architecture/backups-settlement.md
+  summary: Settlement of the backup index — the terminal record each pending operation gets, and what settlement reports.
+  when_changing: settlement, the terminal records it appends, the open-time pass, or what a reply says settlement did
+  covers:
+    - plugins/bank-feed/server/backups.py::settle
+    - plugins/bank-feed/server/store.py::_settle_best_effort
+  tests:
+    - tests/test_backups.py
+    - tests/test_store.py
+  related: [architecture/backups-and-restore.md, architecture/backups-erasure.md]
 
 - doc: architecture/credentials.md
   summary: Four credentials, two provider surfaces, one vault, and one mode authority.
