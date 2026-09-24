@@ -25,6 +25,29 @@ An `aborted` backup earns no `prune`. It never reached a final file — settleme
 never existed. Exactly one `prune` per indexed *copy* is the property, and an `aborted`
 operation produced no copy.
 
+## The pre-migration snapshots go with them
+
+`store.open_db` takes a snapshot beside the ledger before a schema migration
+(`store.snapshot_before_migration`, a `VACUUM INTO` named
+`<ledger>.pre-migration-<stamp>`). It is a whole-ledger copy like a backup, so a total
+erasure that left it behind left the destroyed session identifiers on disk. `_erase`
+therefore also unlinks every file whose name starts with this ledger's own
+`<ledger>.pre-migration-` prefix (`backups.SNAPSHOT_INFIX`, the same constant
+`store._snapshot_name` builds the name from), inside the same recorded erasure. The other
+mode's ledger shares the directory, and its snapshots are left alone because its name leads
+theirs. No index record ever named a snapshot, so a removed one earns no `prune` and is
+counted apart (`Erasure.snapshots`). A file under the prefix whose remainder is not a stamp
+(`backups.SNAPSHOT_STAMP_RE`) is a snapshot's journal: it holds pages of the ledger, not a
+whole copy, and is counted and described as that (`Erasure.snapshot_sidecars`). One that
+cannot be unlinked (`Erasure.failed_snapshots`, `Erasure.failed_snapshot_sidecars`) keeps the
+erasure `pending` exactly as a stuck backup copy does, and gets its own clause naming the
+files beside the ledger, because they are not in the backups directory. A sweep that cannot
+list the ledger's directory at all counts nothing, so its by-hand instruction names the
+snapshots too. The
+ledger's directory is flushed before the terminal record on the same rule as the backups
+directory. Only the total eraser does this: `purge` and `forget_local_account` leave every
+copy, snapshots included, because backups are recovery.
+
 ## The order, and what is durable when
 
 **The erasure goes through the index, so a crash cannot outlive it.** `delete_all_data`
@@ -120,7 +143,11 @@ count and never by path, and says nothing rather than "0 backup file(s)". What i
 counted by weight: a whole copy is restorable, so it carries the alarm; a `.partial` is not
 in the index and `restore` refuses anything that is not, so it gets its own clause naming the
 pages it still holds; an unflushed directory is neither, and is stated as what it is rather
-than as a count of files. `ErasureIncomplete.describe()` is what the callers that changed
+than as a count of files. Every reply renders what went through one phrase, `Erasure.went()`, and asks whether
+anything went through `Erasure.removed_any()`: replies that formatted the fields themselves
+each left out whichever shape was added after them. `backups.settled_note` is the sentence
+a call that *succeeded* adds when its settlement removed files on the way (`backup`,
+`list_backups`). `ErasureIncomplete.describe()` is what the callers that changed
 nothing themselves print — settlement removed copies, so "Nothing was changed." is false.
 The same holds when settlement completed an erasure and something *else* refused afterwards:
 `refusal_text` names what it removed, and `delete_all_data`, whose own settlement can complete

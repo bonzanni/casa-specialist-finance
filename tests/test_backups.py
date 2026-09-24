@@ -520,6 +520,144 @@ class TestTheErasureIsDurableBeforeItsRecord(Base):
         state = self.settled()
         self.assertEqual([e["state"] for e in state.erasures], ["committed"])
 
+    def _snapshot(self, db_name=None):
+        """A pre-migration snapshot beside a ledger, named the way
+        `store._snapshot_name` names one."""
+        f = self.root / ((db_name or self.db.name) + backups.SNAPSHOT_INFIX
+                         + "20260922T000000Z")
+        f.write_bytes(b"x")
+        return f
+
+    def test_an_erasure_removes_this_ledgers_pre_migration_snapshots(self):
+        # Issue #44: a snapshot is a whole-ledger copy, sessions included.
+        self._pending_erasure()
+        mine, other = self._snapshot(), self._snapshot("bank_feed.sandbox.sqlite")
+        state = self.settled()
+        self.assertFalse(mine.exists())
+        self.assertTrue(other.exists())      # the other mode's ledger's own
+        self.assertEqual([e["state"] for e in state.erasures], ["committed"])
+        self.assertEqual(state.settled.snapshots, 1)
+        self.assertIn("removed 1 backup copy(ies) and 1 pre-migration snapshot(s)",
+                      backups.settled_sentence(state.settled))
+
+    def test_a_snapshot_only_sweep_is_still_reported(self):
+        # No backup copy at all: the snapshot is the only thing that went,
+        # and a reply built on `state.settled` must still say so.
+        self.settled()
+        with open(self.paths.index, "a") as f:
+            f.write("20260922T000010Z erase abcdefabcdefabcd pending\n")
+        self._snapshot()
+        state = self.settled()
+        self.assertIsNotNone(state.settled)
+        self.assertEqual(state.settled.snapshots, 1)
+
+    def test_a_snapshot_that_cannot_be_removed_leaves_the_erasure_pending(self):
+        self._pending_erasure()
+        snap = self._snapshot()
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **k):
+            if p.name == snap.name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **k)
+        with mock.patch.object(pathlib.Path, "unlink", unlink), \
+                self.assertRaises(backups.ErasureIncomplete) as cm:
+            self.settled()
+        self.assertEqual(cm.exception.erasure.failed_snapshots, 1)
+        self.assertEqual(cm.exception.erasure.failed, 0)
+        self.assertIn("1 pre-migration snapshot(s) beside the ledger could "
+                      "not be removed", cm.exception.residue())
+        self.assertNotIn(["erase", "abcdefabcdefabcd", "committed"],
+                         [l.split()[1:] for l in self.index_lines()])
+        state = self.settled()
+        self.assertFalse(snap.exists())
+        self.assertEqual([e["state"] for e in state.erasures], ["committed"])
+
+    def test_the_ledger_directory_is_flushed_before_the_terminal(self):
+        self._pending_erasure()
+        self._snapshot()
+        events = []
+        real_fsync_dir = backups._fsync_dir
+        real_append = backups.IndexHandle.append
+        real_unlink = pathlib.Path.unlink
+
+        def fsync_dir(d):
+            events.append(("fsync_dir", str(d)))
+            return real_fsync_dir(d)
+
+        def append(handle, *fields):
+            events.append(("append", fields[0], fields[-1]))
+            return real_append(handle, *fields)
+
+        def unlink(p, *a, **k):
+            events.append(("unlink", p.name))
+            return real_unlink(p, *a, **k)
+        with mock.patch.object(backups, "_fsync_dir", fsync_dir), \
+                mock.patch.object(backups.IndexHandle, "append", append), \
+                mock.patch.object(pathlib.Path, "unlink", unlink):
+            self.settled()
+        snap_unlink = [i for i, e in enumerate(events)
+                       if e[0] == "unlink" and backups.SNAPSHOT_INFIX in e[1]]
+        flush = [i for i, e in enumerate(events)
+                 if e == ("fsync_dir", str(self.root))]
+        terminal = [i for i, e in enumerate(events)
+                    if e == ("append", "erase", "committed")]
+        # Setup flushes the directory too; the one that matters is the last
+        # one before the terminal record.
+        self.assertEqual((len(snap_unlink), len(terminal)), (1, 1), events)
+        self.assertTrue([i for i in flush if snap_unlink[0] < i < terminal[0]],
+                        events)
+
+    def test_a_ledger_directory_flush_that_fails_leaves_the_erasure_pending(self):
+        self._pending_erasure()
+        snap = self._snapshot()
+        real = backups._fsync_dir
+
+        def fsync_dir(d):
+            # Only the flush after the snapshot went: setup flushes this
+            # directory too, and failing that refuses before any sweep.
+            if d == self.paths.db.parent and not snap.exists():
+                raise OSError(errno.EIO, "I/O error")
+            return real(d)
+        with mock.patch.object(backups, "_fsync_dir", fsync_dir), \
+                self.assertRaises(backups.ErasureIncomplete) as cm:
+            self.settled()
+        self.assertTrue(cm.exception.erasure.undurable)
+        self.assertIn("bank_feed.sqlite.pre-migration-*",
+                      backups.by_hand(self.paths, cm.exception.erasure))
+        state = self.settled()
+        self.assertEqual([e["state"] for e in state.erasures], ["committed"])
+
+    def test_a_placed_backup_reply_counts_what_settlement_removed(self):
+        # `refusal_text`'s placed-but-unflushed branch has its own sentence
+        # about settlement; it must count every shape the sweep removed.
+        exc = backups.BackupError("EIO")
+        exc.placed = "aaaaaaaaaaaaaaaa"
+        exc.settled = backups.Erasure(removed=1, partials=1, snapshots=1,
+                                      snapshot_sidecars=1, finished=True)
+        text = backups.refusal_text(exc)
+        self.assertIn("removed 1 backup copy(ies), 1 partial copy(ies), 1 "
+                      "pre-migration snapshot(s) and 1 snapshot journal "
+                      "file(s).", text)
+
+    def test_a_removed_journal_is_named_when_the_flush_then_fails(self):
+        self.settled()
+        with open(self.paths.index, "a") as f:
+            f.write("20260922T000010Z erase abcdefabcdefabcd pending\n")
+        journal = self._snapshot()
+        journal = journal.rename(journal.with_name(journal.name + "-journal"))
+        real = backups._fsync_dir
+
+        def fsync_dir(d):
+            if d == self.paths.db.parent and not journal.exists():
+                raise OSError(errno.EIO, "I/O error")
+            return real(d)
+        with mock.patch.object(backups, "_fsync_dir", fsync_dir), \
+                self.assertRaises(backups.ErasureIncomplete) as cm:
+            self.settled()
+        self.assertEqual(cm.exception.erasure.snapshot_sidecars, 1)
+        self.assertIn("1 snapshot journal file(s)", cm.exception.describe())
+
     def test_a_copy_whose_presence_cannot_be_read_is_never_recorded_as_pruned(self):
         # `Path.exists()` is `os.path.exists`, which answers False for ANY
         # OSError -- EACCES, EIO -- so a copy that is STILL THERE and merely

@@ -102,15 +102,24 @@ def backup(args: dict) -> str:
         # already real and durable by the time retention can fail, so this
         # is never "nothing was changed" -- it is "one more thing than
         # retention managed to do", and the operator needs the id either way.
-        return ("Backup %s written (%s, %d bytes). Retention could not "
-                "prune: %s — the backup itself is complete."
-                % (b.op_id, reason, b.size, exc))
+        return _with_settled(
+            "Backup %s written (%s, %d bytes). Retention could not "
+            "prune: %s — the backup itself is complete."
+            % (b.op_id, reason, b.size, exc), state)
     finally:
         handle.close()
     out = "Backup %s written (%s, %d bytes)." % (b.op_id, reason, b.size)
     if pruned:
         out += " Retention pruned %s." % ", ".join(pruned)
-    return out
+    return _with_settled(out, state)
+
+
+def _with_settled(text: str, state) -> str:
+    """A reply that SUCCEEDED still says what its settlement removed on the
+    way: completing an interrupted erasure changed the directory, and a
+    reply silent about it leaves the operator looking for files that went."""
+    note = backups.settled_note(state.settled if state is not None else None)
+    return text + " " + note if note else text
 
 
 @register("list_backups",
@@ -126,6 +135,9 @@ def list_backups(args: dict) -> str:
     try:
         state, handle = backups.settle(c, paths)
         text = render_listing(state)          # captured under both locks
+        note = backups.settled_note(state.settled)
+        if note:
+            text = note + "\n" + text
         c.execute("COMMIT")
     except backups.BackupError as exc:
         # Guarded like every sibling: SQLite auto-rolls-back on SQLITE_FULL and
@@ -160,7 +172,7 @@ def list_backups(args: dict) -> str:
                     "completes; reads, this one included, still answer. Every "
                     "INDEXED copy is listed below — a copy in flight never "
                     "reached the index and has no row.\n%s"
-                    % (exc.residue(), render_listing(exc.state)))
+                    % (exc.describe(), render_listing(exc.state)))
         if exc.settled is not None:
             return "%s. %s" % (exc, backups.settled_sentence(exc.settled))
         return "%s." % exc

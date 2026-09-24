@@ -804,7 +804,7 @@ class TestWorkflowArguments(Base):
         out = call("add_note", row_ids=[self.rid], note="second", author="agent",
                    workflow="acct@1.0.0", expected_generation=0)
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("settlement removed 1 backup copy(ies) and 0 partial(s)", out)
+        self.assertIn("settlement removed 1 backup copy(ies)", out)
         self.assertIn("This call did not run.", out)
         self.assertEqual(
             self.conn.execute("SELECT count(*) FROM transaction_notes WHERE"
