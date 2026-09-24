@@ -177,14 +177,12 @@ in the index and `restore` refuses anything that is not, so it gets its own clau
 pages it still holds; an unflushed directory is neither, and is stated as what it is rather
 than as a count of files. Every reply renders what went through one phrase, `Erasure.went()`, and asks whether
 anything went through `Erasure.removed_any()`: replies that formatted the fields themselves
-each left out whichever shape was added after them. `backups.settled_note` is the sentence
-a call that *succeeded* adds when its settlement removed files on the way (`backup`,
-`list_backups`). `ErasureIncomplete.describe()` is what the callers that changed
-nothing themselves print — settlement removed copies, so "Nothing was changed." is false.
-The same holds when settlement completed an erasure and something *else* refused afterwards:
-`refusal_text` names what it removed, and `delete_all_data`, whose own settlement can complete
-an earlier erasure and then fail on the record closing it, says the copies went and the
-record follows at the next settlement, never "Nothing was erased". The
+each left out whichever shape was added after them. What a *settlement* removed — an
+earlier erasure completed on the way, or this call's own stalled sweep finished by the
+settlement that opens `delete_all_data`'s row sweep — is never rendered by the tool: the
+dispatcher says it once, for every call, success or refusal
+([`architecture/backups-settlement.md`](../architecture/backups-settlement.md)), and
+`backups.unchanged` scopes each "Nothing was erased" to the call's own erasure then. The
 `WARNING` is reported, never raised: the ledger is already gone, and raising would discard
 the only account of it.
 

@@ -17,6 +17,7 @@ import datetime as _dt
 import json
 import re
 import unicodedata
+import backups
 
 WORKFLOW_TAGS = ("awaiting-operator", "unclassifiable")
 RULEBOOK_CAP = 500
@@ -281,7 +282,7 @@ def validate_rule(args: dict):
             fields["rationale"] = rat
 
     if problems:
-        return None, "; ".join(problems) + ". Nothing was changed."
+        return None, "; ".join(problems) + ". " + backups.unchanged()
     return fields, None
 
 

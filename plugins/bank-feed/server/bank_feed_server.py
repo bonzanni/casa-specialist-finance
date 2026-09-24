@@ -11,6 +11,7 @@ without a running MCP session.
 from __future__ import annotations
 import importlib.util, json, os, sys
 
+import backups
 import ebmode
 import store
 
@@ -74,25 +75,38 @@ def handle(req: dict) -> dict | None:
             if tool.get("capability"):
                 payload["isError"] = True
             return _result(id_, payload)
+        # (5) What settlement wrote during this call, in ONE sentence after
+        # the banner (issues #48, #53). Settlement records each write into
+        # a log that lives exactly as long as this call — including the
+        # open-time pass inside the first `tools_read.conn()`, which has no
+        # reply of its own — and this is the only place that log is
+        # rendered: on success, refusal and exception alike.
+        token = backups.open_log()
         try:
-            store.check_mode_marker(os.environ.get("CLAUDE_PLUGIN_DATA"))
-            out = tool["fn"](params.get("arguments") or {})
-        except Exception as exc:                       # surfaced, never swallowed
-            # A capability tool's link exists as bytes on its own path, and a
-            # stdlib parser quotes the bytes it chokes on (a status line, a
-            # redirect host). So its exception text is rendered only for the
-            # types it declares as speaking in its own words (`register`).
-            if tool.get("capability") and not isinstance(
-                    exc, tool.get("error_text_types") or ()):
-                out = f"error: {type(exc).__name__}"
-            else:
-                out = f"error: {type(exc).__name__}: {exc}"
+            try:
+                store.check_mode_marker(os.environ.get("CLAUDE_PLUGIN_DATA"))
+                out = tool["fn"](params.get("arguments") or {})
+            except Exception as exc:                   # surfaced, never swallowed
+                # A capability tool's link exists as bytes on its own path,
+                # and a stdlib parser quotes the bytes it chokes on (a status
+                # line, a redirect host). So its exception text is rendered
+                # only for the types it declares as speaking in its own words
+                # (`register`).
+                if tool.get("capability") and not isinstance(
+                        exc, tool.get("error_text_types") or ()):
+                    out = f"error: {type(exc).__name__}"
+                else:
+                    out = f"error: {type(exc).__name__}: {exc}"
+        finally:
+            settled = backups.close_log(token)
+        head = "\n".join(p for p in (SANDBOX_BANNER if sandbox else "",
+                                     settled) if p)
         if isinstance(out, dict):
-            if sandbox:
-                out = dict(out, text=SANDBOX_BANNER + "\n" + str(out.get("text") or ""))
+            if head:
+                out = dict(out, text=head + "\n" + str(out.get("text") or ""))
             payload = {"content": [{"type": "text", "text": json.dumps(out)}]}
         else:
-            text = SANDBOX_BANNER + "\n" + out if sandbox else out
+            text = head + "\n" + out if head else out
             payload = {"content": [{"type": "text", "text": text}]}
             if tool.get("capability"):
                 payload["isError"] = True

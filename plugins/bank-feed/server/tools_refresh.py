@@ -41,6 +41,7 @@ import datetime as _dt
 import io
 import json
 
+import backups
 import casa_handoff
 import flows
 import httpx
@@ -727,8 +728,8 @@ def label_account(args: dict) -> str:
             # The offered value is deliberately not echoed. An unknown category
             # also removes the account from every scope-filtered answer
             # silently, which is why this refuses rather than storing it.
-            return ("category must be one of: %s. Nothing has been changed."
-                    % ", ".join(CATEGORIES))
+            return ("category must be one of: %s. %s"
+                    % (", ".join(CATEGORIES), backups.unchanged(perfect=True)))
         sets.append("category=?")
         params.append(category)
         changed.append("category")

@@ -206,7 +206,7 @@ def unlink_bank(args: dict) -> str:
     session_id = _resolve_consent_ref(c, args.get("consent_ref"))
     if session_id is None:
         return ("No consent matches that consent_ref. Run consent_status to see "
-                "the current refs. Nothing has been changed.")
+                "the current refs. " + backups.unchanged(perfect=True))
     row = c.execute("SELECT aspsp_name, status, closed_at, valid_until"
                     " FROM sessions WHERE session_id=?",
                     (session_id,)).fetchone()
@@ -222,9 +222,9 @@ def unlink_bank(args: dict) -> str:
         # this tool would go and ask for: the provider can only answer 404, and
         # asking spends a live API call to learn what the row already records.
         return ("%s: that consent has already been withdrawn and the provider "
-                "confirmed it. Nothing has been changed and nothing local was "
-                "lost by it. consent_status lists the consents that still "
-                "exist." % bank)
+                "confirmed it. %s and nothing local was lost by it. "
+                "consent_status lists the consents that still exist."
+                % (bank, backups.unchanged(perfect=True, stop=False)))
     # A quarantined consent is exactly what this tool has to be able to
     # revoke — it is a live consent at the bank that nothing is bound to, and
     # it was previously unreachable because only `attempts.session_id` held it.
@@ -317,8 +317,9 @@ def unlink_bank(args: dict) -> str:
                 "whether the bank still holds it cannot be said from here.",
         }[state]
         return "\n".join([
-            "%s: the consent was NOT revoked (%s). Nothing has been changed "
-            "locally and %s" % (bank, failure, outcome),
+            "%s: the consent was NOT revoked (%s). %s locally and %s"
+            % (bank, failure, backups.unchanged(perfect=True, stop=False),
+               outcome),
             "Run unlink_bank consent_ref=%s again — the handle has not "
             "changed, so a retry reaches the same consent. consent_status "
             "lists it as needing attention until it succeeds; if it keeps "
@@ -414,24 +415,23 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
         handle.close()
 
 
-def _rolled_back(head: str, b, state) -> str:
+def _rolled_back(head: str, b) -> str:
     """A scoped erasure that rolled back: nothing of the ledger went, and no
-    backup copy was pruned (`_finish_pre_erasure` prunes nothing then) -- but
-    this call's settlement may have completed an earlier interrupted erasure
-    on the way, and that is said rather than covered by "nothing"."""
-    text = ("%s Backup %s, taken for it, is kept (it is a copy of the "
+    backup copy was pruned (`_finish_pre_erasure` prunes nothing then). What
+    this call's settlement did on the way is the dispatcher's sentence, and
+    `head`'s "nothing" is scoped by `backups.unchanged` when it did any."""
+    return ("%s Backup %s, taken for it, is kept (it is a copy of the "
             "unchanged ledger)." % (head, b.op_id))
-    settled = backups.settled_note(state.settled if state is not None else None)
-    return text + " " + settled if settled else text
 
 
 def _backup_line(b, state, finished, restores) -> str:
     """The reply's account of the backup copies (issue #47): the copy this
     call took and what a restore of it brings back, and what else changed in
     the backups directory -- which is nothing, unless retention pruned an
-    older pre-erasure copy or this call's settlement completed an earlier
-    interrupted total erasure. "No other backup copy was changed" is said
-    only when both are false."""
+    older pre-erasure copy. That no other copy changed is said only when
+    retention removed none and every record landed, and it is scoped to
+    this call's own erasure when settlement did anything on the way (the
+    dispatcher's sentence names that)."""
     pruned, retention_error, index_error = finished
     line = ("Backup %s was taken just before this erasure: restore_backup "
             "backup_id=%s puts back %s." % (b.op_id, b.op_id, restores))
@@ -449,7 +449,6 @@ def _backup_line(b, state, finished, restores) -> str:
             line += (" Its index record could not be written (%s); the copy "
                      "is complete, and the next settlement (any backup, "
                      "restore, listing or workflow write) records it." % text)
-    settled = backups.settled_note(state.settled if state is not None else None)
     if retention_error:
         line += (" Retention stopped part way (%s)%s; the backup itself is "
                  "complete." % (retention_error,
@@ -460,13 +459,11 @@ def _backup_line(b, state, finished, restores) -> str:
     elif pruned:
         line += (" Retention removed the oldest pre-erasure cop%s: %s."
                  % ("y" if len(pruned) == 1 else "ies", ", ".join(pruned)))
-    if settled:
-        line += " " + settled
-    elif not pruned and not retention_error and not index_error:
+    if not pruned and not retention_error and not index_error:
         # With the terminal record missing no prune ran, so nothing else
         # changed then either -- but the sentence would sit beside a warning
         # about this very copy, and it is only said when all went to plan.
-        line += " No other backup copy was changed."
+        line += " " + backups.no_other_copy_changed()
     return line
 
 
@@ -532,14 +529,14 @@ def purge(args: dict) -> str:
         return ("before_date must be exactly an ISO date, YYYY-MM-DD, or "
                 "'all' — not a timestamp and not a compact form. Rows are "
                 "compared to it as text, so anything else would silently "
-                "erase MORE than the date names. Nothing has been changed.")
+                "erase MORE than the date names. " + backups.unchanged(perfect=True))
     user_work = args.get("user_work")
     if user_work not in USER_WORK:
         # Never echoed back: an arbitrary string in a line-oriented reply.
         return ("user_work must be 'keep' (keep auto-tagging rules and account "
                 "labels, categories and include flags) or 'erase' (erase all "
                 "of them, and every note and tag). There is no default. "
-                "Nothing has been changed.")
+                + backups.unchanged(perfect=True))
     erase = user_work == "erase"
     c = _conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
@@ -551,7 +548,7 @@ def purge(args: dict) -> str:
             return ("A bank authorization is in progress (a link or renewal "
                     "is completing), and a purge now could make its reply "
                     "wrong about which consent is live. Try again in a few "
-                    "minutes. Nothing has been changed.")
+                    "minutes. " + backups.unchanged(perfect=True))
         # Settle, then copy the ledger as it stands. `take_backup` copies
         # through a separate reader, which under WAL sees the last COMMITTED
         # state: with the write lock held and nothing written yet, that is
@@ -559,13 +556,13 @@ def purge(args: dict) -> str:
         state, handle = backups.settle(c, paths)
         b = backups.take_backup(c, paths, handle, backups.ERASURE_REASON)
     except backups.BackupError as exc:
-        # NOTHING IS ERASED WITHOUT ITS BACKUP. `refusal_text` says what a
-        # settlement on the way removed, when it removed anything.
+        # NOTHING IS ERASED WITHOUT ITS BACKUP. What a settlement on the way
+        # removed is the dispatcher's sentence.
         if c.in_transaction:
             c.execute("ROLLBACK")
         if handle is not None:
             handle.close()
-        return backups.refusal_text(exc, state)
+        return backups.refusal_text(exc)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -635,9 +632,9 @@ def purge(args: dict) -> str:
         # The copy stands for a ledger that did not change: an `orphan`, as a
         # rolled-back mint is, and still a valid restore point.
         _finish_pre_erasure(paths, handle, b, committed=False)
-        return _rolled_back("The purge failed (%s) and was rolled back: "
-                            "nothing was erased." % type(exc).__name__,
-                            b, state)
+        return _rolled_back("The purge failed (%s) and was rolled back: %s"
+                            % (type(exc).__name__,
+                               backups.unchanged("erased", start=False)), b)
     finished = _finish_pre_erasure(paths, handle, b, committed=True)
 
     gone_notes, gone_tags = notes_before - notes_after, tags_before - tags_after
@@ -812,7 +809,7 @@ def forget_local_account(args: dict) -> str:
             c.execute("ROLLBACK")
         if handle is not None:
             handle.close()
-        return backups.refusal_text(exc, state)
+        return backups.refusal_text(exc)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -850,9 +847,9 @@ def forget_local_account(args: dict) -> str:
         if c.in_transaction:
             c.execute("ROLLBACK")
         _finish_pre_erasure(paths, handle, b, committed=False)
-        return _rolled_back("Erasing %s failed (%s) and was rolled back: "
-                            "nothing was erased."
-                            % (named, type(exc).__name__), b, state)
+        return _rolled_back("Erasing %s failed (%s) and was rolled back: %s"
+                            % (named, type(exc).__name__,
+                               backups.unchanged("erased", start=False)), b)
     finished = _finish_pre_erasure(paths, handle, b, committed=True)
     # What a restore of the copy brings back, and what it does not: a
     # restore keeps bindings and authorization attempts LIVE, so the account
@@ -1028,16 +1025,14 @@ def _destroy_proven_handles(c, paths):
             handle.close()
         # Settlement succeeded when `state` is set, so the failure is the
         # sweep's own `pending` append.
-        return (False, _handles_kept_note(due, exc, state is not None),
-                _settled_lines(exc.settled
-                               or (state.settled if state else None)))
+        return False, _handles_kept_note(due, exc, state is not None), []
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
             c.execute("ROLLBACK")
         if handle is not None:
             handle.close()
         failure = type(exc).__name__
-        extra = _settled_lines(state.settled if state else None)
+        extra = []
         if due is None:
             return False, (
                 "WARNING — the local ledger IS erased, but the sweep of "
@@ -1068,7 +1063,7 @@ def _destroy_proven_handles(c, paths):
             "gone, so consent_status does not list them and there is nothing "
             "left to revoke at those banks. Run delete_all_data again to clear "
             "the residue." % (due, failure)), extra
-    lines = _settled_lines(state.settled)
+    lines = []
     try:
         if erase_op is not None:
             swept = _second_sweep(paths, handle, state, erase_op)
@@ -1077,29 +1072,6 @@ def _destroy_proven_handles(c, paths):
         return True, None, lines
     finally:
         handle.close()
-
-
-def _settled_tail(state) -> str:
-    """" <sentence>" naming what this call's settlement removed when it
-    completed an interrupted erasure, or "" when it removed nothing."""
-    if state is None or state.settled is None:
-        return ""
-    return " " + backups.settled_note(state.settled)
-
-
-def _settled_lines(settled) -> list:
-    """The settlement that opens the row sweep completes any erasure still
-    pending — the first sweep's, when it stopped above — and removing copies
-    there is part of this call's account: a reply that said the erasure had
-    not finished must also say that it then did."""
-    if settled is None:
-        return []
-    if not settled.finished:
-        return ["Settlement then resumed the pending erasure of the backup "
-                "copies and removed %s before it refused; the erasure is not "
-                "finished." % settled.went()]
-    return ["Settlement then completed the pending erasure of the backup "
-            "copies: it removed %s." % settled.went()]
 
 
 def _handles_kept_note(due, exc, appending: bool) -> str:
@@ -1230,16 +1202,12 @@ def delete_all_data(args: dict) -> str:
         c.execute("ROLLBACK")
         if isinstance(exc, backups.ErasureIncomplete):
             # Settlement was completing an erasure an EARLIER call recorded,
-            # and it just retried every remaining copy. "Nothing was erased"
-            # would be false about this call's own attempt on those files and
-            # says nothing about the only residue there is, so the residue is
-            # named instead. No claim is made about the ledger's rows: whether
-            # that earlier call's ledger half landed is its own report to give.
-            #
-            # `describe()` carries the alarm, and carries it only for the
-            # copies it is true of: a `.partial` is not restorable, so telling
-            # an operator that one is a whole copy of their ledger sends them
-            # after the wrong file with the wrong urgency.
+            # and it just retried every remaining copy. What it removed and
+            # what is left — the alarm, for the whole copies it is true of —
+            # is the dispatcher's settlement sentence, said once (#48); this
+            # text says what stops and what the operator can do. No claim is
+            # made about the ledger's rows: whether that earlier call's
+            # ledger half landed is its own report to give.
             #
             # The consequence is stated as the set it really is. "Nothing else
             # here can proceed" was false of every read, of `sync`, and of
@@ -1247,39 +1215,24 @@ def delete_all_data(args: dict) -> str:
             # settle the index — `backup`, `restore_backup`, `delete_all_data`
             # and a workflow-bearing write — refuse, and an operator told the
             # plugin was wholly wedged goes looking for a different fault.
-            return ("An erasure recorded earlier is not finished: %s. No "
+            return ("An erasure recorded earlier is not finished. No "
                     "backup, restore, total erasure or workflow write runs "
                     "until the erasure completes. Check the backups "
                     "directory (%s)%s: make it writable, repair the disk it "
                     "is on, or delete its contents by hand; then run any "
                     "backup, restore, listing or workflow write to finish "
                     "the erasure."
-                    % (exc.describe(), paths.backups_dir.name,
+                    % (paths.backups_dir.name,
                        " and the %s* files beside the ledger"
                        % paths.snapshot_prefix
                        if backups.snapshots_at_risk(exc.erasure) else ""))
         if isinstance(exc, backups.ErasureRecordUnwritten):
-            # Settlement COMPLETED an earlier erasure's sweep — every copy is
-            # gone and the directory flushed — and only the record confirming
-            # it failed. "Nothing was erased" would be false of the copies
-            # this very call just unlinked.
-            er = exc.erasure or backups.Erasure()
-            return ("An erasure recorded earlier was completed by this call's "
-                    "settlement: every backup copy is gone (%s removed now), "
-                    "but the index record confirming it could not be written "
-                    "(%s)%s; it will be written at the next settlement (any "
-                    "backup, restore, listing or workflow write). This call's "
-                    "own erasure did not run: the ledger was not erased."
-                    % (er.went(),
-                       exc,
-                       " and may stand part-written until then"
-                       if exc.written is None else ""))
-        if exc.settled is not None:
-            # Any other refusal raised AFTER settlement unlinked copies: the
-            # ledger half did not run, the copies that went are gone.
-            return ("%s. The ledger was not erased; %s"
-                    % (exc, backups.settled_sentence(exc.settled)))
-        return "%s. Nothing was erased." % exc
+            # Settlement COMPLETED an earlier erasure's sweep and only the
+            # record confirming it failed; the dispatcher's sentence says
+            # so. "Nothing was erased" would read as a denial of that.
+            return ("%s. This call's own erasure did not run: the ledger "
+                    "was not erased." % exc)
+        return "%s. %s" % (exc, backups.unchanged("erased"))
     except Exception:
         # Anything that is NOT a BackupError — a bug, an OOM, a
         # KeyboardInterrupt — would otherwise leave the module-singleton
@@ -1332,10 +1285,9 @@ def delete_all_data(args: dict) -> str:
         # empty a ledger whose whole-ledger copies would outlive it.
         if c.in_transaction:
             c.execute("ROLLBACK")
-        # This call's settlement ran before the refusal, and when it completed
-        # an interrupted erasure it removed copies: every branch below says
-        # so, and none of them says "Nothing was erased" then.
-        done_by_settle = _settled_tail(backup_state)
+        # What this call's settlement did before the refusal is the
+        # dispatcher's sentence; `unchanged` scopes the last branch's
+        # "nothing" when it did anything.
         if exc.written is None:
             # THE WRITE FAILED PART WAY AND ITS BYTES COULD NOT BE CUT BACK.
             # The ledger rolled back, so nothing of it was erased; but the
@@ -1345,8 +1297,7 @@ def delete_all_data(args: dict) -> str:
             return ("%s. The ledger was not erased: its erasure was rolled "
                     "back. The index may hold a partial record of the backup "
                     "erasure; the next settlement (any backup, restore, "
-                    "listing or workflow write) recovers it.%s"
-                    % (exc, done_by_settle))
+                    "listing or workflow write) recovers it." % exc)
         if exc.written:
             # THE BYTES LANDED AND ONLY THE FLUSH FAILED. The line is readable
             # right now by anything that parses this index, so the next settle
@@ -1357,10 +1308,8 @@ def delete_all_data(args: dict) -> str:
             return ("%s. The ledger was not erased. A record of the backup "
                     "erasure may already be durable: the backup copies will be "
                     "removed at the next settlement (any backup, restore, "
-                    "listing or workflow write).%s" % (exc, done_by_settle))
-        if done_by_settle:
-            return "%s. The ledger was not erased.%s" % (exc, done_by_settle)
-        return "%s. Nothing was erased." % exc
+                    "listing or workflow write)." % exc)
+        return "%s. %s" % (exc, backups.unchanged("erased"))
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -1374,8 +1323,8 @@ def delete_all_data(args: dict) -> str:
             # with two specific halves, both of which they need to know.
             return ("The ledger erasure failed (%s) and was rolled back — the "
                     "ledger is intact. The backup copies are still scheduled "
-                    "for erasure and will be removed at the next settlement.%s"
-                    % (type(exc).__name__, _settled_tail(backup_state)))
+                    "for erasure and will be removed at the next settlement."
+                    % type(exc).__name__)
         raise
     else:
         # THE BACKUP FILES ARE PART OF "THE ENTIRE LOCAL LEDGER". Each
@@ -1497,10 +1446,8 @@ def delete_all_data(args: dict) -> str:
         done += (" The workflow registrations were erased, so a workflow's "
                 "next write mints a fresh restore point.")
     # A RETRY'S OWN SETTLEMENT CAN FINISH THE EARLIER CALL'S SWEEP before this
-    # call's sweep runs, and what it removed there is in `backup_state`, not in
-    # `erased_backups`: without this sentence the files the retry actually
-    # removed went unmentioned in a reply that succeeded.
-    done += _settled_tail(backup_state)
+    # call's sweep runs; what it removed there is the dispatcher's settlement
+    # sentence (#48), and `erased_backups` below counts this call's own sweep.
     if erased_backups is not None:
         # EVERY NUMBER HERE COUNTS ONLY WHAT WENT, one per shape
         # (`Erasure.went`): an indexed copy leaves a `prune` record, a copy in

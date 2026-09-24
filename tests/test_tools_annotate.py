@@ -13,6 +13,8 @@ import backups  # noqa: E402
 import bank_feed_server  # noqa: E402
 import store  # noqa: E402
 import tools_read  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _toolbase import dispatch  # noqa: E402
 import tools_annotate  # noqa: E402  (registration side effect)
 import tools_backup  # noqa: E402,F401  (registers backup/list_backups)
 
@@ -801,11 +803,13 @@ class TestWorkflowArguments(Base):
                 raise PermissionError(13, "Permission denied")
             return real_unlink(p, *a, **k)
         pathlib.Path.unlink = selective
-        out = call("add_note", row_ids=[self.rid], note="second", author="agent",
-                   workflow="acct@1.0.0", expected_generation=0)
+        out = dispatch("add_note", row_ids=[self.rid], note="second",
+                       author="agent", workflow="acct@1.0.0",
+                       expected_generation=0)
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("settlement removed 1 backup copy(ies)", out)
-        self.assertIn("This call did not run.", out)
+        self.assertIn("this call resumed a pending erasure, removing 1 "
+                      "backup copy(ies); it is not finished", out)
+        self.assertIn("so this call did not run.", out)
         self.assertEqual(
             self.conn.execute("SELECT count(*) FROM transaction_notes WHERE"
                               " note='second'").fetchone()[0], 0)

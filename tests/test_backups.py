@@ -532,13 +532,17 @@ class TestTheErasureIsDurableBeforeItsRecord(Base):
         # Issue #44: a snapshot is a whole-ledger copy, sessions included.
         self._pending_erasure()
         mine, other = self._snapshot(), self._snapshot("bank_feed.sandbox.sqlite")
-        state = self.settled()
+        token = backups.open_log()
+        try:
+            state = self.settled()
+        finally:
+            said = backups.close_log(token)
         self.assertFalse(mine.exists())
         self.assertTrue(other.exists())      # the other mode's ledger's own
         self.assertEqual([e["state"] for e in state.erasures], ["committed"])
         self.assertEqual(state.settled.snapshots, 1)
-        self.assertIn("removed 1 backup copy(ies) and 1 pre-migration snapshot(s)",
-                      backups.settled_sentence(state.settled))
+        self.assertIn("completed a pending erasure, removing 1 backup copy(ies) "
+                      "and 1 pre-migration snapshot(s).", said)
 
     def test_a_snapshot_only_sweep_is_still_reported(self):
         # No backup copy at all: the snapshot is the only thing that went,
@@ -628,17 +632,22 @@ class TestTheErasureIsDurableBeforeItsRecord(Base):
         state = self.settled()
         self.assertEqual([e["state"] for e in state.erasures], ["committed"])
 
-    def test_a_placed_backup_reply_counts_what_settlement_removed(self):
-        # `refusal_text`'s placed-but-unflushed branch has its own sentence
-        # about settlement; it must count every shape the sweep removed.
+    def test_the_settlement_sentence_counts_every_shape_the_sweep_removed(self):
+        # The one renderer of settlement's work (#48) must count every shape
+        # a sweep removes, in one phrase (`Erasure.went`).
+        log = backups.SettleLog()
+        e = log.erasure("abcdefabcdefabcd")
+        e["attempts"].append(backups.Erasure(removed=1, partials=1,
+                                             snapshots=1, snapshot_sidecars=1))
+        e["completed"] = True
+        self.assertIn("removing 1 backup copy(ies), 1 partial copy(ies), 1 "
+                      "pre-migration snapshot(s) and 1 snapshot journal "
+                      "file(s).", backups.render_log(log))
+        # A placed-but-unflushed copy's refusal says only what the backup
+        # did; settlement is the dispatcher's sentence.
         exc = backups.BackupError("EIO")
         exc.placed = "aaaaaaaaaaaaaaaa"
-        exc.settled = backups.Erasure(removed=1, partials=1, snapshots=1,
-                                      snapshot_sidecars=1, finished=True)
-        text = backups.refusal_text(exc)
-        self.assertIn("removed 1 backup copy(ies), 1 partial copy(ies), 1 "
-                      "pre-migration snapshot(s) and 1 snapshot journal "
-                      "file(s).", text)
+        self.assertNotIn("removed", backups.refusal_text(exc))
 
     def test_a_removed_journal_is_named_when_the_flush_then_fails(self):
         self.settled()
@@ -1528,13 +1537,16 @@ class TestTwoProcesses(RestoreBase):
         self.assertTrue(self.paths.backup_file(bid).is_file())
         import tools_read, tools_backup
         tools_read.CONN = self.conn
+        token = backups.open_log()
         try:
             out = tools_backup.restore_backup({"backup_id": bid})
         finally:
+            said = backups.close_log(token)
             tools_read.CONN = None
         self.assertIn("no restorable backup %s" % bid, out)
-        self.assertIn("This call did not run; settlement first completed an "
-                      "interrupted erasure and removed 1 backup copy(ies).", out)
+        self.assertEqual("While settling the backup index, this call completed "
+                         "a pending erasure, removing 1 backup copy(ies).", said)
+        self.assertIn("This call's own operation changed nothing.", out)
         self.assertNotIn("Nothing was changed.", out)
         self.assertFalse(self.paths.backup_file(bid).exists())
         self.assertFalse(self.conn.in_transaction)

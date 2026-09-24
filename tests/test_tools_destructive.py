@@ -38,7 +38,7 @@ import tools_backup  # noqa: E402,F401  (registers backup/list_backups/restore_b
 import tools_destructive  # noqa: E402
 import tools_read  # noqa: E402
 
-from _toolbase import (Base, LINKED_IBAN, OTHER_IBAN, PLUGIN_ROOT,  # noqa: E402
+from _toolbase import (Base, dispatch, LINKED_IBAN, OTHER_IBAN, PLUGIN_ROOT,  # noqa: E402
                        SESSION_ID, FakeAdmin, FakeAIS, acct, call,
                        declared_protected, rate_limited)
 
@@ -2543,11 +2543,13 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # Settlement runs first on the retry and hits the same wall. Saying
         # "nothing was erased" there would be false about the copies this call
         # just retried and silent about the only residue there is.
-        out = call("delete_all_data")
-        self.assertIn("An erasure recorded earlier is not finished: 2 whole "
-                      "copy(ies) could not be removed — EVERY BACKUP IS A "
-                      "WHOLE COPY OF THIS LEDGER, so the copies that may "
-                      "still be on disk hold this ledger's data.", out)
+        out = dispatch("delete_all_data")
+        self.assertIn("this call resumed a pending erasure; it is not "
+                      "finished: 2 whole copy(ies) could not be removed — "
+                      "EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER, so the "
+                      "copies that may still be on disk hold this ledger's "
+                      "data.", out)
+        self.assertIn("\nAn erasure recorded earlier is not finished.", out)
         self.assertIn(paths.backups_dir.name, out)
         self.assertNotIn("Nothing was erased", out)
         self.assertFalse(tools_read.CONN.in_transaction)
@@ -2580,7 +2582,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.addCleanup(os.chmod, str(paths.backups_dir), 0o700)
         self.addCleanup(setattr, backups, "settle", real_settle)
         backups.settle = settle_then_seal
-        out = call("delete_all_data")
+        out = dispatch("delete_all_data")
         # The erasure itself is committed -- the failure is reported, never
         # raised, and never as "nothing happened".
         self.assertEqual(self.count("transactions"), 0)
@@ -2591,9 +2593,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertNotIn("were erased too — each is a copy", out)
         # The settlement opening the session-row sweep re-prepares the
         # directory (0700) and completes the pending erasure in the same
-        # call; the reply says what it removed, after the warning.
-        self.assertIn("Settlement then completed the pending erasure of the "
-                      "backup copies: it removed 2 backup copy(ies)", out)
+        # call; the dispatcher's sentence says what it removed.
+        self.assertIn("While settling the backup index, this call completed "
+                      "a pending erasure, removing 2 backup copy(ies)", out)
         self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 0)
 
     def test_an_index_append_that_fails_after_its_unlink_still_gets_its_record(self):
@@ -2619,7 +2621,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
             return real(handle, *fields)
         self.addCleanup(setattr, backups.IndexHandle, "append", real)
         backups.IndexHandle.append = append
-        out = call("delete_all_data")
+        out = dispatch("delete_all_data")
         backups.IndexHandle.append = real
         # The state the finding starts from: one copy unlinked, no record of
         # it, the erasure still pending. The warning does not invent a count
@@ -2630,8 +2632,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # The settlement that opens the session-row sweep, later in the same
         # call, completes the stalled erasure — and the reply says so, below
         # the warning that it had stalled.
-        self.assertIn("Settlement then completed the pending erasure of the "
-                      "backup copies: it removed 1 backup copy(ies)", out)
+        self.assertIn("While settling the backup index, this call completed "
+                      "a pending erasure, removing 1 backup copy(ies), "
+                      "recording the earlier removal of 1 backup copy", out)
         listing = call("list_backups")
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
         # EXACTLY ONE `prune` PER INDEXED COPY, including the one whose file
@@ -3176,9 +3179,9 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
         self.assertEqual(self._erase_states(paths), ["pending"])
         # The next settlement, in any call that settles, finishes the sweep,
         # and the listing says what it removed on the way.
-        listing = call("list_backups")
-        self.assertIn("Settlement first completed an interrupted erasure and "
-                      "removed 1 pre-migration snapshot(s).", listing)
+        listing = dispatch("list_backups")
+        self.assertIn("this call completed a pending erasure, removing 1 "
+                      "pre-migration snapshot(s).", listing)
         self.assertFalse(snap.exists())
         self.assertEqual(self._erase_states(paths), ["pending", "committed"])
         # The session row the first call kept (its sweep could not be
@@ -3256,9 +3259,9 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
             return real_unlink(p, *a, **kw)
         with mock.patch.object(pathlib.Path, "unlink", unlink):
             call("delete_all_data")
-        out = call("delete_all_data")
-        self.assertIn("Settlement first completed an interrupted erasure and "
-                      "removed 1 pre-migration snapshot(s).", out)
+        out = dispatch("delete_all_data")
+        self.assertIn("this call completed a pending erasure, removing 1 "
+                      "pre-migration snapshot(s).", out)
         self.assertFalse(snap.exists())
         self.assertEqual(self._files_holding(SESSION_ID), [])
 
@@ -3273,10 +3276,10 @@ class TestPreMigrationSnapshotsAreErased(DestructiveBase):
             return real_unlink(p, *a, **kw)
         with mock.patch.object(pathlib.Path, "unlink", unlink):
             call("delete_all_data")
-        out = call("backup", reason="manual")
+        out = dispatch("backup", reason="manual")
         self.assertIn("written (manual", out)
-        self.assertIn("Settlement first completed an interrupted erasure and "
-                      "removed 1 pre-migration snapshot(s).", out)
+        self.assertIn("this call completed a pending erasure, removing 1 "
+                      "pre-migration snapshot(s).", out)
         self.assertFalse(snap.exists())
 
     def test_a_terminal_record_that_cannot_be_written_keeps_the_count(self):
@@ -3454,14 +3457,17 @@ class TestRecoveryThatErasedCopiesIsNotNothing(DestructiveBase):
                 raise OSError(errno.ENOSPC, "No space left on device")
             return real_write(fd, data)
         with mock.patch.object(backups.os, "write", write):
-            out = call("delete_all_data")
+            out = dispatch("delete_all_data")
         self.assertFalse(paths.backup_file(bid).exists())
         self.assertNotIn("Nothing was erased", out)
-        self.assertIn("An erasure recorded earlier was completed by this "
-                      "call's settlement: every backup copy is gone (1 "
-                      "backup copy(ies) removed now), but the index record confirming it could "
-                      "not be written (the backup index could not be written: "
-                      "ENOSPC); it will be written at the next settlement", out)
+        self.assertIn("this call resumed a pending erasure, removing 1 backup "
+                      "copy(ies); every copy is gone, but the record that the "
+                      "erasure is complete could not be written, and the next "
+                      "settlement (any backup, restore, listing or workflow "
+                      "write) writes it.", out)
+        self.assertIn("the backup index could not be written: ENOSPC. This "
+                      "call's own erasure did not run: the ledger was not "
+                      "erased.", out)
         self.assertFalse(tools_read.CONN.in_transaction)
         call("list_backups")
         last = paths.index.read_text().splitlines()[-1].split()
@@ -3493,12 +3499,14 @@ class TestARetryAfterAnInterruptedErasure(DestructiveBase):
                 raise OSError(errno.ENOSPC, "No space left on device")
             return real_write(fd, data)
         with mock.patch.object(backups.os, "write", write):
-            out = call("delete_all_data")
+            out = dispatch("delete_all_data")
         self.assertFalse(paths.backup_file(bid).exists())
         self.assertNotIn("Nothing was erased", out)
-        self.assertIn("the backup index could not be written: ENOSPC. The "
-                      "ledger was not erased. Settlement first completed an "
-                      "interrupted erasure and removed 1 backup copy(ies).", out)
+        self.assertTrue(out.startswith(
+            "While settling the backup index, this call completed a pending "
+            "erasure, removing 1 backup copy(ies)."), out)
+        self.assertIn("the backup index could not be written: ENOSPC. This "
+                      "call's own erasure erased nothing.", out)
         self.assertFalse(tools_read.CONN.in_transaction)
 
 

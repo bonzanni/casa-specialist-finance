@@ -11,7 +11,7 @@ import backups  # noqa: E402
 import tools_auth  # noqa: E402
 import tools_backup  # noqa: E402  (registration side effect)
 import tools_read  # noqa: E402
-from _toolbase import Base as _ToolBase, call  # noqa: E402
+from _toolbase import Base as _ToolBase, call, dispatch  # noqa: E402
 
 
 class Base(_ToolBase):
@@ -133,13 +133,19 @@ class TestAnIncompleteErasureIsStillReported(Base):
 
     def test_backup_reports_what_the_settlement_removed(self):
         doomed, removed = self._stuck_erasure()
-        out = call("backup", reason="manual")
+        out = dispatch("backup", reason="manual")
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("settlement removed 1 backup copy(ies)", out)
-        self.assertIn("1 whole copy(ies) could not be removed — EVERY BACKUP "
-                      "IS A WHOLE COPY OF THIS LEDGER, so the copies that may "
-                      "still be on disk hold this ledger's data. This call "
-                      "did not run.", out)
+        # Said ONCE, by the dispatcher, ahead of the tool's own refusal.
+        self.assertTrue(out.startswith(
+            "While settling the backup index, this call resumed a "
+            "pending erasure, removing 1 backup copy(ies); it is not "
+            "finished: 1 whole copy(ies) could not be removed — EVERY BACKUP "
+            "IS A WHOLE COPY OF THIS LEDGER, so the copies that may still be "
+            "on disk hold this ledger's data.\n"), out)
+        self.assertTrue(out.endswith(
+            "\nAn interrupted erasure of the backup copies is not finished, "
+            "so this call did not run."), out)
+        self.assertEqual(out.count("could not be removed"), 1, out)
         # It really did not run: no third copy, and the doomed one is what is
         # left of the two that were there.
         self.assertEqual([p.name for p in self.paths.backups_dir.iterdir()],
@@ -148,30 +154,30 @@ class TestAnIncompleteErasureIsStillReported(Base):
 
     def test_restore_backup_reports_it_too(self):
         doomed, _ = self._stuck_erasure()
-        out = call("restore_backup", backup_id=doomed)
+        out = dispatch("restore_backup", backup_id=doomed)
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("This call did not run.", out)
+        self.assertIn("removing 1 backup copy(ies); it is not finished", out)
+        self.assertIn("so this call did not run.", out)
 
     def test_list_backups_shows_the_residue_the_count_refers_to(self):
         # THE ONE CALL THAT CHANGES NOTHING STILL ANSWERS. Refusing it left the
         # operator told that a copy could not be removed and denied the only
         # in-tool view of which copy that is — while every other call refuses.
         doomed, removed = self._stuck_erasure()
-        out = call("list_backups")
-        # Whole copies and copies in flight are counted APART: a `.partial`
-        # never reached the index, so the listing below has no row for one and
-        # a single lumped count promised the operator rows that are not there.
-        # The set of calls that refuse is named exactly, and this listing --
+        out = dispatch("list_backups")
+        # What went and what is left is the dispatcher's sentence, once; the
+        # listing says the erasure is incomplete and shows the rows. The set
+        # of calls that refuse is named exactly, and this listing --
         # answered rather than refused -- is the proof a read is not in it.
-        self.assertIn("Backup erasure incomplete: settlement removed 1 backup "
-                      "copy(ies); 1 whole copy(ies) could not "
-                      "be removed — EVERY BACKUP IS A WHOLE COPY OF THIS "
-                      "LEDGER, so the copies that may still be on disk hold "
-                      "this ledger's data. No backup, restore, total erasure "
-                      "or workflow write runs until the erasure completes; "
-                      "reads, this one included, still answer. Every INDEXED "
-                      "copy is listed below — a copy in flight never reached "
-                      "the index and has no row.", out)
+        self.assertIn("this call resumed a pending erasure, removing 1 "
+                      "backup copy(ies); it is not finished: 1 whole "
+                      "copy(ies) could not be removed", out)
+        self.assertIn("\nBackup erasure incomplete. No backup, restore, total "
+                      "erasure or workflow write runs until the erasure "
+                      "completes; reads, this one included, still answer. "
+                      "Every INDEXED copy is listed below — a copy in flight "
+                      "never reached the index and has no row.", out)
+        self.assertEqual(out.count("could not be removed"), 1, out)
         self.assertRegex(out, r"%s  \d{8}T\d{6}Z  \d+ B  manual  committed"
                          % doomed)
         self.assertIn("%s  " % removed, out)
@@ -193,7 +199,7 @@ class TestAnIncompleteErasureIsStillReported(Base):
         def refuse(p, *a, **k):
             raise PermissionError(13, "Permission denied")
         pathlib.Path.unlink = refuse
-        out = call("list_backups")
+        out = dispatch("list_backups")
         pathlib.Path.unlink = real_unlink
         self.assertIn("1 whole copy(ies) could not be removed", out)
         self.assertIn("1 unfinished copy(ies) could not be removed", out)

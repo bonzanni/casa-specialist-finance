@@ -263,8 +263,9 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes):
                 "REVIEW REQUIRED: something tried to move account %s onto %s "
                 "without completing the renewal sequence. A renewal proves "
                 "the bank returned exactly the accounts already linked, then "
-                "backfills, then switches every binding at once. Nothing was "
-                "changed. Re-run the authorization, or unlink this bank and "
+                "backfills, then switches every binding at once. The account's "
+                "binding was not changed. Re-run the authorization, or unlink "
+                "this bank and "
                 "link it again." % (aid, what))
             record_binding_review(conn, aid, note, exists["incarnation"])
             raise RebindRefused(note, aid)
@@ -293,7 +294,8 @@ def upsert_account(conn, account: dict, session_id: str, secret: bytes):
             raise RebindRefused(
                 "the account changed identity while this link was binding "
                 "it — it was erased, or erased and re-linked, underneath "
-                "this authorization. Nothing was changed. Re-run the "
+                "this authorization. The account's binding was not changed. "
+                "Re-run the "
                 "authorization if the account is still linked.", aid)
         return aid, exists["incarnation"]
     # `incarnation` is minted HERE, once per creation, because the

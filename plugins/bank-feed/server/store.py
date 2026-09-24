@@ -871,7 +871,16 @@ def _settle_best_effort(conn, db: Path) -> None:
         backups.settle(conn, paths, hold=False)
         conn.execute("COMMIT")
     except (backups.BackupError, sqlite3.OperationalError, OSError):
-        conn.execute("ROLLBACK")
+        # SQLite rolls back by itself on some COMMIT failures, and a bare
+        # ROLLBACK then raises "no transaction is active" out of this
+        # function — turning a skipped recovery pass into a ledger that will
+        # not open. What settlement did before failing is in the call's
+        # `SettleLog` either way; the dispatcher reports it.
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
 
 
 def open_db(path=None) -> sqlite3.Connection:

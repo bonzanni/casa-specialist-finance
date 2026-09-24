@@ -1434,7 +1434,8 @@ def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
         except Indeterminate:
             conn.execute("ROLLBACK")
             return Outcome(state_hash, "skipped",
-                           "the collection lease moved; nothing was changed")
+                           "the collection lease moved; this collector wrote "
+                           "nothing")
         except BaseException:
             conn.execute("ROLLBACK")
             raise

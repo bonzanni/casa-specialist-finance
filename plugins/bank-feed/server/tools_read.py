@@ -45,6 +45,7 @@ import datetime as _dt
 import os
 import sqlite3
 
+import backups
 import apply
 import bank_feed_server
 import flows
@@ -1033,8 +1034,7 @@ def list_transactions(args: dict) -> str:
         if args.get(key):
             norm, refusal = _normalize_tags(args[key])
             if refusal:
-                return "%s: %s" % (key, refusal.replace(
-                    " Nothing was changed.", ""))
+                return "%s: %s" % (key, backups.strip_unchanged(refusal))
             if key == "tags_all":
                 for tag in norm:
                     where.append(

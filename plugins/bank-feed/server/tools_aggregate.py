@@ -15,6 +15,7 @@ unknown denomination is a gap, not a guess.
 """
 from __future__ import annotations
 
+import backups
 import apply
 import money
 import rules
@@ -80,7 +81,7 @@ def spend_by_tag(args: dict) -> str:
     if args.get("tags"):
         tag_filter, refusal = _normalize_tags(args["tags"])
         if refusal:
-            return "tags: " + refusal.replace(" Nothing was changed.", "")
+            return "tags: " + backups.strip_unchanged(refusal)
     # Inline refresh may WRITE through the REFRESHER seam, so it cannot run
     # inside a read snapshot: it runs first, against a PROVISIONAL account
     # list. The population the answer describes is re-read INSIDE the snapshot

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 
+import backups
 import rules
 import tools_read
 from tools_read import register
@@ -52,7 +53,7 @@ def _now() -> str:
 def _rule_id_arg(value):
     # bool is an int subclass: True would silently address rule #1.
     if isinstance(value, bool) or not isinstance(value, int):
-        return None, "rule_id must be an integer. Nothing was changed."
+        return None, "rule_id must be an integer. " + backups.unchanged()
     return value, None
 
 
@@ -73,7 +74,7 @@ def _no_such_account(c, fields):
                                 (aid,)).fetchone():
         return None
     return ("no cached account %s — account ids come from list_accounts. "
-            "Nothing was changed." % tools_read._neutralized(aid))
+            "%s" % (tools_read._neutralized(aid), backups.unchanged()))
 
 
 def _sentence(rule: dict, accounts: dict) -> str:
@@ -148,15 +149,15 @@ def add_rule(args: dict) -> str:
             c.execute("ROLLBACK")
             return ("a rule with this exact predicate set already "
                     "exists: rule #%d — replace_rule can change its "
-                    "tags or rationale. Nothing was changed."
-                    % dup["rule_id"])
+                    "tags or rationale. %s"
+                    % (dup["rule_id"], backups.unchanged()))
         n = c.execute("SELECT COUNT(*) FROM tag_rules").fetchone()[0]
         if n >= rules.RULEBOOK_CAP:
             c.execute("ROLLBACK")
             return ("the rulebook is at its cap of %d rules — if it got "
                     "here, something is minting junk; review with the "
-                    "operator rather than pruning silently. Nothing was "
-                    "changed." % rules.RULEBOOK_CAP)
+                    "operator rather than pruning silently. %s"
+                    % (rules.RULEBOOK_CAP, backups.unchanged()))
         cur = c.execute(
             "INSERT INTO tag_rules(signature, %s, created_at)"
             " VALUES (?, %s, ?)" % (", ".join(_WRITE_COLS),
@@ -194,7 +195,7 @@ def remove_rule(args: dict) -> str:
         if row is None:
             c.execute("ROLLBACK")
             return ("no rule #%d — rule ids come from list_rules. "
-                    "Nothing was changed." % rid)
+                    "%s" % (rid, backups.unchanged()))
         sentence = _sentence(dict(row), _accounts(c))
         c.execute("DELETE FROM tag_rules WHERE rule_id=?", (rid,))
         c.execute("COMMIT")
@@ -233,7 +234,7 @@ def replace_rule(args: dict) -> str:
         if row is None:
             c.execute("ROLLBACK")
             return ("no rule #%d — rule ids come from list_rules. "
-                    "Nothing was changed." % rid)
+                    "%s" % (rid, backups.unchanged()))
         refusal = _no_such_account(c, fields)
         if refusal:
             c.execute("ROLLBACK")
@@ -244,7 +245,7 @@ def replace_rule(args: dict) -> str:
         if dup:
             c.execute("ROLLBACK")
             return ("that predicate set already belongs to rule #%d. "
-                    "Nothing was changed." % dup["rule_id"])
+                    "%s" % (dup["rule_id"], backups.unchanged()))
         c.execute(
             "UPDATE tag_rules SET signature=?, %s WHERE rule_id=?"
             % ", ".join("%s=?" % k for k in _WRITE_COLS),
@@ -273,7 +274,7 @@ def list_rules(args: dict) -> str:
     if rid is not None:
         rid, refusal = _rule_id_arg(rid)
         if refusal:
-            return refusal.replace(" Nothing was changed.", "")
+            return backups.strip_unchanged(refusal)
         row = c.execute("SELECT * FROM tag_rules WHERE rule_id=?",
                         (rid,)).fetchone()
         if row is None:
@@ -338,16 +339,16 @@ def apply_rules(args: dict) -> str:
                     or any(isinstance(i, bool) or not isinstance(i, int)
                            for i in raw_ids)):
                 c.execute("ROLLBACK")
-                return ("row_ids must be 1-100 integers. Nothing was "
-                        "changed.")
+                return ("row_ids must be 1-100 integers. "
+                        + backups.unchanged())
             row_ids = sorted(set(raw_ids))
         else:
             where, params = ["state IN ('active','vanished')"], []
             if args.get("account") is not None:
                 if not isinstance(args["account"], str):
                     c.execute("ROLLBACK")
-                    return ("account must be a string. Nothing was "
-                            "changed.")
+                    return ("account must be a string. "
+                            + backups.unchanged())
                 where.append("account_id=?")
                 params.append(args["account"])
             for key, op in (("date_from", ">="), ("date_to", "<")):
@@ -355,8 +356,8 @@ def apply_rules(args: dict) -> str:
                 if v is not None:
                     if not isinstance(v, str):
                         c.execute("ROLLBACK")
-                        return ("%s must be a string. Nothing was "
-                                "changed." % key)
+                        return ("%s must be a string. %s"
+                                % (key, backups.unchanged()))
                     where.append("booking_date %s ?" % op)
                     params.append(v)
             row_ids = [r[0] for r in c.execute(

@@ -31,11 +31,8 @@ which counts committed *restores*. A copy that cannot be unlinked leaves the `pe
 and makes settlement itself refuse — fail closed, as an unreadable index does, rather than
 answer normally while copies of a supposedly erased ledger sit beside it. The refusal carries the
 state settlement built, so `list_backups`, which changes nothing, still renders the listing
-rather than hiding the residue. What completing an erasure removed is carried too
-(`LedgerState.settled`, or `BackupError.settled` when settlement then refuses), so a call that
-refuses after it — a restore of an id that erasure just removed — says "This call did not
-run; settlement first completed an interrupted erasure and removed N backup copy(ies).",
-never "Nothing was changed." (`backups.refusal_text`).
+rather than hiding the residue. What completing an erasure removed, and what it left, is
+reported the way everything settlement does is: see *What settlement reports* below.
 
 Exactly one terminal record is ever appended per operation id — a process finding one
 already present appends nothing — and since every appender holds the ledger writer lock
@@ -49,6 +46,38 @@ unavailable, never failing the open, because every consumer settles under both l
 itself — and at the start of every mint, restore, `backup(reason)` and workflow-bearing
 write, and before `list_backups` answers.
 
+## What settlement reports
+
+Settlement changes the index and the directory before the tool that triggered it does
+anything, and the first call of a process triggers it with no reply of its own: the
+open-time pass runs inside `store.open_db`, inside that call's `tools_read.conn()`. So
+settlement's work is not carried on what it returns or raises — an exit that drops those
+(a raw `OSError`, a failed COMMIT after settlement, the open-time pass swallowing its own
+failure so the ledger still opens) would drop the account with them (issues #48, #53).
+
+**Each write is recorded where it happens** into a `backups.SettleLog` that lives for
+exactly one dispatched `tools/call` (`backups.open_log`, a context variable; no call, no
+log). Recorded: the backups directory, index or index header it created; a torn tail it
+cut (as soon as the cut is made, with whether its flush landed); each `.partial` it
+unlinked; each pending `backup` or `restore` record it closed, when the append returned
+or failed with the line readable; and per erasure, what every attempt removed, the
+`prune` records for copies already gone, and whether the terminal record landed.
+
+**It is rendered once, by `bank_feed_server.handle`, on every exit** — success, refusal
+or exception — as one sentence after the sandbox banner: "While settling the backup
+index, this call …" (`backups.render_log`). It makes no ordering claim, because
+`delete_all_data` settles again after its own sweep. An erasure's removals are summed
+across attempts and its residue is the latest attempt's, so a retry that succeeded
+supersedes an earlier attempt's alarm. No tool renders settlement itself.
+
+**"Nothing was changed" has one spelling, `backups.unchanged`.** It is evaluated when a
+reply is built; once the call's log holds anything it says "This call's own operation
+changed nothing." instead, because the call did change something. A refusal built before
+the ledger opens keeps the plain sentence, which is then true. `tests/test_settle_log.py`
+fails on any literal of the claim outside that function, and on any tool that reads
+settlement's account itself. A `take_backup` whose rename fails closes its own `pending`
+record `aborted`, and its refusal says the copy was not kept.
+
 ## Source & test map
 
 <!-- BEGIN SOURCEMAP -->
@@ -57,10 +86,12 @@ write, and before `list_backups` answers.
 **Source**
 - `plugins/bank-feed/server/backups.py::settle`
 - `plugins/bank-feed/server/store.py::_settle_best_effort`
+- `plugins/bank-feed/server/bank_feed_server.py::handle`
 
 **Tests**
 - `tests/test_backups.py`
 - `tests/test_store.py`
+- `tests/test_settle_log.py`
 
 **Related**
 - [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md)

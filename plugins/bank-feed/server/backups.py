@@ -17,6 +17,7 @@ attempt is a refusal, never a hang.
 """
 from __future__ import annotations
 
+import contextvars
 import errno
 import fcntl
 import os
@@ -57,10 +58,165 @@ class BackupError(Exception):
 
     settled = None
     placed = None
+    #: Set when the failing operation had already written its own index
+    #: record (a `take_backup` whose rename failed): "nothing was changed"
+    #: is false of the index, so the refusal says the copy was not kept.
+    recorded = False
 
     def __init__(self, message: str = "", *, written: bool | None = False):
         super().__init__(message)
         self.written = written
+
+
+class SettleLog:
+    """Every write settlement made during ONE dispatched tool call (issues #48,
+    #53), recorded where it happened rather than carried on the objects a
+    settlement returns or raises: an exit that drops those objects (a raw
+    `OSError`, a failed COMMIT after settlement, the open-time pass that
+    swallows its own failures) cannot drop what is already written here.
+
+    `bank_feed_server.handle` opens one per `tools/call` and renders it once,
+    on every exit, through `render_log`. It is the ONLY renderer of
+    settlement's work: no tool renders it, so nothing is said twice and a
+    superseded attempt is never published."""
+
+    def __init__(self):
+        #: What this call created: the backups directory, the index, or the
+        #: header of an index that existed empty.
+        self.created: list = []
+        #: A torn tail cut from the index: True once the cut was flushed.
+        self.torn: list = []
+        #: Pending backups whose `.partial` settlement unlinked.
+        self.partials: list = []
+        #: (kind, op_id, terminal, written) per pending record closed;
+        #: `written` is True, or None for "may have been recorded".
+        self.closed: list = []
+        #: erase op_id -> {"attempts": [Erasure, ...], "absent": [copy ids a
+        #: `prune` recorded as already gone], "completed": None | True |
+        #: "unflushed" | "maybe" | "unrecorded"}
+        self.erasures: dict = {}
+
+    def any(self) -> bool:
+        return bool(self.created or self.torn or self.partials or self.closed
+                    or any(_erasure_said(e) for e in self.erasures.values()))
+
+    def erasure(self, op_id: str) -> dict:
+        return self.erasures.setdefault(
+            op_id, {"attempts": [], "absent": [], "completed": None})
+
+
+def _erasure_said(e) -> bool:
+    return (e["completed"] is not None or bool(e["absent"])
+            or any(a.removed_any() or a.failed or a.failed_partials
+                   or a.failed_snapshots or a.failed_snapshot_sidecars
+                   or a.undurable for a in e["attempts"]))
+
+
+_LOG: contextvars.ContextVar = contextvars.ContextVar("bank_feed_settle_log",
+                                                      default=None)
+
+
+def open_log():
+    """-> the token `close_log` takes. The dispatcher's, once per call."""
+    return _LOG.set(SettleLog())
+
+
+def close_log(token) -> str:
+    """Render the call's log and drop it; "" when settlement wrote nothing."""
+    log = _LOG.get()
+    _LOG.reset(token)
+    return render_log(log)
+
+
+def _log():
+    return _LOG.get()
+
+
+def settled_anything() -> bool:
+    """Whether settlement has written anything during the current call."""
+    log = _LOG.get()
+    return log is not None and log.any()
+
+
+def unchanged(verb: str = "changed", *, perfect: bool = False,
+              start: bool = True, stop: bool = True) -> str:
+    """THE ONE SPELLING of "nothing was changed" (issue #53). Evaluated when
+    a reply is built: once settlement has written anything in this call,
+    "nothing" is false of the call, so the sentence is scoped to the call's
+    own operation and the dispatcher's sentence says what settlement did. A
+    test fails on any literal of the claim outside this function."""
+    if settled_anything():
+        text = "%s own %s %s%s nothing" % (
+            "This call's" if start else "this call's",
+            "erasure" if verb == "erased" else "operation",
+            "has " if perfect else "", verb)
+    else:
+        text = "%s %s %s" % ("Nothing" if start else "nothing",
+                             "has been" if perfect else "was", verb)
+    return text + ("." if stop else "")
+
+
+def render_log(log) -> str:
+    """One sentence for everything settlement wrote in a call, or ""."""
+    if log is None or not log.any():
+        return ""
+    parts = ["created the %s" % what for what in log.created]
+    for flushed in log.torn:
+        parts.append("cut an incomplete last line from the backup index%s"
+                     % ("" if flushed else " (the cut could not be flushed)"))
+    for e in log.erasures.values():
+        if _erasure_said(e):
+            parts.append(_erasure_phrase(e))
+    if log.partials:
+        one = len(log.partials) == 1
+        parts.append("removed the unfinished cop%s of interrupted backup%s %s"
+                     % ("y" if one else "ies", "" if one else "s",
+                        ", ".join(log.partials)))
+    for kind, op, terminal, written in log.closed:
+        parts.append("%s interrupted %s %s as %s"
+                     % ("recorded" if written else "may have recorded",
+                        kind, op, terminal))
+    # No ordering claim: settlement usually runs before the tool's own
+    # operation, but `delete_all_data` settles again AFTER its own sweep, and
+    # "first" would be false of that one.
+    return ("While settling the backup index, this call %s."
+            % "; ".join(parts))
+
+
+def _erasure_phrase(e) -> str:
+    """An interrupted erasure, across every attempt this call made: what went
+    is summed, what is left is the LATEST attempt's alone — a retry that
+    succeeded supersedes an earlier attempt's residue."""
+    total, seen = Erasure(), set()
+    for a in e["attempts"]:
+        if id(a) in seen:
+            continue
+        seen.add(id(a))
+        for f in ("removed", "partials", "snapshots", "snapshot_sidecars"):
+            setattr(total, f, getattr(total, f) + getattr(a, f))
+    done = e["completed"] in (True, "unflushed")
+    text = "%s a pending erasure" % ("completed" if done else "resumed")
+    if total.removed_any():
+        text += ", removing %s" % total.went()
+    elif done and not e["absent"]:
+        text += " (no copy was left to remove)"
+    if e["absent"]:
+        n = len(e["absent"])
+        text += (", recording the earlier removal of %d backup cop%s"
+                 % (n, "y" if n == 1 else "ies"))
+    if e["completed"] == "unflushed":
+        text += ("; its completion record is written but could not be "
+                 "flushed")
+    elif e["completed"] in ("maybe", "unrecorded"):
+        text += ("; every copy is gone, but the record that the erasure is "
+                 "complete %s not be written, and the next settlement (any "
+                 "backup, restore, listing or workflow write) writes it"
+                 % ("may" if e["completed"] == "maybe" else "could"))
+    elif not done:
+        latest = e["attempts"][-1] if e["attempts"] else None
+        residue = ErasureIncomplete(latest).residue() if latest else ""
+        text += "; it is not finished%s" % (": " + residue if residue else "")
+    return text
 
 
 INDEX_HEADER = "bank-feed backup index v1"
@@ -210,7 +366,8 @@ def _acquire_index(paths: Paths) -> int:
                 os.close(fd)
                 raise BackupError(
                     "the backup index is busy (another backup, restore or "
-                    "listing holds it); nothing was changed — try again"
+                    "listing holds it); %s — try again"
+                    % unchanged(start=False, stop=False)
                     ) from None
             time.sleep(_LOCK_POLL_S)
     try:
@@ -506,6 +663,20 @@ def _presence(f: Path):
                                       else None)
 
 
+def _closing(handle, log, kind: str, op: str, terminal: str) -> None:
+    """Append a pending operation's terminal record and log it: when the
+    append returns, and when it fails with the line readable (`written`
+    True) or possibly readable (None) — the index changed either way."""
+    try:
+        handle.append(kind, op, terminal)
+    except BackupError as exc:
+        if log is not None and exc.written is not False:
+            log.closed.append((kind, op, terminal, exc.written))
+        raise
+    if log is not None:
+        log.closed.append((kind, op, terminal, True))
+
+
 def settle(conn, paths: Paths, *, hold: bool = True):
     """Recovery. PRECONDITION: the caller holds BEGIN IMMEDIATE on `conn`.
     -> (LedgerState, IndexHandle-or-None). With hold=True the index lock is
@@ -513,8 +684,24 @@ def settle(conn, paths: Paths, *, hold: bool = True):
     if not conn.in_transaction:
         raise BackupError("settle() needs the caller's BEGIN IMMEDIATE: the "
                           "ledger lock is taken before the index lock, always")
-    _prepare(paths)
-    fd = _acquire_index(paths)
+    log = _log()
+    had_dir = os.path.lexists(str(paths.backups_dir))
+    had_index = os.path.lexists(str(paths.index))
+    # Each creation is recorded as soon as it can have happened, whatever
+    # happens next: a directory made before a refusal is still there, and
+    # a refusal's "nothing was changed" is built from this log.
+    try:
+        _prepare(paths)
+    finally:
+        if (log is not None and not had_dir
+                and os.path.lexists(str(paths.backups_dir))):
+            log.created.append("backups directory")
+    try:
+        fd = _acquire_index(paths)
+    finally:
+        if (log is not None and not had_index
+                and os.path.lexists(str(paths.index))):
+            log.created.append("backup index")
     handle = None
     #: Every erasure this settlement completes counts into ONE account, so a
     #: refusal raised anywhere after the first unlink still carries what went.
@@ -532,7 +719,13 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 # refuse ("bad header") for ever.
                 cut = raw.rfind(b"\n") + 1
                 os.ftruncate(fd, cut)
+                # Recorded once the cut is made, before its flush: a flush
+                # that fails leaves the line gone all the same.
+                if log is not None:
+                    log.torn.append(False)
                 os.fsync(fd)
+                if log is not None:
+                    log.torn[-1] = True
                 raw = raw[:cut]
             if not raw:
                 # THE HEADER IS WHOLE OR ABSENT, like every record. A prefix
@@ -548,6 +741,11 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                     os.ftruncate(fd, 0)
                     os.fsync(fd)
                     raise
+                if log is not None and had_index:
+                    # An index that existed empty (a torn header cut back
+                    # to nothing) got its header rewritten. A NEW index is
+                    # already recorded as created.
+                    log.created.append("backup index's header")
                 os.fsync(fd)
                 raw = header
         except OSError as exc:
@@ -580,8 +778,12 @@ def settle(conn, paths: Paths, *, hold: bool = True):
             if e["state"] != "pending":
                 continue
             settled.finished = False
+            entry = log.erasure(e["op_id"]) if log is not None else None
+            if entry is not None:
+                entry["attempts"].append(settled)
             try:
-                erase_backups(paths, handle, state, e["op_id"], out=settled)
+                erase_backups(paths, handle, state, e["op_id"], out=settled,
+                              log=entry)
             except ErasureIncomplete as exc:
                 # THE STATE TRAVELS WITH THE REFUSAL. Every caller here is
                 # about to be refused, and the one that only ever reads
@@ -615,14 +817,17 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                     paths.partial_file(op).unlink()
                 except FileNotFoundError:
                     pass
+                else:
+                    if log is not None:
+                        log.partials.append(op)
                 terminal = "aborted"
-            handle.append("backup", op, terminal)
+            _closing(handle, log, "backup", op, terminal)
             b["state"] = terminal
         for r in state.restores:
             if r["state"] != "pending":
                 continue
             terminal = "committed" if marker == r["op_id"] else "aborted"
-            handle.append("restore", r["op_id"], terminal)
+            _closing(handle, log, "restore", r["op_id"], terminal)
             r["state"] = terminal
         state.generation = len({r["op_id"] for r in state.restores
                                 if r["state"] == "committed"})
@@ -721,7 +926,20 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         os.rename(str(partial), str(final))
     except OSError as exc:
         abort_partial(paths, op_id)
-        raise BackupError("the backup could not be placed: %s" % _oserr(exc)) from None
+        # THIS CALL'S `pending` LINE IS IN THE INDEX, so the refusal is not
+        # "nothing was changed" (issue #53): the attempt is closed here, as
+        # the next settlement would close it, and the reply says the copy
+        # was not kept rather than that nothing happened.
+        try:
+            handle.append("backup", op_id, "aborted")
+            how = "its index records the attempt as aborted"
+        except BackupError:
+            how = ("its pending index record stays until the next "
+                   "settlement closes it")
+        placed = BackupError("the backup could not be placed (%s); %s"
+                             % (_oserr(exc), how))
+        placed.recorded = True
+        raise placed from None
     try:
         _fsync_dir(paths.backups_dir)
     except OSError as exc:
@@ -1037,68 +1255,46 @@ def by_hand(paths: Paths, er: Erasure | None) -> str:
     return what
 
 
-def settled_note(settled: Erasure | None) -> str:
-    """The sentence a reply adds when the settlement it ran removed files —
-    a call that SUCCEEDED as much as one that refused: completing an
-    erasure on the way is a change to the directory either way. "" when it
-    removed nothing."""
-    if settled is None or not settled.removed_any():
-        return ""
-    return ("Settlement first %s an interrupted erasure and removed %s."
-            % ("completed" if settled.finished else "resumed", settled.went()))
-
-
-def settled_sentence(settled: Erasure) -> str:
-    """The sentence a refusal ends with when the settlement it ran removed
-    copies: this call's own operation did not run, and the directory still
-    changed under it."""
-    text = ("This call did not run; settlement first %s an interrupted "
-            "erasure and removed %s"
-            % ("completed" if settled.finished else "resumed",
-               settled.went()))
-    if not settled.finished:
-        text += ", and the erasure is not finished yet"
-    return text + "."
-
-
-def refusal_text(exc: BackupError, state: LedgerState | None = None) -> str:
-    """What a tool says when `exc` made it refuse. Shared by the tools that
-    refuse on one, because the branch is about what the call DID, not about
-    any one tool: an `ErasureIncomplete` out of settlement has ALREADY
-    unlinked copies, so "Nothing was changed" is false — what it did leads,
-    and this call's own no-op follows it. The same holds for a refusal of
-    ANY cause after a settlement that completed an erasure: `exc.settled`
-    when settlement itself refused, `state.settled` when it succeeded and the
-    refusal came after it (a restore of an id that erasure just removed)."""
+def refusal_text(exc: BackupError) -> str:
+    """What a tool says when `exc` made it refuse. What settlement did on the
+    way — copies an interrupted erasure removed, what it left, records it
+    closed — is NOT said here: the call's `SettleLog` carries it and the
+    dispatcher renders it once, ahead of this text (issues #48, #53). This
+    text says only what THIS call's own operation did, and `unchanged()`
+    scopes its "nothing" once settlement has written anything."""
     if isinstance(exc, ErasureIncomplete):
-        return exc.describe() + ". This call did not run."
-    settled = exc.settled or (state.settled if state is not None else None)
+        return ("An interrupted erasure of the backup copies is not finished, "
+                "so this call did not run.")
     if exc.placed is not None:
-        text = ("Backup %s was written, but the directory holding it could "
+        return ("Backup %s was written, but the directory holding it could "
                 "not be flushed (%s); it may not survive a power loss. The "
                 "next listing settles it." % (exc.placed, exc))
-        if settled is not None:
-            text += " " + settled_note(settled)
-        return text
-    if settled is not None:
-        return "%s. %s" % (exc, settled_sentence(settled))
-    return "%s. Nothing was changed." % exc
+    if exc.recorded:
+        return "%s. This call's backup copy was not kept." % exc
+    return "%s. %s" % (exc, unchanged())
 
 
-def settled_refusal(text: str, state: LedgerState | None) -> str:
-    """A refusal a tool composed itself (not from an exception), after a
-    settlement that may have removed copies: its "Nothing was changed." is
-    replaced by what settlement did."""
-    if state is None or state.settled is None:
-        return text
-    body = text.rstrip()
-    if body.endswith("Nothing was changed."):
-        body = body[:-len("Nothing was changed.")].rstrip()
-    return body + " " + settled_sentence(state.settled)
+def strip_unchanged(text: str) -> str:
+    """`text` without its trailing `unchanged()` sentence, for a caller that
+    folds one refusal into a longer one and ends that with its own. Exact:
+    the suffix is computed now, from the same log the refusal was built
+    under."""
+    tail = " " + unchanged()
+    return text[:-len(tail)] if text.endswith(tail) else text
+
+
+def no_other_copy_changed() -> str:
+    """"No other backup copy was changed.", scoped like `unchanged()` once
+    settlement has written anything in this call — it may have removed
+    copies, which the dispatcher's sentence names."""
+    if settled_anything():
+        return "This call's own erasure changed no other backup copy."
+    return "No other backup copy was changed."
 
 
 def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
-                  op_id: str, *, out: Erasure | None = None) -> Erasure:
+                  op_id: str, *, out: Erasure | None = None,
+                  log: dict | None = None) -> Erasure:
     """Unlink every backup copy beside the ledger, then commit the erasure.
 
     A BACKUP IS A WHOLE-LEDGER COPY — sessions, the `meta` renewal-handoff
@@ -1126,6 +1322,11 @@ def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
     `out` is the account the counts go into; a caller passes its own so the
     counts of what went survive an exception raised part way.
 
+    `log` is settlement's entry for this erasure in the call's `SettleLog`
+    (None when a tool runs its own erasure, which its own reply reports): the
+    `prune` records for copies already gone, and the terminal record, are
+    written into it where they happen.
+
     PRECONDITION: the caller's ledger COMMIT has already happened (or
     settlement is completing an erasure whose COMMIT did) and `handle` (from
     the same settle, with `state`) is still held. The INDEX itself is NOT
@@ -1141,7 +1342,7 @@ def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
     if out is None:
         out = Erasure()
     try:
-        return _erase(paths, handle, state, op_id, out)
+        return _erase(paths, handle, state, op_id, out, log)
     except OSError as exc:
         # The module's contract, as everywhere else here: nothing leaves as a
         # raw OSError. Every I/O site below has its own wrapper; this is the
@@ -1153,7 +1354,7 @@ def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
 
 
 def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
-           op_id: str, out: Erasure) -> Erasure:
+           op_id: str, out: Erasure, log: dict | None = None) -> Erasure:
     """The body of `erase_backups`, which holds the contract and the guards."""
     try:
         entries = sorted(paths.backups_dir.iterdir())
@@ -1232,7 +1433,14 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
         try:
             os.stat(str(paths.backup_file(op)))
         except FileNotFoundError:
-            handle.append("prune", op, "done")
+            try:
+                handle.append("prune", op, "done")
+            except BackupError as exc:
+                if log is not None and exc.written is not False:
+                    log["absent"].append(op)
+                raise
+            if log is not None:
+                log["absent"].append(op)
             b["pruned"] = True
         except OSError:
             out.failed += 1
@@ -1305,6 +1513,9 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
     try:
         handle.append("erase", op_id, "committed")
     except BackupError as exc:
+        if log is not None:
+            log["completed"] = {True: "unflushed", None: "maybe",
+                                False: "unrecorded"}[exc.written]
         if not exc.written:
             # THE SWEEP ALREADY FINISHED — every copy is gone and the
             # directory is already flushed, by the two guards just above —
@@ -1331,6 +1542,9 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
         # just emptied. A failed WRITE is the other event: no terminal record
         # exists, the erasure is still pending, and the refusal is right.
         out.index_warning = str(exc)
+        return out
+    if log is not None:
+        log["completed"] = True
     return out
 
 
