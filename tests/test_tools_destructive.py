@@ -2727,10 +2727,9 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
                 mock.patch.object(backups.os, "fsync", fsync):
             out = call("delete_all_data")
         self.assertNotIn("Nothing was erased", out)
-        self.assertIn("The ledger was not erased. A record of the backup "
-                      "erasure may already be durable: the backup copies will "
-                      "be removed at the next settlement (any backup, restore, "
-                      "listing or workflow write).", out)
+        self.assertIn("The ledger was not erased: its erasure was rolled back. Of the "
+                      "backup erasure, its pending record was written but could not be "
+                      "flushed", out)
         # Both halves of that sentence, driven rather than reasoned about: the
         # ledger really is whole, and the record really is readable.
         self.assertEqual(self.count("transactions"), 1)
@@ -2806,12 +2805,11 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertIn("1 session row(s) belonging to consents ALREADY PROVEN "
                       "GONE were kept", out)
         self.assertEqual(self.count("sessions"), 1)
-        self.assertIn("Every backup copy was erased and the directory "
-                      "flushed, but the index record confirming it could "
-                      "not be written (the backup index could not be "
-                      "written: ENOSPC); the next settlement (any backup, "
-                      "restore, listing or workflow write) re-checks the "
-                      "directory and writes it.", out)
+        self.assertIn("Every backup copy was erased and the directory flushed, but its "
+                      "completion record could not be written (the backup index could "
+                      "not be written: ENOSPC); the next settlement (any backup, "
+                      "restore, listing or workflow write) re-checks the directory and "
+                      "writes it.", out)
         erases = [l.split() for l in paths.index.read_text().splitlines()
                   if l.split()[1:2] == ["erase"]]
         self.assertEqual([e[3] for e in erases], ["pending"])
@@ -2994,9 +2992,8 @@ class TestTheEraseRecordIsWholeOrAbsent(DestructiveBase):
         # `written is None`: "Nothing was erased" is a claim about an index
         # this call may have left a partial line in.
         self.assertNotIn("Nothing was erased", out)
-        self.assertIn("The ledger was not erased: its erasure was rolled "
-                      "back. The index may hold a partial record of the "
-                      "backup erasure; the next settlement", out)
+        self.assertIn("The ledger was not erased: its erasure was rolled back. Of the "
+                      "backup erasure, writing its pending record failed part way", out)
         self.assertEqual(self.count("transactions"), 1)
         self.assertEqual(self.ais.deleted, [])
         self.assertFalse(tools_read.CONN.in_transaction)
@@ -3842,7 +3839,7 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
         with mock.patch.object(backups.IndexHandle, "append", refuse_terminal):
             out = call("purge", before_date="2024-01-01", user_work="keep")
         self.assertEqual(self.count("transactions"), 0)
-        self.assertIn("Its index record could not be written", out)
+        self.assertIn("The copy is complete; its index record could not be written", out)
         self.assertNotIn("Retention", out)
         self.assertNotIn("No other backup copy was changed", out)
         # The next settlement closes the pending copy as committed.
@@ -3862,7 +3859,7 @@ class TestErasuresBackUpFirst(PurgeRestartBase):
         with mock.patch.object(backups.IndexHandle, "append", flush_fails):
             out = call("purge", before_date="2024-01-01", user_work="keep")
         self.assertIn("written but could not be flushed", out)
-        self.assertIn("it is readable now", out)
+        self.assertIn("its index record was written but could not be flushed", out)
         self.assertNotIn("could not be written", out)
         self.assertEqual(backup_state(self.raw, pre_erasure_id(out)),
                          "committed")

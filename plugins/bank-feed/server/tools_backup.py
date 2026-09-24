@@ -232,23 +232,11 @@ def restore_backup(args: dict) -> str:
                      % ", ".join(r.unregistered))
     if r.index_error:
         # The restore committed and only its terminal index record did not
-        # land. Saying "nothing was changed" here — which is what a
-        # BackupError out of that append used to produce — would be the one
-        # untrue sentence this whole subsystem exists to avoid. The three
-        # outcomes of the append are three different states of the index:
-        # a line that is readable now, a line that is absent, and a line
-        # that may stand part-written until a settlement cuts it.
-        if r.index_written is True:
-            lines.append("The restore is complete; its index record was "
-                         "written but could not be flushed (%s); it is "
-                         "readable now." % r.index_error)
-        elif r.index_written is None:
-            lines.append("The restore is complete; its index record may be "
-                         "partially written (%s); the next settlement "
-                         "recovers it." % r.index_error)
-        else:
-            lines.append("The restore is complete; its index record could "
-                         "not be written (%s) — it settles at the next "
-                         "listing." % r.index_error)
+        # land cleanly. That append is THIS call's event, worded once
+        # (`backups.record_event`); what the index holds afterwards is the
+        # dispatcher's lock-release sentence (#48).
+        lines.append("The restore is complete; %s."
+                     % backups.record_event("index", r.index_written,
+                                            r.index_error))
     lines.append(STALE_LINE)
     return "\n".join(lines)

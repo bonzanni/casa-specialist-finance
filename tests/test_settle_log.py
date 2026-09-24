@@ -610,6 +610,44 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self.assertIn(STATE + "a recorded erasure of the backup copies was "
                       "not finished: 1 whole copy still present", out)
 
+    def test_a_directory_another_process_created_is_not_claimed(self):
+        # Terra, v5.2 code round 2: creation was inferred from an existence
+        # check that raced another process's mkdir.
+        self.warm()
+        real_mkdir = pathlib.Path.mkdir
+
+        def racing(p, *a, **k):
+            if p == self.paths.backups_dir and not p.exists():
+                real_mkdir(p, mode=0o700)        # "another process" made it
+            return real_mkdir(p, *a, **k)
+        with mock.patch.object(pathlib.Path, "mkdir", racing):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertNotIn("created the backups directory", out)
+        self.assertRegex(out, r"Backup [0-9a-f]{16} written")
+
+    def test_an_unreadable_mode_claims_no_reset_and_no_creation(self):
+        # Astra, v5.2 code round 2: a failed existence check read as
+        # "absent", inventing a creation and hiding a real reset.
+        self.backups_taken(1)
+        os.chmod(str(self.paths.backups_dir), 0o755)
+        real = os.lstat
+        seen = []
+
+        def lstat(path, *a, **k):
+            # The symlink guard's lstat passes; the MODE read fails.
+            if str(path) == str(self.paths.backups_dir):
+                seen.append(1)
+                if len(seen) == 2:
+                    raise OSError(5, "Input/output error")
+            return real(path, *a, **k)
+        with mock.patch.object(backups.os, "lstat", lstat):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertGreaterEqual(len(seen), 2, "the mode read was reached")
+        self.assertNotIn("created the backups directory", out)
+        self.assertNotIn("reset the backups directory", out)  # unmeasured
+        self.assertEqual(oct(self.paths.backups_dir.stat().st_mode & 0o777),
+                         "0o700", "the reset itself still happened")
+
     def test_two_cuts_are_counted(self):
         # Astra, v5.2 code round 1: two successful cuts read as one.
         self.warm()
@@ -658,6 +696,41 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "flushed", out)
         self.assertNotIn("pending index record stays", out)
 
+
+
+class TestToolsWordTheirOwnWritesThroughOneRenderer(unittest.TestCase):
+    """Rule 2b, structurally (Astra, v5.2 code rounds 1-2 found a tool
+    wording index state three times): a tool may put a write outcome into
+    words only through `backups.record_event`. Every read of `.written` or
+    `.index_written` in a tool module is an argument to that call, or a
+    comparison against False (a branch, never a sentence)."""
+
+    def test_every_written_outcome_goes_through_record_event(self):
+        bad = []
+        for path in sorted(SERVER.glob("tools_*.py")):
+            tree = ast.parse(path.read_text())
+            parents = {}
+            for node in ast.walk(tree):
+                for ch in ast.iter_child_nodes(node):
+                    parents[ch] = node
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Attribute)
+                        and node.attr in ("written", "index_written")):
+                    continue
+                up, ok = parents.get(node), False
+                while up is not None and not ok:
+                    if (isinstance(up, ast.Call)
+                            and isinstance(up.func, ast.Attribute)
+                            and up.func.attr == "record_event"):
+                        ok = True
+                    elif (isinstance(up, ast.Compare) and any(
+                            isinstance(c, ast.Constant) and c.value is False
+                            for c in up.comparators)):
+                        ok = True
+                    up = parents.get(up)
+                if not ok:
+                    bad.append("%s:%d" % (path.name, node.lineno))
+        self.assertEqual(bad, [])
 
 if __name__ == "__main__":
     unittest.main()

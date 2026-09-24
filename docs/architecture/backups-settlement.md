@@ -77,7 +77,11 @@ The log holds two kinds of fact and never mixes them:
 
 A write whose outcome is unknown (`BackupError.written` None) is not an effect. What it
 left is read back as the tail state, and it is mentioned only when that read fails.
-Tools report only their own events, never state. `delete_all_data`'s warning says what
+Tools report only their own events, never state, and they put their own failed index
+appends into words through one renderer, `backups.record_event`: what the write did
+(written but not flushed, failed part way, not written), never what the index holds now.
+`tests/test_settle_log.py` checks that structurally: every tool read of `written` is an
+argument to that renderer or a comparison against `False`. `delete_all_data`'s warning says what
 its own sweep could not remove *when it ran*; whether copies are still there, what that
 blocks and how to finish it is the lock-release sentence, because a later settlement in
 the same call can finish the erasure.

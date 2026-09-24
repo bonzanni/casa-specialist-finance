@@ -144,6 +144,19 @@ def unchanged(verb: str = "changed", *, perfect: bool = False,
     return text + ("." if stop else "")
 
 
+def record_event(what: str, written, error) -> str:
+    """THE ONE WORDING of a tool's own failed index append, as the EVENT it
+    was — what this call's write did — never as the index's state now, which
+    the dispatcher's lock-release sentence reports once (#48). `written` is
+    `BackupError.written`'s three outcomes."""
+    if written is True:
+        return ("its %s record was written but could not be flushed (%s)"
+                % (what, error))
+    if written is None:
+        return "writing its %s record failed part way (%s)" % (what, error)
+    return "its %s record could not be written (%s)" % (what, error)
+
+
 def no_other_copy_changed() -> str:
     """The scoped form of "no other backup copy was changed"."""
     return "This call's own erasure changed no other backup copy."
@@ -447,13 +460,21 @@ def _prepare(paths: Paths) -> None:
     _refuse_symlink(paths.backups_dir)
     _refuse_symlink(paths.index)
     try:
-        existed = os.path.lexists(str(paths.backups_dir))
-        paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
-        if not existed:
+        # CREATION IS THIS CALL'S mkdir SUCCEEDING, never an inference
+        # from an existence check: a check can race another process's
+        # create, or fail and read as "absent".
+        try:
+            paths.backups_dir.mkdir(mode=0o700)
+            created = True
             _effect("created", "backups directory")
-        prior = stat.S_IMODE(os.lstat(str(paths.backups_dir)).st_mode)
+        except FileExistsError:
+            created = False
+        try:
+            prior = stat.S_IMODE(os.lstat(str(paths.backups_dir)).st_mode)
+        except OSError:
+            prior = None                # unmeasured: no reset is claimed
         os.chmod(str(paths.backups_dir), 0o700)
-        if existed and prior != 0o700:
+        if not created and prior is not None and prior != 0o700:
             _effect("mode", "backups directory", "0700",
                     oct(prior)[2:].zfill(4))
         # A freshly-created directory ENTRY is not durable until its PARENT
@@ -1058,11 +1079,7 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         except BackupError as closing:
             # This call's own event only; what the index holds afterwards
             # is the dispatcher's lock-release sentence (#48).
-            how = {True: "its abort record was written but could not be "
-                         "flushed",
-                   None: "writing its abort record failed part way",
-                   False: "its abort record could not be written; the next "
-                          "settlement closes the attempt"}[closing.written]
+            how = record_event("abort", closing.written, closing)
         placed = BackupError("the backup could not be placed (%s); %s"
                              % (_oserr(exc), how))
         placed.recorded = True

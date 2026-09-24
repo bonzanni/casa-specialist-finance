@@ -385,10 +385,9 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
     the backups directory.
 
     -> `(pruned ids, retention error or None, index error or None)`; the
-    index error is `(text, written)` with `BackupError.written`'s three
-    states, because "not written", "written but not flushed" and "possibly
-    torn" are three different states of the index and each needs its own
-    sentence. The two
+    index error is the `BackupError` itself, whose `written` the reply words
+    through `backups.record_event` — "not written", "written but not
+    flushed" and "failed part way" are three different events. The two
     failures are different facts: a terminal record that could not be written
     leaves the copy `pending`, which the next settlement closes `committed`
     because its file is present, and NO prune ran; a prune that failed ran
@@ -401,7 +400,7 @@ def _finish_pre_erasure(paths, handle, b, *, committed: bool):
             handle.append("backup", b.op_id,
                           "committed" if committed else "orphan")
         except backups.BackupError as exc:
-            return [], None, (str(exc), exc.written)
+            return [], None, exc
         if not committed:
             return [], None, None
         try:
@@ -436,19 +435,10 @@ def _backup_line(b, state, finished, restores) -> str:
     line = ("Backup %s was taken just before this erasure: restore_backup "
             "backup_id=%s puts back %s." % (b.op_id, b.op_id, restores))
     if index_error:
-        text, written = index_error
-        if written is True:
-            line += (" Its index record was written but could not be flushed "
-                     "(%s); it is readable now." % text)
-        elif written is None:
-            line += (" Its index record may be partially written (%s); the "
-                     "copy is complete, and the next settlement (any backup, "
-                     "restore, listing or workflow write) recovers the "
-                     "record." % text)
-        else:
-            line += (" Its index record could not be written (%s); the copy "
-                     "is complete, and the next settlement (any backup, "
-                     "restore, listing or workflow write) records it." % text)
+        # This call's own append, as an event (`backups.record_event`).
+        line += (" The copy is complete; %s."
+                 % backups.record_event("index", index_error.written,
+                                        index_error))
     if retention_error:
         line += (" Retention stopped part way (%s)%s; the backup itself is "
                  "complete." % (retention_error,
@@ -1095,10 +1085,11 @@ def _handles_kept_note(due, exc, appending: bool) -> str:
             "revoke at those banks. Run delete_all_data again to clear them."
             % (counted, exc))
     if appending and exc.written is not False:
-        # True: the line landed and only its flush failed. None: it may stand
-        # part-written. Either way this call cannot say it is absent.
-        note += (" A record of that sweep may already be in the index; if "
-                 "so, the next settlement removes the backup copies.")
+        # The sweep's `pending` append as the event it was; whether a
+        # record stands in the index now is the dispatcher's sentence.
+        note += (" Of that sweep, %s; a sweep record that stands is completed "
+                 "by the next settlement." % backups.record_event(
+                     "erasure", exc.written, exc))
     return note
 
 
@@ -1285,27 +1276,16 @@ def delete_all_data(args: dict) -> str:
         # What this call's settlement did before the refusal is the
         # dispatcher's sentence; `unchanged` scopes the last branch's
         # "nothing" when it did anything.
-        if exc.written is None:
-            # THE WRITE FAILED PART WAY AND ITS BYTES COULD NOT BE CUT BACK.
-            # The ledger rolled back, so nothing of it was erased; but the
-            # index may end in a partial record until the next settlement
-            # removes it, and "Nothing was erased" is a claim this call
-            # cannot make about a file it may have left a partial line in.
-            return ("%s. The ledger was not erased: its erasure was rolled "
-                    "back. The index may hold a partial record of the backup "
-                    "erasure; the next settlement (any backup, restore, "
-                    "listing or workflow write) recovers it." % exc)
-        if exc.written:
-            # THE BYTES LANDED AND ONLY THE FLUSH FAILED. The line is readable
-            # right now by anything that parses this index, so the next settle
-            # in any process completes the erasure of the copies — "Nothing was
-            # erased" would be a promise about files this call has already
-            # scheduled for removal, and the operator would go looking for
-            # backups that are about to disappear.
-            return ("%s. The ledger was not erased. A record of the backup "
-                    "erasure may already be durable: the backup copies will be "
-                    "removed at the next settlement (any backup, restore, "
-                    "listing or workflow write)." % exc)
+        if exc.written is not False:
+            # This call's own `pending` append, as the event it was (landed
+            # but unflushed, or failed part way); what the index holds now
+            # is the dispatcher's sentence. The ledger rolled back either way.
+            return ("The ledger was not erased: its erasure was rolled back. "
+                    "Of the backup erasure, %s; a record that stands is "
+                    "completed by the next settlement (any backup, restore, "
+                    "listing or workflow write), which removes the backup "
+                    "copies." % backups.record_event("pending", exc.written,
+                                                     exc))
         return "%s. %s" % (exc, backups.unchanged("erased"))
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
@@ -1387,10 +1367,10 @@ def delete_all_data(args: dict) -> str:
                 # as one still holding copies.
                 backups_warning = (
                     "Every backup copy was erased and the directory "
-                    "flushed, but the index record confirming it could not "
-                    "be written (%s); the next settlement (any backup, "
+                    "flushed, but %s; the next settlement (any backup, "
                     "restore, listing or workflow write) re-checks the "
-                    "directory and writes it." % exc)
+                    "directory and writes it."
+                    % backups.record_event("completion", exc.written, exc))
                 left = None
             else:
                 # The sweep did not finish rather than failing on named files,

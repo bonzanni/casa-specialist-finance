@@ -250,9 +250,8 @@ class TestRestoreTool(Base):
             out = call("restore_backup", backup_id=bid)
         self.assertNotIn("Nothing was changed", out)
         self.assertIn("Restored backup %s" % bid, out)
-        self.assertIn("The restore is complete; its index record could not be "
-                      "written (the backup index could not be written: ENOSPC) "
-                      "— it settles at the next listing.", out)
+        self.assertIn("The restore is complete; its index record could not be written "
+                      "(the backup index could not be written: ENOSPC).", out)
         # The rows really are restored, and the generation the next listing
         # reports is 1: the `pending` record plus the committed marker settle
         # the operation the append could not record.
@@ -284,9 +283,8 @@ class TestRestoreTool(Base):
         with mock.patch.object(backups.os, "write", write), \
                 mock.patch.object(backups.os, "fsync", fsync):
             out = call("restore_backup", backup_id=bid)
-        self.assertIn("The restore is complete; its index record was written "
-                      "but could not be flushed (the backup index could not "
-                      "be flushed: EIO); it is readable now.", out)
+        self.assertIn("The restore is complete; its index record was written but could "
+                      "not be flushed (the backup index could not be flushed: EIO).", out)
         self.assertNotIn("could not be written", out)
         self.assertNotIn("Nothing was changed", out)
         last = self.paths.index.read_text().splitlines()[-1].split()
