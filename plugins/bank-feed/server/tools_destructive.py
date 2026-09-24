@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-import time as _time
 
 import apply
 import backups
@@ -378,30 +377,6 @@ PURGED_NOTE = ("history purged (purge before_date=all) on %s: restore_backup "
                "the bank's own retention")
 
 
-def _authorization_in_progress(c) -> bool:
-    """Is any bank authorization possibly still completing? (issue #47)
-
-    A purge rotates every account's incarnation, and a renewal between its
-    binding switch and its reply reads that rotation as "nothing switched" --
-    telling the operator to unlink the consent that is now live. So a purge
-    waits while any attempt carries a lease token that a collector holds
-    (lease unexpired, however old the attempt) or that a successor could
-    still steal (expired, but casa can still redeliver: the attempt can be
-    answered up to PENDING_TTL_S after minting, the result artifact lives
-    RESULT_TTL_S after that, and a steal needs the lease expired for a
-    LEASE_TTL_S). Past that horizon nothing can resume the attempt, and the
-    row is left exactly as it is: clearing its token would strand a collector
-    that was only stalled, with a half-written binding.
-    """
-    now = _time.time()
-    horizon = (tools_auth.PENDING_TTL_S + callbacks.RESULT_TTL_S
-               + callbacks.LEASE_TTL_S)
-    return c.execute(
-        "SELECT 1 FROM attempts WHERE lease_token IS NOT NULL AND"
-        " (COALESCE(lease_expiry, 0) > ? OR COALESCE(created_at, 0) > ?)"
-        " LIMIT 1", (now, now - horizon)).fetchone() is not None
-
-
 def _finish_pre_erasure(paths, handle, b, *, committed: bool):
     """Record the copy's terminal state, then prune its OWN class only -- and
     only after an erasure that committed: a call that erased nothing must not
@@ -571,7 +546,7 @@ def purge(args: dict) -> str:
     c.execute("BEGIN IMMEDIATE")
     state = handle = None
     try:
-        if _authorization_in_progress(c):
+        if tools_auth.authorization_in_progress(c):
             c.execute("ROLLBACK")
             return ("A bank authorization is in progress (a link or renewal "
                     "is completing), and a purge now could make its reply "

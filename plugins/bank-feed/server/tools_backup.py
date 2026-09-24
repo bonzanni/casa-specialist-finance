@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import backups
 import store
+import tools_auth
 import tools_read
 from tools_auth import _require_declared
 from tools_read import register
@@ -213,6 +214,12 @@ def restore_backup(args: dict) -> str:
     c.execute("BEGIN IMMEDIATE")
     handle = state = None
     try:
+        if tools_auth.authorization_in_progress(c):
+            c.execute("ROLLBACK")
+            return ("A bank authorization is in progress (a link or renewal "
+                    "is completing), and a restore now could make its reply "
+                    "wrong about which consent is live. Try again in a few "
+                    "minutes. Nothing was changed.")
         state, handle = backups.settle(c, paths)
         r = backups.restore(c, paths, handle, state, backup_id,
                             schema_version=store.SCHEMA_VERSION)

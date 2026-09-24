@@ -280,15 +280,17 @@ observation — conditions itself on the `incarnation` its own read captured, so
 makes a plan built before the restore fail closed after one: the guard that was already there
 is now the guard against a restore landing underneath it, with nothing new to remember.
 
-### The lease refusal
+### The authorization refusal
 
-A restore refuses outright while any `attempts` row has a non-null `lease_token` and a
-`lease_expiry` in the future — the value a consent renewal holds and heartbeats. The
-re-mint above is right for a stale refresh plan, which the next `sync` rebuilds, and wrong
-for a renewal in flight: its backfill runs under the same incarnation guards, so a restore
-underneath it reads as "this account was erased", quarantines a valid grant, and sends the
-operator to reauthorize something that needed nothing. The remedy is to retry once the
-authorization finishes or its lease expires.
+A restore refuses while a bank authorization may still be completing, on the predicate
+`purge` uses too (`tools_auth.authorization_in_progress`, asked under the ledger lock before
+settling; `backups-erasure.md` states the horizon). An expired lease alone is not a finished
+renewal: a stalled collector resumes, or casa redelivers and a successor steals the lease.
+The re-mint above is right for a stale refresh plan, which the next `sync` rebuilds, and
+wrong for a renewal in flight: its backfill runs under the same incarnation guards, so a
+restore underneath it reads as "this account was erased", and a renewal between its binding
+switch and its reply reads the rotation as "nothing switched" and points `unlink_bank` at the
+consent that is now live. The remedy is to retry once the authorization finishes.
 
 ## Retention
 

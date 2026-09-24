@@ -1393,17 +1393,6 @@ class TestRestore(RestoreBase):
         self.assertEqual(self.count("transactions"), 3)
         self.assertNotIn("restore", self.paths.index.read_text())
 
-    def test_an_unexpired_attempts_lease_refuses(self):
-        self.seed(); bid = self.backup()
-        self.conn.execute("INSERT INTO attempts(state_hash, phase, lease_token,"
-                          " lease_expiry) VALUES ('h','exchange_started','t', ?)",
-                          (__import__("time").time() + 60,))
-        with self.assertRaises(backups.BackupError) as cm:
-            self.restore(bid)
-        self.assertIn("authorization is in progress", str(cm.exception))
-        self.conn.execute("UPDATE attempts SET lease_expiry=0")
-        self.restore(bid)
-
     def test_attach_inside_begin_immediate_is_permitted_on_this_sqlite(self):
         self.seed(); bid = self.backup()
         self.conn.execute("BEGIN IMMEDIATE")

@@ -70,9 +70,9 @@ total eraser.
 
 `purge` also rotates every account's incarnation, as a restore does, so a refresh that read
 the ledger before it cannot record coverage or sync state over the rows it removed. For the
-same reason as a restore it waits for an authorization in flight — but on a wider rule,
-because a renewal between its binding switch and its reply reads the rotation as "nothing
-switched": it refuses while any attempt carries a `lease_token` whose lease is unexpired
+same reason as a restore it waits for an authorization in flight, on the same predicate
+(`tools_auth.authorization_in_progress`), because a renewal between its binding switch and its
+reply reads the rotation as "nothing switched": it refuses while any attempt carries a `lease_token` whose lease is unexpired
 (however old the attempt), or whose lease expired while casa could still redeliver the
 attempt (`created_at` within `PENDING_TTL_S + RESULT_TTL_S + LEASE_TTL_S`). Past that horizon
 the purge proceeds and leaves the attempt row untouched: clearing a dead token strands a

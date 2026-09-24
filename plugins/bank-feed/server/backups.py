@@ -1348,7 +1348,10 @@ def _columns(conn, schema: str, table: str) -> list:
 def restore(conn, paths: Paths, handle: IndexHandle, state: LedgerState,
             backup_id: str, *, schema_version: int) -> RestoreResult:
     """Replace the ledger's ordinary tables from a backup, in place.
-    PRECONDITION: BEGIN IMMEDIATE held, handle from settle(). COMMITS
+    PRECONDITION: BEGIN IMMEDIATE held, handle from settle(), and no bank
+    authorization in progress -- the caller checks `tools_auth.
+    authorization_in_progress` under that lock (this module cannot import
+    it, and a narrower copy here is the drift issue #51 was). COMMITS
     itself, then appends the terminal record — the record has to follow
     the commit while the index lock is still held."""
     if not conn.in_transaction or not handle._open:
@@ -1359,11 +1362,6 @@ def restore(conn, paths: Paths, handle: IndexHandle, state: LedgerState,
     if b is None or not b["present"] or b["state"] not in ("committed", "orphan"):
         raise BackupError("no restorable backup %s — list_backups shows the ones "
                           "that are" % backup_id)
-    leased = conn.execute("SELECT count(*) FROM attempts WHERE lease_token IS NOT NULL"
-                          " AND COALESCE(lease_expiry, 0) > ?", (time.time(),)).fetchone()[0]
-    if leased:
-        raise BackupError("an authorization is in progress (a bank link or renewal "
-                          "holds its lease); nothing was changed — try again in a minute")
     try:
         # as_uri(): percent-encoded, so the backup path can never be read as
         # a query string. The ledger connection is opened uri=True (store).
