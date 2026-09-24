@@ -359,8 +359,9 @@ def _fenced_write(c, workflow, expected, validate, write):
                 # operator needs the reply AND the restore point id either
                 # way (tools_backup.backup does the same thing one file
                 # over).
-                return (reply + "\n" + line + " Retention could not prune: %s "
-                        "— the write and the restore point are complete." % exc)
+                return (reply + "\n" + line + " %s; the write and the "
+                        "restore point are complete."
+                        % backups.retention_failed(exc))
             reply += "\n" + line
         return reply
     finally:

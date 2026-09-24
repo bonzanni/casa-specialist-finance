@@ -1133,6 +1133,35 @@ class TestTakeBackup(Base):
         self.assertEqual(len(self.index_lines()), 1)
         self.assertEqual(list(self.paths.backups_dir.iterdir()), [])
 
+    def test_a_pending_record_that_cannot_be_written_leaves_no_partial(self):
+        # Issue #42. The copy is complete and fsynced before its `pending`
+        # record is appended; when that append fails nothing in the index
+        # names the `.partial`, so no settlement would ever remove it — a
+        # full copy of the ledger's pages left beside the backups. Each
+        # `written` outcome is covered: a line that landed (True), may have
+        # landed (None), or did not (False).
+        self.seed()
+        for written in (False, None, True):
+            with self.subTest(written=written):
+                self.conn.execute("BEGIN IMMEDIATE")
+                _, handle = backups.settle(self.conn, self.paths)
+                real = handle.append
+
+                def failing(*fields, _w=written):
+                    if fields[:1] == ("backup",) and fields[2:3] == ("pending",):
+                        raise backups.BackupError("disk full", written=_w)
+                    return real(*fields)
+
+                handle.append = failing
+                try:
+                    with self.assertRaises(backups.BackupError):
+                        backups.take_backup(self.conn, self.paths, handle, "manual")
+                finally:
+                    self.conn.execute("ROLLBACK"); handle.close()
+                self.assertEqual(
+                    [p.name for p in self.paths.backups_dir.iterdir()
+                     if p.name.endswith(".partial")], [])
+
     def test_a_callable_reason_must_be_weekly_or_manual_and_install_needs_register(self):
         self.conn.execute("BEGIN IMMEDIATE")
         _, handle = backups.settle(self.conn, self.paths)

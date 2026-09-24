@@ -22,6 +22,7 @@ Start with the row that matches what you are about to change.
 | linking, authorization, renewal, the callback contract, or rate control | [`architecture/bank-linking.md`](architecture/bank-linking.md) |
 | matching, occurrence allocation, coverage, the ledger schema, or a migration | [`architecture/ingestion-and-identity.md`](architecture/ingestion-and-identity.md) |
 | mode selection, the sandbox banner, or anything keyed on the environment | [`reference/sandbox-mode.md`](reference/sandbox-mode.md) |
+| settlement, the terminal records it appends, the open-time pass, or what a reply says settlement did | [`architecture/backups-settlement.md`](architecture/backups-settlement.md) |
 | tags, notes, note search, aggregation, the rule engine, or the classifier skill | [`architecture/annotations-and-rules.md`](architecture/annotations-and-rules.md) |
 | the Firebase sign-in exchange, the token cache, or the control-panel credential | [`reference/enable-banking-credentials.md`](reference/enable-banking-credentials.md) |
 | the commit guard, the identifier scan, or its exception list | [`contributing/protecting-account-data.md`](contributing/protecting-account-data.md) |

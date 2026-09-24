@@ -709,6 +709,15 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         os.umask(prev)
     try:
         handle.append("backup", op_id, "pending", "reason=" + reason)
+    except BackupError:
+        # THE COPY IS ON DISK AND MAY BE NAMED NOWHERE. With the line absent
+        # (written=False) no settlement would ever remove the `.partial` — a
+        # full copy of the ledger's pages. With it present or possibly
+        # present, the next settlement finds no copy and closes it `aborted`,
+        # so removing the partial here is right in every case.
+        abort_partial(paths, op_id)
+        raise
+    try:
         os.rename(str(partial), str(final))
     except OSError as exc:
         abort_partial(paths, op_id)
@@ -802,6 +811,19 @@ def prune(paths: Paths, handle: IndexHandle, *, classes=None) -> list:
                 raise
             pruned.append(op)
     return pruned
+
+
+def retention_failed(exc: BackupError) -> str:
+    """The sentence for a `prune` that refused, up to the em dash the caller
+    completes: which copies it removed before refusing (`exc.pruned`), or that
+    it removed none. "Could not prune" alone read as "nothing was pruned" after
+    a removal whose record could not be written."""
+    pruned = getattr(exc, "pruned", None) or []
+    if not pruned:
+        return "Retention could not prune: %s" % exc
+    return ("Retention stopped part way (%s), after removing the oldest "
+            "cop%s %s" % (exc, "y" if len(pruned) == 1 else "ies",
+                          ", ".join(pruned)))
 
 
 def _appended_since(handle: IndexHandle) -> list:

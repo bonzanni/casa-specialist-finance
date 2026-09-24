@@ -925,6 +925,31 @@ class TestWorkflowArguments(Base):
             "SELECT count(*) FROM workflow_registrations WHERE workflow=?",
             ("acct@1.0.0",)).fetchone()[0], 1)
 
+    def test_a_retention_failure_after_a_removal_names_the_copy_that_went(self):
+        # Issue #52: the mint's prune removed the oldest manual copy and then
+        # could not record it; the reply names the copy instead of reading as
+        # "nothing was pruned".
+        with mock.patch.object(backups, "prune", return_value=[]):
+            ids = [call("backup", reason="manual").split()[1]
+                   for _ in range(backups.MANUAL_KEEP + 1)]
+        real = backups.IndexHandle.append
+
+        def failing(handle, *fields):
+            if fields[:1] == ("prune",):
+                raise backups.BackupError("disk full")
+            return real(handle, *fields)
+
+        with mock.patch.object(backups.IndexHandle, "append", failing):
+            out = call("add_note", row_ids=[self.rid], note="x", author="agent",
+                       workflow="acct@1.0.0", expected_generation=0)
+        gone = [op for op in ids if not self.paths.backup_file(op).exists()]
+        self.assertEqual(gone, ids[:1])
+        self.assertIn("Note added", out)
+        self.assertIn("Retention stopped part way (disk full), after removing "
+                      "the oldest copy %s; the write and the restore point are "
+                      "complete." % gone[0], out)
+        self.assertNotIn("could not prune", out)
+
     def test_a_write_failure_after_the_mint_rolls_back_and_orphans_the_backup(self):
         # write() runs strictly after the mint; if it raises, the whole
         # transaction -- including the mint's registration INSERT -- must
