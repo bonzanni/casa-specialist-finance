@@ -69,6 +69,11 @@ TS_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 WORKFLOW_RE = re.compile(
     r"^[a-z][a-z0-9_-]{0,23}@[A-Za-z0-9][A-Za-z0-9.+_-]{0,31}$")
 REASONS = ("weekly", "manual")
+#: The copy `purge` and `forget_local_account` take before they erase
+#: (issue #47). Minted only by those two, never accepted by the `backup` tool,
+#: and retained as a class of its own so an erasure's copy never pushes an
+#: operator's `manual` or `weekly` copy out of retention.
+ERASURE_REASON = "pre-erasure"
 INSTALL_PREFIX = "install:"
 MARKER_KEY = "backup_restore_op"
 REGISTRATIONS_TABLE = "workflow_registrations"
@@ -96,7 +101,7 @@ def new_op_id() -> str:
 
 
 def reason_is_valid(reason: str) -> bool:
-    if reason in REASONS:
+    if reason in REASONS or reason == ERASURE_REASON:
         return True
     return (reason.startswith(INSTALL_PREFIX)
             and WORKFLOW_RE.fullmatch(reason[len(INSTALL_PREFIX):]) is not None)
@@ -644,6 +649,7 @@ def settle(conn, paths: Paths, *, hold: bool = True):
 
 WEEKLY_KEEP = 8
 MANUAL_KEEP = 8
+ERASURE_KEEP = 8
 ORPHAN_KEEP = 4
 
 
@@ -676,7 +682,7 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
     if reason.startswith(INSTALL_PREFIX):
         if register != reason[len(INSTALL_PREFIX):] or not WORKFLOW_RE.fullmatch(register):
             raise BackupError("an install backup is minted, never requested")
-    elif reason not in REASONS or register is not None:
+    elif (reason not in REASONS and reason != ERASURE_REASON) or register is not None:
         raise BackupError("reason must be 'weekly' or 'manual'")
     if sqlite3.sqlite_version_info < (3, 27, 0):
         raise BackupError("VACUUM INTO needs SQLite 3.27+; this build is %s"
@@ -732,34 +738,44 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
 
 
 def finish_backup(paths: Paths, handle: IndexHandle, backup: Backup,
-                  *, committed: bool) -> list:
+                  *, committed: bool, classes=None) -> list:
     """After the caller's COMMIT or ROLLBACK. A rolled-back mint leaves a
-    consistent copy with no registration — the crash rule's `orphan`."""
+    consistent copy with no registration — the crash rule's `orphan`.
+    `classes` narrows the prune (see `prune`)."""
     handle.append("backup", backup.op_id, "committed" if committed else "orphan")
-    backup.pruned = prune(paths, handle)
+    backup.pruned = prune(paths, handle, classes=classes)
     return backup.pruned
 
 
-def prune(paths: Paths, handle: IndexHandle) -> list:
+def prune(paths: Paths, handle: IndexHandle, *, classes=None) -> list:
     """Bounded retention for weekly / manual / orphan; NEVER an install
     backup: its registration is a promise that the copy behind it is still
     there, and retention is the one thing in this tree that would break that
     promise silently. (A registration whose copy has gone for any other reason
     does not fail closed — the workflow's next write re-mints and says what the
     new point does not cover.) Unlink, then the audit record. Re-derives from
-    the handle's records plus what settle appended."""
+    the handle's records plus what settle appended.
+
+    `classes`, when given, is the only set of classes this call may prune.
+    An erasure passes `(ERASURE_REASON,)`: pruning sweeps every class on
+    every call otherwise, so an erasure's own backup would remove the oldest
+    `manual` copy whenever that class stood over its bound — a scoped eraser
+    removing a recovery point it never took."""
     state = _derive(handle.records + _appended_since(handle), paths, {})
-    keep = {"weekly": WEEKLY_KEEP, "manual": MANUAL_KEEP}
-    classes = {"weekly": [], "manual": [], "orphan": []}
+    keep = {"weekly": WEEKLY_KEEP, "manual": MANUAL_KEEP,
+            ERASURE_REASON: ERASURE_KEEP}
+    by_class = {"weekly": [], "manual": [], ERASURE_REASON: [], "orphan": []}
     for op, b in state.backups.items():
         if not b["present"] or b.get("pruned"):
             continue
         if b["state"] == "orphan":
-            classes["orphan"].append((b["seq"], op))
+            by_class["orphan"].append((b["seq"], op))
         elif b["state"] == "committed" and b["reason"] in keep:
-            classes[b["reason"]].append((b["seq"], op))
+            by_class[b["reason"]].append((b["seq"], op))
     pruned = []
-    for cls, entries in classes.items():
+    for cls, entries in by_class.items():
+        if classes is not None and cls not in classes:
+            continue
         bound = ORPHAN_KEEP if cls == "orphan" else keep[cls]
         # Index order, never the second-resolution timestamp: nine backups in
         # one second sorted by (ts, random id) pruned the newest.

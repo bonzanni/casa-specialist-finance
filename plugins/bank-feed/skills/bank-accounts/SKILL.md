@@ -177,8 +177,21 @@ the names understate two of them and overstate one.
 - `unlink_bank` withdraws one bank's permission. **Local history stays.**
 - `forget_local_account` erases one account's local rows. **The consent stays
   active** — this does not disconnect the bank.
-- `purge` deletes every transaction booked before a cutoff date, across all
-  accounts, and reclaims the file space.
+- `purge` deletes every transaction booked before a cutoff date — or every
+  transaction, with `before_date="all"` — across all accounts, with their
+  notes and tags, and reclaims the file space. It needs `user_work`, and there
+  is no default, so ask the operator: `keep` keeps the auto-tagging rules and
+  every account label, category and include flag; `erase` deletes all of
+  them and **every** note and tag, on the rows that survive a dated purge too.
+  Notes and tags always go with their rows. A whole-ledger purge also marks
+  every account's history partial and resets cached balances; its reply names,
+  per bank, what brings older history back from the bank (a renewal through
+  `link_bank`, or `unlink_bank` then `link_bank`) — relay that list as printed.
+  It refuses while a bank authorization is completing; try again a few
+  minutes later.
+- **Erasers touch the live ledger only; backups are recovery.** `purge` and
+  `forget_local_account` take a backup first and name it; `restore_backup`
+  with that id undoes the erasure. Only `delete_all_data` erases backups.
 - `delete_all_data` erases the whole local ledger **and every backup file**,
   the snapshots taken before schema upgrades included (each one is a copy of
   the whole ledger, so leaving them would leave the data restorable) **and asks every bank to withdraw its consent** — real
@@ -366,5 +379,10 @@ exactly the manual flow above.
   come back as they were; bank links stay as they are now; an account the
   backup knew but that is not linked now comes back needing a re-link; refresh
   reports produced while the restore ran may be stale — run `sync` after.
+- **A restore undoes a `purge` or a `forget_local_account`.** Each takes a
+  `pre-erasure` backup first (the eight most recent are kept, apart from the
+  weekly and manual ones) and names its id in the reply. After a
+  `forget_local_account`, the account comes back bound to whatever it is bound
+  to when the restore runs, so it may need a re-link.
 - What a restore does not undo: casa's memory, the transcripts, anything
   another plugin stored for itself.

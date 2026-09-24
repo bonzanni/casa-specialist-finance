@@ -244,7 +244,7 @@ class TestPluginManifest(unittest.TestCase):
         # ground truth: each tool's declared inputSchema.properties
         declared_args = {
             "unlink_bank": {"consent_ref"},
-            "purge": {"before_date"},
+            "purge": {"before_date", "user_work"},
             "forget_local_account": {"account_id"},
             "delete_all_data": set(),
             "label_account": {"account_id"},

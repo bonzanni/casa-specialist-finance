@@ -2039,8 +2039,8 @@ class TestRefreshAcrossARestore(Base):
             return r
         flows.backfill = during
         out = call("sync", account="acc1", resource="transactions")
-        self.assertIn("RESTORED — the account's ledger life changed during this refresh; "
-                      "nothing the fetch returned was kept. Run sync again.", out)
+        self.assertIn("LEDGER CHANGED — the ledger was restored, or had history "
+                      "erased, while this refresh was in flight. Run sync again.", out)
         self.assertNotIn("transactions: refreshed", out)
         for name in ("forget_local_account", "unlink_bank", "purge", "delete_all_data"):
             self.assertNotIn(name, out)
@@ -2064,7 +2064,7 @@ class TestRefreshAcrossARestore(Base):
         self.addCleanup(setattr, tools_refresh, "_note_failure", real_note)
         tools_refresh._note_failure = relife_then_note
         out = call("sync", account="acc1", resource="balances")
-        self.assertIn("RESTORED", out)
+        self.assertIn("LEDGER CHANGED", out)
         self.assertNotIn("NoBalancesReturned", out)
         self.assertNotIn("forget_local_account", out)
 
@@ -2093,7 +2093,7 @@ class TestRefreshAcrossARestore(Base):
         flows.backfill = during
         line = [ln for ln in call("sync", account="acc1",
                                   resource="transactions").splitlines()
-                if "RESTORED" in ln][0]
+                if "LEDGER CHANGED" in ln][0]
         self.assertIn("This account is not linked — a re-link is needed.", line)
         self.assertNotIn("link_bank", line)
 
@@ -2122,7 +2122,7 @@ class TestRefreshAcrossARestore(Base):
         flows.backfill = during
         self.addCleanup(setattr, flows, "backfill", real)
         out = call("sync", account="acc1", resource="transactions")
-        self.assertIn("RESTORED", out)
+        self.assertIn("LEDGER CHANGED", out)
         self.assertNotIn("Classification:", out)
 
     #: The names no rendered string may carry (INV-BACKUP-004).

@@ -1983,6 +1983,38 @@ class TestErasureFence(unittest.TestCase):
         self.assert_erased_report(out)
         self.assert_nothing_landed()
 
+    def test_a_whole_ledger_purge_after_apply_records_no_coverage(self):
+        """Issue #47: a whole-ledger purge keeps the account and its binding
+        but rotates its incarnation, exactly as `purge` does. A backfill
+        whose plan landed before the purge must then record no coverage and
+        no completion over rows the purge removed -- the fence is the life
+        token, since the account row itself survives."""
+        real = apply.record_coverage
+        conn = self.conn
+
+        def racing(c, aid, start, end, session_id, *, incarnation):
+            conn.execute("BEGIN IMMEDIATE")
+            apply.purge_rows(conn, None)
+            conn.execute("UPDATE accounts SET"
+                         " incarnation=lower(hex(randomblob(8)))")
+            conn.execute("COMMIT")
+            return real(c, aid, start, end, session_id,
+                        incarnation=incarnation)
+
+        apply.record_coverage = racing
+        self.addCleanup(setattr, apply, "record_coverage", real)
+        out = flows.backfill(FakeAIS([([raw_tx("2024-08-05", ref="R1")],
+                                       None)]),
+                             self.conn, ACCOUNT, "s1", incarnation=self.LIFE)
+        self.assertIs(out["erased"], True)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM coverage").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM sync_state WHERE completeness='complete'"
+        ).fetchone()[0], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+
     def test_an_erasure_between_coverage_and_the_stamp_is_reported_erased(self):
         """The narrowest window: coverage committed, then the erasure, then
         the completeness stamp — which must refuse rather than resurrect

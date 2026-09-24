@@ -879,9 +879,16 @@ def sync(args: dict) -> str:
                             "yours, there is nothing to do; a future "
                             "link_bank can bring the account back."))
                     else:
-                        text = ("RESTORED — the account's ledger life changed "
-                                "during this refresh; nothing the fetch "
-                                "returned was kept. Run sync again.")
+                        # An erasure of history rotates the life token too
+                        # (issue #47), and rows `apply_plan` committed before
+                        # it ran can remain -- as can a completion state a
+                        # date-scoped erasure never touched. So the line names
+                        # the event and nothing about which rows or which
+                        # state survived. It names no tool: a stale report
+                        # must never name a destructive remedy.
+                        text = ("LEDGER CHANGED — the ledger was restored, or "
+                                "had history erased, while this refresh was "
+                                "in flight. Run sync again.")
                         if not live[0]:
                             # `needs-relink` is derived, never stored: an
                             # account with no live binding IS one that needs

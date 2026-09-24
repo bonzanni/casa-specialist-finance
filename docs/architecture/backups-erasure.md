@@ -46,7 +46,39 @@ list the ledger's directory at all counts nothing, so its by-hand instruction na
 snapshots too. The
 ledger's directory is flushed before the terminal record on the same rule as the backups
 directory. Only the total eraser does this: `purge` and `forget_local_account` leave every
-copy, snapshots included, because backups are recovery.
+copy, snapshots included, because backups are recovery — they take a `pre-erasure` copy of
+their own first, and the only copies they can ever remove are older `pre-erasure` copies past
+that class's retention bound (see "Scoped erasures back up first" below).
+
+## Scoped erasures back up first
+
+**Erasers touch the live ledger only; backups are recovery.** `purge` and
+`forget_local_account` never modify or remove a `weekly`, `manual`, `install` or orphan copy,
+and each takes a `pre-erasure` copy before it erases anything: under its own
+`BEGIN IMMEDIATE` it settles, calls `take_backup` — whose separate reader sees the last
+committed state, which with nothing written yet is the ledger exactly before this erasure —
+then erases, commits, and finishes the copy with the class-restricted prune. A refusal
+anywhere up to and including the copy rolls back: **nothing is erased without its backup.**
+A failure of the erasure itself rolls back too, and the copy is finished `orphan`, still a
+valid restore point of the unchanged ledger. The reply names the copy and what
+`restore_backup` of it brings back — for `forget_local_account`, the account returns bound to
+whatever it is bound to live when the restore runs, and the authorization attempts it erased
+stay erased, because a restore keeps bindings and attempts live. It says "No other backup
+copy was changed" only when retention pruned nothing and this call's settlement completed no
+earlier interrupted erasure; otherwise it names what went. `delete_all_data` stays the one
+total eraser.
+
+`purge` also rotates every account's incarnation, as a restore does, so a refresh that read
+the ledger before it cannot record coverage or sync state over the rows it removed. For the
+same reason as a restore it waits for an authorization in flight — but on a wider rule,
+because a renewal between its binding switch and its reply reads the rotation as "nothing
+switched": it refuses while any attempt carries a `lease_token` whose lease is unexpired
+(however old the attempt), or whose lease expired while casa could still redeliver the
+attempt (`created_at` within `PENDING_TTL_S + RESULT_TTL_S + LEASE_TTL_S`). Past that horizon
+the purge proceeds and leaves the attempt row untouched: clearing a dead token strands a
+collector that was only stalled, with a half-written binding. The accepted residual is a
+renewal collector stalled for longer than the whole horizon, about 45 minutes, that then
+resumes across a purge.
 
 ## The order, and what is durable when
 

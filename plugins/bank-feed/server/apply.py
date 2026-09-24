@@ -1065,10 +1065,9 @@ def holes(conn, account_id: str, start: str, end: str) -> list:
 
 
 def purge_before(conn, cutoff: str, account_id=None) -> dict:
-    """Erase everything before `cutoff` AND make coverage tell the truth.
-
-    The `purge` tool is the caller; the operation lives here because it
-    touches the same three tables apply_plan and record_coverage own.
+    """Erase everything before `cutoff` AND make coverage tell the truth, in
+    a transaction of its own. `purge_rows` is the body; this wrapper is for
+    callers that do not already hold the write lock.
 
     The defect this exists to prevent: deleting transactions before a cutoff
     while leaving a [2020-01-01, 2026-01-01) coverage interval intact makes
@@ -1077,67 +1076,81 @@ def purge_before(conn, cutoff: str, account_id=None) -> dict:
     outlives its rows is worse than no coverage: it is a confident lie, and
     the gap disclosure has no way to notice.
 
-    So: rows go, their reference history goes with them, intervals wholly
-    before the cutoff are dropped, and intervals that SPAN it are trimmed to
-    start at it. One transaction, so there is no window in which coverage and
-    rows disagree.
-
     `account_id=None` means every account. Returns counts.
     """
     if not cutoff:
         raise ValueError("purge_before needs a cutoff date")
-    scope = () if account_id is None else (account_id,)
-    where = "" if account_id is None else " AND account_id=?"
-    stats = {"transactions": 0, "refs": 0,
-             "coverage_dropped": 0, "coverage_trimmed": 0}
     conn.execute("BEGIN IMMEDIATE")
     try:
-        doomed = [r[0] for r in conn.execute(
-            "SELECT row_id FROM transactions WHERE booking_date < ?" + where,
-            (cutoff,) + scope)]
-        for row_id in doomed:
-            cur = conn.execute(
-                "DELETE FROM transaction_refs WHERE row_id=?", (row_id,))
-            stats["refs"] += cur.rowcount if cur.rowcount > 0 else 0
-        if doomed:
-            marks = ",".join("?" * len(doomed))
-            # Annotations die with their rows, same as refs: a tag left
-            # behind would corrupt every list_tags count from then on, and
-            # an orphaned note is erased history the operator asked purged.
-            conn.execute("DELETE FROM transaction_tags WHERE row_id IN (%s)"
-                         % marks, doomed)
-            conn.execute("DELETE FROM transaction_notes WHERE row_id IN (%s)"
-                         % marks, doomed)
-            conn.execute(
-                "DELETE FROM transactions WHERE row_id IN (%s)" % marks, doomed)
-            stats["transactions"] = len(doomed)
-
-        # Coverage is rewritten wholesale rather than UPDATEd in place.
-        # Trimming changes interval_start, which is part of coverage's primary
-        # key; record_coverage merges on write, so today no two rows can end up
-        # trimmed onto the same start and an in-place UPDATE would in fact be
-        # safe. Rewriting the surviving set costs nothing, does not depend on
-        # that invariant continuing to hold, and cannot half-apply.
-        # Trimming preserves disjointness, so no re-merge is needed.
-        rows = [tuple(r) for r in conn.execute(
-            "SELECT account_id, interval_start, interval_end, fetched_at,"
-            " session_id, complete FROM coverage WHERE 1=1" + where, scope)]
-        keep = []
-        for acc, c_start, c_end, fetched_at, session_id, complete in rows:
-            if c_end <= cutoff:
-                stats["coverage_dropped"] += 1          # nothing left to attest
-                continue
-            if c_start < cutoff:
-                c_start = cutoff                        # trim the spanning part
-                stats["coverage_trimmed"] += 1
-            keep.append((acc, c_start, c_end, fetched_at, session_id, complete))
-        if rows:
-            conn.execute("DELETE FROM coverage WHERE 1=1" + where, scope)
-            conn.executemany(
-                "INSERT INTO coverage(account_id, interval_start, interval_end,"
-                " fetched_at, session_id, complete) VALUES (?,?,?,?,?,?)", keep)
+        stats = purge_rows(conn, cutoff, account_id)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return stats
+
+
+def purge_rows(conn, cutoff, account_id=None) -> dict:
+    """The body of a purge, run INSIDE the caller's transaction: the `purge`
+    tool takes its pre-erasure backup under the same write lock, and the copy
+    is only the ledger as it stood before this erasure if nothing commits
+    between the two.
+
+    Rows go, their reference history and their notes and tags go with them,
+    intervals wholly before the cutoff are dropped, and intervals that SPAN it
+    are trimmed to start at it. `cutoff=None` is the whole-ledger purge: every
+    row, and every interval, since nothing is left for one to attest.
+    """
+    scope = () if account_id is None else (account_id,)
+    where = "" if account_id is None else " AND account_id=?"
+    stats = {"transactions": 0, "refs": 0,
+             "coverage_dropped": 0, "coverage_trimmed": 0}
+    if cutoff is None:
+        doomed = [r[0] for r in conn.execute(
+            "SELECT row_id FROM transactions WHERE 1=1" + where, scope)]
+    else:
+        doomed = [r[0] for r in conn.execute(
+            "SELECT row_id FROM transactions WHERE booking_date < ?" + where,
+            (cutoff,) + scope)]
+    for row_id in doomed:
+        cur = conn.execute(
+            "DELETE FROM transaction_refs WHERE row_id=?", (row_id,))
+        stats["refs"] += cur.rowcount if cur.rowcount > 0 else 0
+    if doomed:
+        marks = ",".join("?" * len(doomed))
+        # Annotations die with their rows, same as refs: a tag left
+        # behind would corrupt every list_tags count from then on, and
+        # an orphaned note is erased history the operator asked purged.
+        conn.execute("DELETE FROM transaction_tags WHERE row_id IN (%s)"
+                     % marks, doomed)
+        conn.execute("DELETE FROM transaction_notes WHERE row_id IN (%s)"
+                     % marks, doomed)
+        conn.execute(
+            "DELETE FROM transactions WHERE row_id IN (%s)" % marks, doomed)
+        stats["transactions"] = len(doomed)
+
+    # Coverage is rewritten wholesale rather than UPDATEd in place.
+    # Trimming changes interval_start, which is part of coverage's primary
+    # key; record_coverage merges on write, so today no two rows can end up
+    # trimmed onto the same start and an in-place UPDATE would in fact be
+    # safe. Rewriting the surviving set costs nothing, does not depend on
+    # that invariant continuing to hold, and cannot half-apply.
+    # Trimming preserves disjointness, so no re-merge is needed.
+    rows = [tuple(r) for r in conn.execute(
+        "SELECT account_id, interval_start, interval_end, fetched_at,"
+        " session_id, complete FROM coverage WHERE 1=1" + where, scope)]
+    keep = []
+    for acc, c_start, c_end, fetched_at, session_id, complete in rows:
+        if cutoff is None or c_end <= cutoff:
+            stats["coverage_dropped"] += 1          # nothing left to attest
+            continue
+        if c_start < cutoff:
+            c_start = cutoff                        # trim the spanning part
+            stats["coverage_trimmed"] += 1
+        keep.append((acc, c_start, c_end, fetched_at, session_id, complete))
+    if rows:
+        conn.execute("DELETE FROM coverage WHERE 1=1" + where, scope)
+        conn.executemany(
+            "INSERT INTO coverage(account_id, interval_start, interval_end,"
+            " fetched_at, session_id, complete) VALUES (?,?,?,?,?,?)", keep)
     return stats

@@ -56,7 +56,7 @@ build from caller-supplied text at all. The grammar:
 
 ```
 bank-feed backup index v1
-<ts> backup  <op_id> pending reason=<weekly|manual|install:<workflow>>
+<ts> backup  <op_id> pending reason=<weekly|manual|pre-erasure|install:<workflow>>
 <ts> backup  <op_id> <committed|aborted|orphan>
 <ts> restore <op_id> pending backup=<backup_id>
 <ts> restore <op_id> <committed|aborted>
@@ -297,6 +297,7 @@ authorization finishes or its lease expires.
 | `install:<workflow>` | Every one, until the operator deletes the file by hand or `delete_all_data` erases it — retention never prunes one: its registration promises the copy behind it is still there. |
 | `weekly` | The 8 most recent. |
 | `manual` | The 8 most recent. |
+| `pre-erasure` | The 8 most recent. Taken only by `purge` and `forget_local_account` (see below); the `backup` tool refuses the reason. |
 | orphan | The 4 most recent — **including an orphaned install backup**: a consistent copy, but bounded like every other orphan rather than for ever. |
 
 `backups.prune` runs inside `backups.finish_backup`, so it runs at the end of every
@@ -305,6 +306,19 @@ one, which settles its copy `orphan` and prunes with the same call. It holds the
 throughout: unlink the file, then append `prune <op_id> done`. Ordering is by index sequence,
 never the second-resolution timestamp — several backups can land in one second, and sorting
 by timestamp there pruned the newest instead of the oldest.
+
+**An erasure's prune touches its own class only.** `prune` sweeps every class on every call,
+so the copy a scoped erasure takes would otherwise remove the oldest `manual` copy whenever
+that class stood over its bound — a scoped eraser deleting a recovery point the operator
+took. `finish_backup` and `prune` therefore take `classes`, and the two scoped erasers pass
+only `pre-erasure` (no `orphan` either). Every other caller keeps the all-class prune,
+which bounds `pre-erasure` at 8 too.
+
+### Scoped erasures back up first
+
+`purge` and `forget_local_account` take a `pre-erasure` copy before they erase anything, and
+`purge` waits for an authorization in flight on a wider rule than a restore does;
+[`architecture/backups-erasure.md`](../architecture/backups-erasure.md) has both.
 
 ### The erasure covers the copies
 
@@ -326,8 +340,10 @@ means this run's outcome belongs to a life that no longer exists, so `_do_refres
 swallows whatever it wrote or raised and returns `False`; when the caller passed an
 `out` dict (`sync` and the inline refresher both do), it also sets `out["erased"] = True`
 so the caller can tell this `False` apart from an ordinary one. `sync` reads that flag
-and renders "RESTORED — the account's ledger life changed during this refresh; nothing
-the fetch returned was kept. Run sync again." — adding "This account is not linked — a
+and renders "LEDGER CHANGED — the ledger was restored, or had history erased, while this
+refresh was in flight. Run sync again." — no claim about which rows or which completion
+state remain, because a purge (which rotates the incarnation too) can leave rows the run
+committed before it — adding "This account is not linked — a
 re-link is needed." when the row's binding is gone — rather than crediting a false
 "refreshed". `tools_read.py`'s `_freshness()` inline refresh reads the same flag and
 appends the parallel clause to its freshness note: the account's ledger life changed
