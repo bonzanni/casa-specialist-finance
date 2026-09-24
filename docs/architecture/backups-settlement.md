@@ -57,13 +57,19 @@ failure so the ledger still opens) would drop the account with them (issues #48,
 
 **Each write is recorded where it happens** into a `backups.SettleLog` that lives for
 exactly one dispatched `tools/call` (`backups.open_log`, a context variable; no call, no
-log). Recorded: the backups directory, index or index header it created; a torn tail it
-cut (as soon as the cut is made, with whether its flush landed); each `.partial` it
-unlinked; each pending `backup` or `restore` record it closed; a header it may have left
-part-written; and per erasure, what every attempt removed, the `prune` records for copies
-already gone (by copy id, so a retry is counted once), and whether the terminal record
-landed. A write whose outcome is unknown (`BackupError.written` None) is reported as one
-that *may* have happened, never as done.
+log). Recorded: the backups directory, index or index header it created; a mode it
+reset (the directory to 0700, the index to 0600, only when either had drifted); a torn
+tail it cut; each `.partial` it unlinked; each pending `backup` or `restore` record it
+closed; and per erasure, what every attempt removed, the `prune` records for copies
+already gone, and whether the terminal record landed. The log holds the **latest state
+per object**, never a list of attempts — a call settles twice (the open-time pass, then
+the tool's own), and a retry that landed supersedes an uncertain attempt instead of being
+published beside it. A write whose outcome is unknown (`BackupError.written` None) is
+reported as one that *may* have happened. Two facts are read from the truth rather than
+tracked per write: **durability** is one fact about the index (a failed flush of
+settlement's sets it, any later successful flush of the index in the call clears it,
+because an fsync flushes every earlier write), and a partial last line is reported only
+if the index **still ends in one** when the call ends.
 
 **It is rendered once, by `bank_feed_server.handle`, on every exit** — success, refusal
 or exception — as one sentence after the sandbox banner: "While settling the backup
@@ -76,8 +82,11 @@ supersedes an earlier attempt's alarm. No tool renders settlement itself.
 reply is built; once the call's log holds anything it says "This call's own operation
 changed nothing." instead, because the call did change something. A refusal built before
 the ledger opens keeps the plain sentence, which is then true. `tests/test_settle_log.py`
-fails on any literal of the claim outside that function, and on any tool that reads
-settlement's account itself. A `take_backup` whose rename fails closes its own `pending`
+fails on any literal of the claim outside that function (folding the ordinary ways a
+string is built: `+`, `%`, `.format`, f-strings; deliberate obfuscation is out of its
+scope), on any tool that reads settlement's account itself, and — reading what the tools
+actually say rather than their source — on any registered tool whose reply carries an
+unscoped claim after settlement wrote something. A `take_backup` whose rename fails closes its own `pending`
 record `aborted`, and its refusal says the copy was not kept.
 
 ## Source & test map

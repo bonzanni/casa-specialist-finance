@@ -7,6 +7,7 @@ and most start COLD, the way the first call of a process does: the ledger is
 opened by the tool itself, and the open-time settlement runs inside that open.
 """
 import ast
+import json
 import os
 import pathlib
 import re
@@ -26,7 +27,8 @@ import tools_backup  # noqa: E402  (registration side effect)
 import tools_annotate  # noqa: E402  (registration side effect)
 import tools_destructive  # noqa: E402  (registration side effect)
 import tools_read  # noqa: E402
-from _toolbase import call, dispatch  # noqa: E402
+from _toolbase import Base as ToolBase, call, dispatch  # noqa: E402
+import bank_feed_server  # noqa: E402
 
 LEAD = "While settling the backup index, this call "
 
@@ -135,6 +137,24 @@ class TestTheOpenTimeSettlementIsReported(Cold):
                       "copy(ies).", out)
         self.assertIn("so no account data was deleted", out)
         self.assertNotIn("nothing was deleted", out)
+
+    def test_permissions_settlement_resets_are_reported(self):
+        # Terra, code round 3: settlement resets the backups directory to
+        # 0700 and the index to 0600; a refusal then said "Nothing was
+        # changed." over the reset.
+        self.backups_taken(1)
+        os.chmod(str(self.paths.backups_dir), 0o755)
+        os.chmod(str(self.paths.index), 0o644)
+        out = dispatch("add_note", data_dir=self.data, row_ids=[999],
+                       note="x", author="agent")
+        self.assertEqual(oct(self.paths.backups_dir.stat().st_mode & 0o777),
+                         "0o700")
+        self.assertTrue(out.startswith(
+            LEAD + "reset the backups directory's permissions to 0700 (they "
+            "were 0755); reset the backup index's permissions to 0600 (they "
+            "were 0644).\n"), out)
+        self.assertTrue(out.endswith("This call's own operation changed "
+                                     "nothing."), out)
 
     def test_a_refusal_before_the_ledger_opens_still_says_nothing_changed(self):
         # The argument check runs before the tool opens the ledger: nothing,
@@ -289,6 +309,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self._close()
         self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
         self.paths.index.write_bytes(b"")
+        os.chmod(str(self.paths.index), 0o600)
         real_write = backups._write_whole
 
         def write(fd, data):
@@ -302,8 +323,8 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             out = dispatch("list_accounts", data_dir=self.data)
         self.assertEqual(self.paths.index.read_bytes(), b"bank-feed")
         self.assertTrue(out.startswith(
-            LEAD + "may have left part of a header in the backup index "
-            "(the next settlement cuts it).\n"), out)
+            LEAD + "may have left an incomplete last line in the backup "
+            "index (the next settlement cuts it).\n"), out)
 
     def test_a_torn_header_repaired_later_in_the_call_is_not_reported(self):
         # Astra, code round 2: the open-time pass tore the header, the
@@ -313,6 +334,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
         self._close()
         self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
         self.paths.index.write_bytes(b"")
+        os.chmod(str(self.paths.index), 0o600)
         real_write, real_trunc = backups._write_whole, os.ftruncate
         armed = [True]
 
@@ -331,7 +353,7 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                 mock.patch.object(backups.os, "ftruncate", ftruncate):
             out = dispatch("list_backups", data_dir=self.data)
         self.assertEqual(self.index_lines()[0], backups.INDEX_HEADER)
-        self.assertNotIn("may have left part of a header", out)
+        self.assertNotIn("may have left an incomplete last line", out)
         self.assertIn("Restore generation: 0", out)
 
     def test_a_closure_retried_in_the_same_call_is_said_once(self):
@@ -354,6 +376,112 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
                       "aborted", out)
         self.assertNotIn("may have recorded", out)
         self.assertEqual(out.count("1111111111111111 as aborted"), 1, out)
+
+    def test_a_torn_header_the_retry_removed_is_not_reported(self):
+        # Astra, code round 3: both header writes tore; the first cut-back
+        # failed, the retry's cut removed the fragment and its own cut-back
+        # succeeded. The index is empty — nothing of it is residue.
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_bytes(b"")
+        os.chmod(str(self.paths.index), 0o600)
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+        first = [True]
+
+        def write(fd, data):
+            real_write(fd, data[:9])
+            raise OSError(28, "No space left on device")
+
+        def ftruncate(fd, n):
+            if first[0] and n == 0:
+                first[0] = False
+                raise OSError(5, "Input/output error")
+            return real_trunc(fd, n)
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertEqual(self.paths.index.read_bytes(), b"")
+        self.assertIn("cut an incomplete last line from the backup index", out)
+        self.assertNotIn("may have left", out)
+
+    def test_a_failed_flush_a_later_flush_covered_is_not_reported(self):
+        # Terra and Astra, code round 3: an fsync flushes every earlier
+        # write to the file, so a later successful one supersedes the
+        # warning. Here the open-time cut's flush fails; the backup's own
+        # appends then flush the index.
+        self.backups_taken(1)
+        with open(self.paths.index, "a") as f:
+            f.write("20260101T000000Z backup 22222222")      # torn tail
+        real = os.fsync
+        armed = [True]
+
+        def fsync(fd):
+            if armed[0] and os.fstat(fd).st_size and \
+                    os.readlink("/proc/self/fd/%d" % fd).endswith(
+                        self.paths.index.name):
+                armed[0] = False
+                raise OSError(5, "Input/output error")
+            return real(fd)
+        with mock.patch.object(backups.os, "fsync", fsync):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertFalse(armed[0], "the cut's flush did fail")
+        self.assertIn("cut an incomplete last line", out)
+        self.assertNotIn("could not flush", out)
+        self.assertRegex(out, r"Backup [0-9a-f]{16} written")
+
+    def test_an_unflushed_completion_a_later_flush_covered_is_not_reported(self):
+        [bid] = self.backups_taken(1)
+        self.append_index("erase abcdefabcdefabcd pending")
+        real = backups.IndexHandle.append
+        armed = [True]
+
+        def append(handle, *fields):
+            real(handle, *fields)
+            if fields[:1] == ("erase",) and armed[0]:
+                armed[0] = False
+                raise backups.BackupError("fsync failed", written=True)
+        with mock.patch.object(backups.IndexHandle, "append", append):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertIn("completed a pending erasure, removing 1 backup "
+                      "copy(ies)", out)
+        self.assertNotIn("could not flush", out)
+
+    def test_a_tools_own_unflushed_record_is_not_called_settlements(self):
+        # Once `settle` returns, what the handle appends is the tool's own
+        # operation, which its own reply reports; the settlement sentence
+        # must not claim that write.
+        self.backups_taken(1)
+        self.warm()
+        real = os.fsync
+
+        def fsync(fd):
+            path = os.readlink("/proc/self/fd/%d" % fd)
+            if path.endswith(self.paths.index.name) and \
+                    self.paths.index.read_text().endswith("reason=manual\n"):
+                raise OSError(5, "Input/output error")
+            return real(fd)
+        with mock.patch.object(backups.os, "fsync", fsync):
+            out = dispatch("backup", data_dir=self.data, reason="manual")
+        self.assertIn("could not be flushed", out)       # the tool's own
+        self.assertNotIn(LEAD, out)
+
+    def test_a_flush_nothing_later_covered_is_reported(self):
+        # The other half: with no later flush, the warning stands.
+        self.backups_taken(1)
+        self.append_index("backup 5555555555555555 pending reason=manual")
+        real = os.fsync
+
+        def fsync(fd):
+            path = os.readlink("/proc/self/fd/%d" % fd)
+            if path.endswith(self.paths.index.name) and \
+                    self.paths.index.read_text().endswith("aborted\n"):
+                raise OSError(5, "Input/output error")
+            return real(fd)
+        with mock.patch.object(backups.os, "fsync", fsync):
+            out = dispatch("list_accounts", data_dir=self.data)
+        self.assertIn("could not flush its last write to the backup index",
+                      out)
 
     def test_a_rename_failure_whose_abort_record_is_unflushed_says_so(self):
         self.warm()
@@ -523,6 +651,35 @@ class TestTheClaimHasOneSpelling(unittest.TestCase):
                         "settled", "describe"):
                     hits.append("%s:%d .%s" % (path.name, node.lineno,
                                                node.attr))
+        self.assertEqual(hits, [])
+
+
+
+class TestEveryToolsRealReplyIsScoped(ToolBase):
+    """The gate above reads source; this reads what every tool actually
+    says. With settlement having written something in the call, no reply —
+    whatever tool, success or refusal — may carry an unscoped "nothing was
+    changed". Called with no arguments, every tool reaches its argument
+    refusals, where most of those sentences live."""
+
+    def test_no_tool_says_nothing_changed_after_settlement_wrote(self):
+        real_open = backups.open_log
+
+        def seeded():
+            token = real_open()
+            backups._LOG.get().repaired.append("probe's permissions")
+            return token
+        claim = TestTheClaimHasOneSpelling.CLAIM
+        hits = []
+        with mock.patch.object(backups, "open_log", seeded):
+            for name in sorted(bank_feed_server.TOOLS):
+                out = dispatch(name, data_dir=self.root)
+                if out.startswith("{"):             # a capability tool's object
+                    out = json.loads(out).get("text") or ""
+                body = out.split("\n", 1)[1] if out.startswith(LEAD) else out
+                self.assertTrue(out.startswith(LEAD), (name, out[:120]))
+                if claim.search(body):
+                    hits.append("%s: %s" % (name, body[:160]))
         self.assertEqual(hits, [])
 
 

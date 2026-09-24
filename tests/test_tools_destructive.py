@@ -2594,8 +2594,11 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # The settlement opening the session-row sweep re-prepares the
         # directory (0700) and completes the pending erasure in the same
         # call; the dispatcher's sentence says what it removed.
-        self.assertIn("While settling the backup index, this call completed "
-                      "a pending erasure, removing 2 backup copy(ies)", out)
+        # The settlement also resets the directory this test sealed (0500),
+        # and says so in the same sentence.
+        self.assertIn("reset the backups directory's permissions to 0700 "
+                      "(they were 0500); completed a pending erasure, "
+                      "removing 2 backup copy(ies)", out)
         self.assertEqual(len(list(paths.backups_dir.glob("*.sqlite"))), 0)
 
     def test_an_index_append_that_fails_after_its_unlink_still_gets_its_record(self):
