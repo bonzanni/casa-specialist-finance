@@ -755,12 +755,7 @@ def _settled_tail(state) -> str:
     completed an interrupted erasure, or "" when it removed nothing."""
     if state is None or state.settled is None:
         return ""
-    er = state.settled
-    return (" Settlement first %s an interrupted erasure and removed %d backup "
-            "copy(ies)%s." % ("completed" if er.finished else "resumed",
-                              er.removed,
-                              " and %d partial copy(ies)" % er.partials
-                              if er.partials else ""))
+    return " " + backups.settled_note(state.settled)
 
 
 def _settled_lines(settled) -> list:
@@ -772,12 +767,10 @@ def _settled_lines(settled) -> list:
         return []
     if not settled.finished:
         return ["Settlement then resumed the pending erasure of the backup "
-                "copies and removed %d backup copy(ies) and %d partial "
-                "copy(ies) before it refused; the erasure is not finished."
-                % (settled.removed, settled.partials)]
+                "copies and removed %s before it refused; the erasure is not "
+                "finished." % settled.went()]
     return ["Settlement then completed the pending erasure of the backup "
-            "copies: it removed %d backup copy(ies) and %d partial copy(ies)."
-            % (settled.removed, settled.partials)]
+            "copies: it removed %s." % settled.went()]
 
 
 def _handles_kept_note(due, exc, appending: bool) -> str:
@@ -816,20 +809,20 @@ def _second_sweep(paths, handle, state, erase_op):
         er = backups.erase_backups(paths, handle, state, erase_op)
     except backups.ErasureRecordUnwritten as exc:
         er = exc.erasure or backups.Erasure()
-        return ("Every backup copy found after the banks were asked (%d) "
+        return ("Every backup copy found after the banks were asked (%s) "
                 "was erased with the session rows destroyed here, but the "
                 "index record confirming it could not be written (%s); the "
                 "next settlement (any backup, restore, listing or workflow "
-                "write) writes it." % (er.removed, exc))
+                "write) writes it." % (er.went(), exc))
     except backups.ErasureIncomplete as exc:
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
-                "banks were asked did not finish: %d went, and %s. No "
+                "banks were asked did not finish: %s went, and %s. No "
                 "backup, restore, total erasure or workflow write runs until "
                 "the erasure completes; every other call, reads included, is "
                 "unaffected. Run delete_all_data again to retry, or delete %s "
-                "by hand." % (exc.erasure.removed, exc.residue(),
-                              paths.backups_dir.name))
+                "by hand." % (exc.erasure.went(), exc.residue(),
+                              backups.by_hand(paths, exc.erasure)))
     except backups.BackupError as exc:
         return ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
@@ -838,11 +831,10 @@ def _second_sweep(paths, handle, state, erase_op):
                 "recorded as pending, so the next settlement (any backup, "
                 "restore, listing or workflow write) finishes it." % exc)
     line = None
-    if er.removed or er.partials:
-        line = ("%d backup copy(ies) and %d partial copy(ies) found after the "
-                "banks were asked were erased too: a copy taken while they "
-                "answered holds the session rows destroyed here."
-                % (er.removed, er.partials))
+    if er.removed_any():
+        line = ("%s found after the banks were asked were erased too: a copy "
+                "taken while they answered holds the session rows destroyed "
+                "here." % er.went())
     if er.index_warning:
         line = ((line + " ") if line else "") + (
             "The index record closing that sweep could not be flushed (%s) — "
@@ -929,10 +921,14 @@ def delete_all_data(args: dict) -> str:
             return ("An erasure recorded earlier is not finished: %s. No "
                     "backup, restore, total erasure or workflow write runs "
                     "until the erasure completes. Check the backups "
-                    "directory (%s): make it writable, repair the disk it is "
-                    "on, or delete its contents by hand; then run any "
+                    "directory (%s)%s: make it writable, repair the disk it "
+                    "is on, or delete its contents by hand; then run any "
                     "backup, restore, listing or workflow write to finish "
-                    "the erasure." % (exc.describe(), paths.backups_dir.name))
+                    "the erasure."
+                    % (exc.describe(), paths.backups_dir.name,
+                       " and the %s* files beside the ledger"
+                       % paths.snapshot_prefix
+                       if backups.snapshots_at_risk(exc.erasure) else ""))
         if isinstance(exc, backups.ErasureRecordUnwritten):
             # Settlement COMPLETED an earlier erasure's sweep — every copy is
             # gone and the directory flushed — and only the record confirming
@@ -940,14 +936,12 @@ def delete_all_data(args: dict) -> str:
             # this very call just unlinked.
             er = exc.erasure or backups.Erasure()
             return ("An erasure recorded earlier was completed by this call's "
-                    "settlement: every backup copy is gone (%d removed now%s), "
+                    "settlement: every backup copy is gone (%s removed now), "
                     "but the index record confirming it could not be written "
                     "(%s)%s; it will be written at the next settlement (any "
                     "backup, restore, listing or workflow write). This call's "
                     "own erasure did not run: the ledger was not erased."
-                    % (er.removed,
-                       ", and %d partial copy(ies)" % er.partials
-                       if er.partials else "",
+                    % (er.went(),
                        exc,
                        " and may stand part-written until then"
                        if exc.written is None else ""))
@@ -1078,7 +1072,8 @@ def delete_all_data(args: dict) -> str:
             # shape of this failure and a reply that counted none of them
             # would understate what the retry still has to do.
             erased_backups = (exc.erasure
-                              if isinstance(exc, backups.ErasureIncomplete)
+                              if isinstance(exc, (backups.ErasureIncomplete,
+                                                  backups.ErasureRecordUnwritten))
                               else None)
             # `residue()`, not the whole account: the count sentences below
             # already say what went, so this line says only what is left — and
@@ -1095,7 +1090,9 @@ def delete_all_data(args: dict) -> str:
             # index and are untouched, and claiming otherwise sent an operator
             # after a fault that is not there.
             if isinstance(exc, backups.ErasureIncomplete) and (
-                    exc.erasure.failed or exc.erasure.failed_partials):
+                    exc.erasure.failed or exc.erasure.failed_partials
+                    or exc.erasure.failed_snapshots
+                    or exc.erasure.failed_snapshot_sidecars):
                 left = ("at least one backup file beside it could not be "
                         "removed: %s" % exc.residue())
             elif isinstance(exc, backups.ErasureIncomplete):
@@ -1134,7 +1131,8 @@ def delete_all_data(args: dict) -> str:
                     "restore, total erasure or workflow write runs until the "
                     "erasure completes; every other call, reads included, is "
                     "unaffected. Run delete_all_data again to retry, or delete "
-                    "%s by hand." % (left, paths.backups_dir.name))
+                    "%s by hand." % (left, backups.by_hand(
+                        paths, erased_backups)))
     finally:
         handle.close()
     # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" TWO OF
@@ -1169,21 +1167,22 @@ def delete_all_data(args: dict) -> str:
         # backups are gone, so the next workflow write starts a fresh one.
         done += (" The workflow registrations were erased, so a workflow's "
                 "next write mints a fresh restore point.")
+    # A RETRY'S OWN SETTLEMENT CAN FINISH THE EARLIER CALL'S SWEEP before this
+    # call's sweep runs, and what it removed there is in `backup_state`, not in
+    # `erased_backups`: without this sentence the files the retry actually
+    # removed went unmentioned in a reply that succeeded.
+    done += _settled_tail(backup_state)
     if erased_backups is not None:
-        # EVERY NUMBER HERE COUNTS ONLY WHAT WENT, and each is the count of a
-        # different audit shape: an indexed copy leaves a `prune` record in the
-        # index, a copy in flight never had an index record to prune, and a
-        # file the sweep could not unlink is the warning's subject, not this
-        # sentence's. A single total over all three would be a number the index
-        # cannot corroborate. Nothing there to erase says nothing at all —
-        # "0 backup file(s) were erased" reads as a failure of a call that
-        # succeeded.
-        if erased_backups.removed:
-            done += (" %d backup file(s) were erased too — a backup is a copy "
-                     "of this ledger." % erased_backups.removed)
-        if erased_backups.partials:
-            done += (" %d partial copy(ies) — a backup interrupted part way —"
-                     " were erased as well." % erased_backups.partials)
+        # EVERY NUMBER HERE COUNTS ONLY WHAT WENT, one per shape
+        # (`Erasure.went`): an indexed copy leaves a `prune` record, a copy in
+        # flight and a snapshot never had one, and a file the sweep could not
+        # unlink is the warning's subject, not this sentence's. A single total
+        # would be a number the index cannot corroborate. Nothing there to
+        # erase says nothing at all — "0 backup file(s) were erased" reads as
+        # a failure of a call that succeeded.
+        if erased_backups.removed_any():
+            done += (" %s were erased too — each is a copy, or part of a copy, "
+                     "of this ledger." % erased_backups.went())
         if erased_backups.index_warning:
             # The sweep finished and only the terminal record's FLUSH did not.
             # The line is readable, so the erasure is complete and the next

@@ -799,8 +799,10 @@ def _migrate(conn: sqlite3.Connection, current: int) -> None:
 
 
 def _snapshot_name(db: Path) -> Path:
-    base = "%s.pre-migration-%s" % (db.name, time.strftime("%Y%m%dT%H%M%SZ",
-                                                           time.gmtime()))
+    # The infix is shared with the erasure sweep (`backups._erase`), which
+    # removes these snapshots in a total erasure.
+    base = "%s%s%s" % (db.name, backups.SNAPSHOT_INFIX,
+                       time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     cand = db.parent / base
     n = 2
     while cand.exists():

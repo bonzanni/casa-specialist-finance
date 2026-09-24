@@ -111,7 +111,7 @@ class TestAnIncompleteErasureIsStillReported(Base):
         doomed, removed = self._stuck_erasure()
         out = call("backup", reason="manual")
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("settlement removed 1 backup copy(ies) and 0 partial(s)", out)
+        self.assertIn("settlement removed 1 backup copy(ies)", out)
         self.assertIn("1 whole copy(ies) could not be removed — EVERY BACKUP "
                       "IS A WHOLE COPY OF THIS LEDGER, so the copies that may "
                       "still be on disk hold this ledger's data. This call "
@@ -139,7 +139,8 @@ class TestAnIncompleteErasureIsStillReported(Base):
         # a single lumped count promised the operator rows that are not there.
         # The set of calls that refuse is named exactly, and this listing --
         # answered rather than refused -- is the proof a read is not in it.
-        self.assertIn("Backup erasure incomplete: 1 whole copy(ies) could not "
+        self.assertIn("Backup erasure incomplete: settlement removed 1 backup "
+                      "copy(ies); 1 whole copy(ies) could not "
                       "be removed — EVERY BACKUP IS A WHOLE COPY OF THIS "
                       "LEDGER, so the copies that may still be on disk hold "
                       "this ledger's data. No backup, restore, total erasure "

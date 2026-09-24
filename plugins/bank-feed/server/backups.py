@@ -102,11 +102,24 @@ def reason_is_valid(reason: str) -> bool:
             and WORKFLOW_RE.fullmatch(reason[len(INSTALL_PREFIX):]) is not None)
 
 
+#: What `store.snapshot_before_migration` puts between the ledger's name and
+#: its timestamp. Shared so the erasure sweep matches exactly what is written.
+SNAPSHOT_INFIX = ".pre-migration-"
+#: The rest of a snapshot's own name after the prefix: the stamp, and the
+#: `-N` a same-second collision adds. Anything else under the prefix is a
+#: sidecar of one (a `-journal` a `VACUUM INTO` left), which holds pages of
+#: the ledger but is not a whole copy, so it is counted apart.
+SNAPSHOT_STAMP_RE = re.compile(r"\d{8}T\d{6}Z(-\d+)?")
+
+
 class Paths:
     def __init__(self, db_path):
         self.db = Path(db_path)
         self.index = self.db.parent / (self.db.name + ".backup-index")
         self.backups_dir = self.db.parent / (self.db.name + ".backups")
+        #: Every pre-migration snapshot of THIS ledger starts with it — and
+        #: no other ledger's does, because the ledger's own name leads.
+        self.snapshot_prefix = self.db.name + SNAPSHOT_INFIX
 
     def backup_file(self, op_id: str) -> Path:
         return self.backups_dir / ("%s.sqlite" % op_id)
@@ -614,14 +627,14 @@ def settle(conn, paths: Paths, *, hold: bool = True):
         if isinstance(exc, ErasureRecordUnwritten):
             settled.finished = True      # every copy went; only the record
         if isinstance(exc, BackupError) and exc.settled is None \
-                and (settled.removed or settled.partials):
+                and settled.removed_any():
             exc.settled = settled
         if handle is not None:
             handle.close()
         else:
             os.close(fd)
         raise
-    if settled.removed or settled.partials:
+    if settled.removed_any():
         state.settled = settled
     if not hold:
         handle.close()
@@ -802,6 +815,18 @@ class Erasure:
     #: reached the index, so it cannot be restored — but the file still holds
     #: this ledger's pages, so it is named, in its own clause.
     failed_partials: int = 0
+    #: Pre-migration snapshots (`<ledger>.pre-migration-*`, beside the ledger)
+    #: unlinked. Each is a whole-ledger copy taken before a schema upgrade.
+    #: No index record ever named one, so it is counted apart from `removed`.
+    snapshots: int = 0
+    #: Pre-migration snapshots that could not be unlinked. A whole copy, like
+    #: `failed`, but outside the backups directory, so it has its own clause
+    #: naming where it is.
+    failed_snapshots: int = 0
+    #: Sidecars of a snapshot (its `-journal`) unlinked, and those that could
+    #: not be: pages of this ledger, never a whole copy.
+    snapshot_sidecars: int = 0
+    failed_snapshot_sidecars: int = 0
     #: The DIRECTORY holding the entries could not be flushed. An entry's
     #: removal lives in the directory's own blocks, so until that flush lands a
     #: power loss can bring every unlinked copy back — including copies an
@@ -819,6 +844,31 @@ class Erasure:
     #: False when a refusal stopped the sweep, so a reply says the erasure
     #: was resumed, never that it was completed.
     finished: bool = False
+
+    def went(self) -> str:
+        """What this erasure removed, as ONE phrase every reply uses: "N
+        backup copy(ies)", then each other shape it removed. Replies used to
+        format the fields themselves, and every field added later was left out
+        of some of them; a count rendered here cannot be."""
+        parts = ["%d backup copy(ies)" % self.removed] if self.removed else []
+        if self.partials:
+            parts.append("%d partial copy(ies)" % self.partials)
+        if self.snapshots:
+            parts.append("%d pre-migration snapshot(s)" % self.snapshots)
+        if self.snapshot_sidecars:
+            parts.append("%d snapshot journal file(s)" % self.snapshot_sidecars)
+        if not parts:
+            return "0 backup copy(ies)"
+        if len(parts) == 1:
+            return parts[0]
+        return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+    def removed_any(self) -> bool:
+        """Whether this erasure removed any file at all — the test for "a
+        reply has to say what settlement did", which a snapshot-only sweep
+        meets as much as a backup copy does."""
+        return bool(self.removed or self.partials or self.snapshots
+                    or self.snapshot_sidecars)
 
 
 class ErasureIncomplete(BackupError):
@@ -838,7 +888,8 @@ class ErasureIncomplete(BackupError):
         # A flush that failed over a sweep that removed everything has NO
         # failed file to count: "0 backup file(s) could not be erased" would
         # read as a call that succeeded and then refused for nothing.
-        lost = erasure.failed + erasure.failed_partials
+        lost = (erasure.failed + erasure.failed_partials
+                + erasure.failed_snapshots + erasure.failed_snapshot_sidecars)
         super().__init__(
             "%d backup file(s) could not be erased" % lost if lost else
             "the removal of the backup copies could not be made durable")
@@ -860,6 +911,16 @@ class ErasureIncomplete(BackupError):
                 "%d unfinished copy(ies) could not be removed — a partial "
                 "cannot be restored, but it still holds this ledger's pages"
                 % self.erasure.failed_partials)
+        if self.erasure.failed_snapshots:
+            clauses.append(
+                "%d pre-migration snapshot(s) beside the ledger could not be "
+                "removed — each is a WHOLE COPY OF THIS LEDGER taken before a "
+                "schema upgrade" % self.erasure.failed_snapshots)
+        if self.erasure.failed_snapshot_sidecars:
+            clauses.append(
+                "%d file(s) beside a pre-migration snapshot (its journal) "
+                "could not be removed — not a whole copy, but it may hold this "
+                "ledger's pages" % self.erasure.failed_snapshot_sidecars)
         if self.erasure.undurable:
             # Not a file that is still there: a file that is gone and might
             # come back. The operator cannot act on it per file — there is no
@@ -877,10 +938,8 @@ class ErasureIncomplete(BackupError):
         about the erasure. Settlement removing copies is not "nothing was
         changed", which is what every one of those callers used to print."""
         parts = []
-        if self.erasure.removed or self.erasure.partials:
-            parts.append("settlement removed %d backup copy(ies) and %d "
-                         "partial(s)" % (self.erasure.removed,
-                                         self.erasure.partials))
+        if self.erasure.removed_any():
+            parts.append("settlement removed %s" % self.erasure.went())
         residue = self.residue()
         if residue:
             parts.append(residue)
@@ -910,16 +969,45 @@ class ErasureRecordUnwritten(BackupError):
     erasure = None
 
 
+def snapshots_at_risk(er: Erasure | None) -> bool:
+    """Whether a file beside the ledger may still hold, or bring back, this
+    ledger's data: one could not be removed, a flush failed (an unlinked
+    entry can come back), or the sweep stopped without counting at all."""
+    return (er is None or bool(er.failed_snapshots
+                               or er.failed_snapshot_sidecars
+                               or er.undurable))
+
+
+def by_hand(paths: Paths, er: Erasure | None) -> str:
+    """What an operator deletes by hand to finish a stalled erasure: the
+    backups directory, and the snapshots beside the ledger when one of THOSE
+    could not be removed — or when `er` is None: a sweep that stopped without
+    counting cannot say the snapshots went, so they are named too."""
+    what = paths.backups_dir.name
+    if snapshots_at_risk(er):
+        what += " and the %s* files beside the ledger" % paths.snapshot_prefix
+    return what
+
+
+def settled_note(settled: Erasure | None) -> str:
+    """The sentence a reply adds when the settlement it ran removed files —
+    a call that SUCCEEDED as much as one that refused: completing an
+    erasure on the way is a change to the directory either way. "" when it
+    removed nothing."""
+    if settled is None or not settled.removed_any():
+        return ""
+    return ("Settlement first %s an interrupted erasure and removed %s."
+            % ("completed" if settled.finished else "resumed", settled.went()))
+
+
 def settled_sentence(settled: Erasure) -> str:
     """The sentence a refusal ends with when the settlement it ran removed
     copies: this call's own operation did not run, and the directory still
     changed under it."""
     text = ("This call did not run; settlement first %s an interrupted "
-            "erasure and removed %d backup copy(ies)"
+            "erasure and removed %s"
             % ("completed" if settled.finished else "resumed",
-               settled.removed))
-    if settled.partials:
-        text += " and %d partial copy(ies)" % settled.partials
+               settled.went()))
     if not settled.finished:
         text += ", and the erasure is not finished yet"
     return text + "."
@@ -942,10 +1030,7 @@ def refusal_text(exc: BackupError, state: LedgerState | None = None) -> str:
                 "not be flushed (%s); it may not survive a power loss. The "
                 "next listing settles it." % (exc.placed, exc))
         if settled is not None:
-            text += " Settlement first %s an interrupted erasure and " \
-                    "removed %d backup copy(ies)." % (
-                        "completed" if settled.finished else "resumed",
-                        settled.removed)
+            text += " " + settled_note(settled)
         return text
     if settled is not None:
         return "%s. %s" % (exc, settled_sentence(settled))
@@ -1103,6 +1188,42 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
             b["pruned"] = True
         except OSError:
             out.failed += 1
+    # A PRE-MIGRATION SNAPSHOT IS A WHOLE-LEDGER COPY TOO (issue #44).
+    # `store.snapshot_before_migration` VACUUMs the ledger INTO
+    # `<ledger>.pre-migration-<stamp>` beside it before a schema upgrade —
+    # sessions, `meta`, every transaction — so a total erasure that skipped
+    # them left the destroyed session identifiers on disk under a reply saying
+    # they were gone. They are swept here, inside the recorded erasure, so a
+    # snapshot that cannot be removed keeps the record pending and the next
+    # settlement retries it exactly as it retries a backup copy. Matched by
+    # this ledger's own prefix: a snapshot of the other mode's ledger, in the
+    # same directory, is that ledger's to erase.
+    try:
+        siblings = sorted(paths.db.parent.iterdir())
+    except FileNotFoundError:
+        siblings = []
+    except OSError as exc:
+        raise BackupError("the ledger's directory could not be read: %s"
+                          % _oserr(exc)) from None
+    for f in siblings:
+        if not f.name.startswith(paths.snapshot_prefix):
+            continue
+        whole = SNAPSHOT_STAMP_RE.fullmatch(
+            f.name[len(paths.snapshot_prefix):]) is not None
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if whole:
+                out.failed_snapshots += 1
+            else:
+                out.failed_snapshot_sidecars += 1
+            continue
+        if whole:
+            out.snapshots += 1
+        else:
+            out.snapshot_sidecars += 1
     # THE UNLINKS ARE NOT DURABLE UNTIL THE DIRECTORY IS. An entry's removal
     # lives in the directory's own blocks, not in the file's, so without this
     # flush a power loss after `erase <op> committed` can bring every unlinked
@@ -1120,13 +1241,18 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
     # A failure joins the sweep's failures instead of raising on its own: the
     # erasure stays `pending`, so the next settlement unlinks whatever came
     # back and flushes again.
-    try:
-        _fsync_dir(paths.backups_dir)
-    except FileNotFoundError:
-        pass                        # no directory, so no entry to make durable
-    except OSError:
-        out.undurable = True
-    if out.failed or out.failed_partials or out.undurable:
+    #
+    # The ledger's own directory holds the snapshots' entries, so it is
+    # flushed on the same rule and for the same reason.
+    for d in (paths.backups_dir, paths.db.parent):
+        try:
+            _fsync_dir(d)
+        except FileNotFoundError:
+            pass                    # no directory, so no entry to make durable
+        except OSError:
+            out.undurable = True
+    if out.failed or out.failed_partials or out.failed_snapshots \
+            or out.failed_snapshot_sidecars or out.undurable:
         raise ErasureIncomplete(out)
     try:
         handle.append("erase", op_id, "committed")

@@ -179,9 +179,9 @@ the names understate two of them and overstate one.
   active** — this does not disconnect the bank.
 - `purge` deletes every transaction booked before a cutoff date, across all
   accounts, and reclaims the file space.
-- `delete_all_data` erases the whole local ledger **and every backup file**
-  (each one is a copy of the whole ledger, so leaving them would leave the
-  data restorable) **and asks every bank to withdraw its consent** — real
+- `delete_all_data` erases the whole local ledger **and every backup file**,
+  the snapshots taken before schema upgrades included (each one is a copy of
+  the whole ledger, so leaving them would leave the data restorable) **and asks every bank to withdraw its consent** — real
   calls to the provider, not a local-only wipe. This is the one tool that can
   end bank access everywhere at once. Say so before it runs, not after.
 

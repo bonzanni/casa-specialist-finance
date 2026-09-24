@@ -2397,8 +2397,8 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         out = call("delete_all_data")
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
         self.assertEqual(len(self._prunes(paths)), 2)
-        self.assertIn("2 backup file(s) were erased too — a backup is a copy of "
-                      "this ledger.", out)
+        self.assertIn("2 backup copy(ies) were erased too — each is a copy, "
+                      "or part of a copy, of this ledger.", out)
         # The INDEX is kept -- append-only, so the record of what existed and
         # what was removed survives the erasure it describes.
         self.assertTrue(paths.index.is_file())
@@ -2416,8 +2416,8 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # which is why it is counted in its OWN sentence instead of inflating
         # the count whose number the `prune` records have to corroborate.
         self.assertEqual(len(self._prunes(paths)), 2)
-        self.assertIn("2 backup file(s) were erased too", out)
-        self.assertIn("1 partial copy(ies)", out)
+        self.assertIn("2 backup copy(ies) and 1 partial copy(ies) were erased "
+                      "too", out)
 
     def test_the_erasure_of_the_copies_is_recorded_before_it_happens(self):
         # A crash between the ledger COMMIT and the unlinking used to leave an
@@ -2471,7 +2471,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertEqual(len(self._prunes(paths)), 1)
         # The count sentence counts ONLY what was removed; the failure is the
         # warning's subject, with a count and never a path.
-        self.assertIn("1 backup file(s) were erased too", out)
+        self.assertIn("1 backup copy(ies) were erased too", out)
         self.assertIn("WARNING — the local ledger IS erased, but at least one "
                       "backup file beside it could not be removed: 1 whole "
                       "copy(ies) could not be removed — EVERY BACKUP IS A "
@@ -2496,7 +2496,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertEqual(len(self._prunes(paths)), 2)
         # Nothing was left for the retry's OWN erasure to remove, so it claims
         # nothing: "0 backup file(s) were erased" reads as a failed call.
-        self.assertNotIn("backup file(s) were erased too", out2)
+        self.assertNotIn("were erased too — each is a copy", out2)
         self.assertNotIn("partial copy(ies)", out2)
 
     def test_while_copies_survive_an_erasure_the_next_call_names_the_residue(self):
@@ -2558,7 +2558,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertIn("WARNING — the local ledger IS erased, but at least one "
                       "backup file beside it could not be removed", out)
         self.assertIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
-        self.assertNotIn("backup file(s) were erased too", out)
+        self.assertNotIn("were erased too — each is a copy", out)
         # The settlement opening the session-row sweep re-prepares the
         # directory (0700) and completes the pending erasure in the same
         # call; the reply says what it removed, after the warning.
@@ -2637,8 +2637,8 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
                       "pages", out)
         self.assertNotIn("EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER", out)
         # And what DID go is still counted, per audit shape.
-        self.assertIn("2 backup file(s) were erased too", out)
-        self.assertNotIn("partial copy(ies) — a backup interrupted part way", out)
+        self.assertIn("2 backup copy(ies) were erased too", out)
+        self.assertNotIn("partial copy(ies)", out)
 
     def test_a_failed_index_write_for_the_erase_record_erased_nothing(self):
         # `append` writes and then flushes. The write failing means the record
@@ -2728,7 +2728,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertEqual([last[1], last[3]], ["erase", "committed"])
         self.assertNotIn("stopped part way", out)
         self.assertNotIn("WARNING — the local ledger IS erased", out)
-        self.assertIn("2 backup file(s) were erased too", out)
+        self.assertIn("2 backup copy(ies) were erased too", out)
         self.assertIn("Every backup copy was erased; the index record "
                       "confirming it could not be flushed (the backup index "
                       "could not be flushed: ENOSPC) — it is readable and "
@@ -3051,6 +3051,232 @@ class TestTheLedgersOwnWriteAheadLogIsReclaimed(DestructiveBase):
         self.assertEqual(self._files_holding(SESSION_ID), [])
 
 
+class TestPreMigrationSnapshotsAreErased(DestructiveBase):
+    """Issue #44. `store.open_db` takes a `VACUUM INTO` snapshot beside the
+    ledger before a schema migration: a whole-ledger copy, sessions included.
+    A total erasure that leaves one behind leaves the destroyed session
+    identifiers on disk under a reply saying they are gone."""
+
+    ERASED_IK = "ik-erased-snapshot-row"
+
+    def _files_holding(self, needle):
+        return sorted(p.name for p in self.root.rglob("*")
+                      if p.is_file() and needle.encode() in p.read_bytes())
+
+    def _snapshot(self):
+        # The function `open_db` calls before a migration, on the live ledger.
+        return pathlib.Path(
+            store.snapshot_before_migration(self.root / "f.sqlite"))
+
+    def _populate(self):
+        self.session()
+        self.account()
+        self.tx(ik=self.ERASED_IK)
+
+    def test_delete_all_data_leaves_no_snapshot_holding_erased_data(self):
+        self._populate()
+        snap = self._snapshot()
+        # The precondition is the defect's: the snapshot holds both.
+        self.assertIn(snap.name, self._files_holding(SESSION_ID))
+        self.assertIn(snap.name, self._files_holding(self.ERASED_IK))
+        out = call("delete_all_data")
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertFalse(snap.exists())
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+        self.assertEqual(self._files_holding(self.ERASED_IK), [])
+        self.assertIn("1 pre-migration snapshot(s) were erased too — each is a copy", out)
+
+    def test_a_real_migration_snapshot_is_erased(self):
+        # The issue's own reproduction: a ledger at the previous schema
+        # version, opened through `open_db`, which migrates and snapshots.
+        self._populate()
+        self.raw.execute("UPDATE meta SET value=? WHERE key='schema_version'",
+                         (str(store.SCHEMA_VERSION - 1),))
+        store.open_db(self.root / "f.sqlite").close()
+        snaps = list(self.root.glob("f.sqlite.pre-migration-*"))
+        self.assertEqual(len(snaps), 1)
+        call("delete_all_data")
+        self.assertEqual(list(self.root.glob("f.sqlite.pre-migration-*")), [])
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+    def test_another_ledgers_snapshot_is_not_touched(self):
+        self._populate()
+        other = self.root / "other.sqlite.pre-migration-20260101T000000Z"
+        other.write_bytes(b"not this ledger")
+        call("delete_all_data")
+        self.assertEqual(other.read_bytes(), b"not this ledger")
+
+    def test_scoped_erasers_keep_the_snapshots(self):
+        # Backups are recovery: a scoped erasure acts on the live ledger only,
+        # so a mistaken one can be undone from a copy. Only the total eraser
+        # removes copies, and a snapshot is a copy.
+        self._populate()
+        snap = self._snapshot()
+        call("purge", before_date="2027-01-01")
+        call("forget_local_account", account_id="acc1")
+        self.assertTrue(snap.exists())
+
+    def test_a_snapshot_that_cannot_be_removed_keeps_the_erasure_pending(self):
+        self._populate()
+        snap = self._snapshot()
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **kw):
+            if ".pre-migration-" in p.name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **kw)
+        with mock.patch.object(pathlib.Path, "unlink", unlink):
+            out = call("delete_all_data")
+        self.assertTrue(snap.exists())
+        self.assertIn("1 pre-migration snapshot(s) beside the ledger could "
+                      "not be removed", out)
+        self.assertIn("f.sqlite.pre-migration-*", out)
+        self.assertNotIn("not durable", out)
+        paths = backups.paths_for(tools_read.ledger_path(self.raw))
+        self.assertEqual(self._erase_states(paths), ["pending"])
+        # The next settlement, in any call that settles, finishes the sweep,
+        # and the listing says what it removed on the way.
+        listing = call("list_backups")
+        self.assertIn("Settlement first completed an interrupted erasure and "
+                      "removed 1 pre-migration snapshot(s).", listing)
+        self.assertFalse(snap.exists())
+        self.assertEqual(self._erase_states(paths), ["pending", "committed"])
+        # The session row the first call kept (its sweep could not be
+        # recorded) goes with the retry the reply asks for.
+        call("delete_all_data")
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+    def _erase_states(self, paths):
+        return [l.split()[3] for l in paths.index.read_text().splitlines()
+                if l.split()[1:2] == ["erase"]]
+
+    def test_a_snapshot_journal_is_counted_apart_from_the_snapshot(self):
+        self._populate()
+        snap = self._snapshot()
+        journal = snap.with_name(snap.name + "-journal")
+        journal.write_bytes(SESSION_ID.encode())
+        out = call("delete_all_data")
+        self.assertFalse(journal.exists())
+        self.assertIn("1 pre-migration snapshot(s) and 1 snapshot journal "
+                      "file(s) were erased too", out)
+
+    def test_a_journal_that_cannot_be_removed_is_not_called_a_whole_copy(self):
+        self._populate()
+        snap = self._snapshot()
+        journal = snap.with_name(snap.name + "-journal")
+        journal.write_bytes(SESSION_ID.encode())
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **kw):
+            if p.name == journal.name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **kw)
+        with mock.patch.object(pathlib.Path, "unlink", unlink):
+            out = call("delete_all_data")
+        self.assertIn("1 file(s) beside a pre-migration snapshot (its "
+                      "journal) could not be removed", out)
+        self.assertNotIn("WHOLE COPY", out)
+        self.assertIn("f.sqlite.pre-migration-*", out)
+
+    def test_the_second_sweep_counts_the_snapshots_it_removed(self):
+        # Snapshots written while the banks answer are the second sweep's;
+        # when one of two cannot go, the count of what went includes the
+        # other.
+        self._populate()
+        real = self.ais.delete_session
+        stuck = []
+
+        def delete_session(sid):
+            for n in (1, 2):
+                f = self.root / ("f.sqlite.pre-migration-20260101T00000%dZ" % n)
+                f.write_bytes(SESSION_ID.encode())
+            stuck.append(self.root / "f.sqlite.pre-migration-20260101T000002Z")
+            return real(sid)
+        self.ais.delete_session = delete_session
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **kw):
+            if stuck and p.name == stuck[0].name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **kw)
+        with mock.patch.object(pathlib.Path, "unlink", unlink):
+            out = call("delete_all_data")
+        self.assertIn("did not finish: 1 pre-migration snapshot(s) went", out)
+        self.assertIn("1 pre-migration snapshot(s) beside the ledger could "
+                      "not be removed", out)
+
+    def test_a_retry_says_what_its_settlement_removed(self):
+        self._populate()
+        snap = self._snapshot()
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **kw):
+            if ".pre-migration-" in p.name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **kw)
+        with mock.patch.object(pathlib.Path, "unlink", unlink):
+            call("delete_all_data")
+        out = call("delete_all_data")
+        self.assertIn("Settlement first completed an interrupted erasure and "
+                      "removed 1 pre-migration snapshot(s).", out)
+        self.assertFalse(snap.exists())
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+    def test_a_backup_that_finishes_the_sweep_says_what_it_removed(self):
+        self._populate()
+        snap = self._snapshot()
+        real_unlink = pathlib.Path.unlink
+
+        def unlink(p, *a, **kw):
+            if ".pre-migration-" in p.name:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_unlink(p, *a, **kw)
+        with mock.patch.object(pathlib.Path, "unlink", unlink):
+            call("delete_all_data")
+        out = call("backup", reason="manual")
+        self.assertIn("written (manual", out)
+        self.assertIn("Settlement first completed an interrupted erasure and "
+                      "removed 1 pre-migration snapshot(s).", out)
+        self.assertFalse(snap.exists())
+
+    def test_a_terminal_record_that_cannot_be_written_keeps_the_count(self):
+        # `ErasureRecordUnwritten` carries what the sweep removed; the reply
+        # used to drop that account and say nothing of the snapshot.
+        self._populate()
+        self._snapshot()
+        real_write = os.write
+        seen = []
+
+        def write(fd, data):
+            if b" erase " in data and data.rstrip().endswith(b"committed") \
+                    and not seen:
+                seen.append(1)
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+        with mock.patch.object(backups.os, "write", write):
+            out = call("delete_all_data")
+        self.assertEqual(seen, [1])
+        self.assertIn("1 pre-migration snapshot(s) were erased too", out)
+        self.assertEqual(self._files_holding(SESSION_ID), [])
+
+    def test_a_sweep_that_cannot_list_the_ledger_directory_names_the_snapshots(self):
+        # The sweep stops without a count, so it cannot say the snapshots
+        # went: the by-hand instruction has to name them.
+        self._populate()
+        self._snapshot()
+        real_iterdir = pathlib.Path.iterdir
+        ledger_dir = self.root
+
+        def iterdir(p):
+            if p == ledger_dir:
+                raise OSError(errno.EACCES, "Permission denied")
+            return real_iterdir(p)
+        with mock.patch.object(pathlib.Path, "iterdir", iterdir):
+            out = call("delete_all_data")
+        self.assertIn("the ledger's directory could not be read", out)
+        self.assertIn("f.sqlite.pre-migration-*", out)
+
+
 class TestACopyTakenWhileTheBanksAnswerDoesNotSurvive(DestructiveBase):
     """The banks are asked outside every lock, after the first sweep. A backup
     another process takes then copies the `sessions` rows — bank-session
@@ -3088,7 +3314,7 @@ class TestACopyTakenWhileTheBanksAnswerDoesNotSurvive(DestructiveBase):
         self.assertIn("Withdrawn at the bank: 1 consent(s)", out)
         self.assertEqual(self.count("sessions"), 0)
         self.assertEqual(list(paths.backups_dir.glob("*.sqlite")), [])
-        self.assertIn("1 backup copy(ies) and 0 partial copy(ies) found after "
+        self.assertIn("1 backup copy(ies) found after "
                       "the banks were asked were erased too", out)
         self.assertEqual(self._files_holding(SESSION_ID), [])
 
@@ -3193,7 +3419,7 @@ class TestRecoveryThatErasedCopiesIsNotNothing(DestructiveBase):
         self.assertNotIn("Nothing was erased", out)
         self.assertIn("An erasure recorded earlier was completed by this "
                       "call's settlement: every backup copy is gone (1 "
-                      "removed now), but the index record confirming it could "
+                      "backup copy(ies) removed now), but the index record confirming it could "
                       "not be written (the backup index could not be written: "
                       "ENOSPC); it will be written at the next settlement", out)
         self.assertFalse(tools_read.CONN.in_transaction)
