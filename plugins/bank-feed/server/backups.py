@@ -70,7 +70,11 @@ class BackupError(Exception):
 
 class SettleLog:
     """Every write settlement made during ONE dispatched tool call (issues #48,
-    #53), recorded where it happened rather than carried on the objects a
+    #53), recorded where it happened. It holds the LATEST STATE PER OBJECT —
+    a record, a copy, the header — never a list of attempts: a call can
+    settle twice (the open-time pass, then the tool's own), and an attempt
+    whose write was uncertain is superseded by a retry that landed rather
+    than published beside it. Each field is keyed accordingly rather than carried on the objects a
     settlement returns or raises: an exit that drops those objects (a raw
     `OSError`, a failed COMMIT after settlement, the open-time pass that
     swallows its own failures) cannot drop what is already written here.
@@ -88,10 +92,12 @@ class SettleLog:
         self.torn: list = []
         #: Pending backups whose `.partial` settlement unlinked.
         self.partials: list = []
-        #: (kind, op_id, terminal, written) per pending record closed;
-        #: `written` is True, or None for "may have been recorded".
-        self.closed: list = []
-        #: A header write that failed part way and could not be cut back.
+        #: (kind, op_id) -> (terminal, written) per pending record closed;
+        #: `written` is True, or None for "may have been recorded". A later
+        #: definite write replaces an uncertain one, never the reverse.
+        self.closed: dict = {}
+        #: A header write that failed part way and could not be cut back —
+        #: cleared when a later settlement in the call writes it whole.
         self.torn_header = False
         #: erase op_id -> {"attempts": [Erasure, ...], "absent": {copy id:
         #: True, or None when its `prune` record MAY have been written — a
@@ -179,7 +185,7 @@ def render_log(log) -> str:
         parts.append("removed the unfinished cop%s of interrupted backup%s %s"
                      % ("y" if one else "ies", "" if one else "s",
                         ", ".join(log.partials)))
-    for kind, op, terminal, written in log.closed:
+    for (kind, op), (terminal, written) in log.closed.items():
         parts.append("%s interrupted %s %s as %s"
                      % ("recorded" if written else "may have recorded",
                         kind, op, terminal))
@@ -682,10 +688,17 @@ def _closing(handle, log, kind: str, op: str, terminal: str) -> None:
         handle.append(kind, op, terminal)
     except BackupError as exc:
         if log is not None and exc.written is not False:
-            log.closed.append((kind, op, terminal, exc.written))
+            _closed(log, kind, op, terminal, exc.written)
         raise
     if log is not None:
-        log.closed.append((kind, op, terminal, True))
+        _closed(log, kind, op, terminal, True)
+
+
+def _closed(log, kind: str, op: str, terminal: str, written) -> None:
+    """Record one closure, keeping the most certain outcome per record."""
+    prior = log.closed.get((kind, op))
+    if prior is None or not prior[1]:
+        log.closed[(kind, op)] = (terminal, written)
 
 
 def settle(conn, paths: Paths, *, hold: bool = True):
@@ -759,11 +772,16 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                             log.torn_header = True
                         raise
                     raise
+                if log is not None:
+                    # A header an earlier attempt in this call may have
+                    # left torn is now whole: that residue is superseded.
+                    log.torn_header = False
                 if log is not None and had_index:
                     # An index that existed empty (a torn header cut back
                     # to nothing) got its header rewritten. A NEW index is
                     # already recorded as created.
-                    log.created.append("backup index's header")
+                    if "backup index's header" not in log.created:
+                        log.created.append("backup index's header")
                 os.fsync(fd)
                 raw = header
         except OSError as exc:

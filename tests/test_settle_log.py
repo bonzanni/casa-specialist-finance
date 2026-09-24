@@ -305,6 +305,56 @@ class TestUncertainWritesAreWordedAsUncertain(Cold):
             LEAD + "may have left part of a header in the backup index "
             "(the next settlement cuts it).\n"), out)
 
+    def test_a_torn_header_repaired_later_in_the_call_is_not_reported(self):
+        # Astra, code round 2: the open-time pass tore the header, the
+        # listing's own settlement wrote it whole, and the reply still
+        # published the superseded residue.
+        self.warm()
+        self._close()
+        self.paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        self.paths.index.write_bytes(b"")
+        real_write, real_trunc = backups._write_whole, os.ftruncate
+        armed = [True]
+
+        def write(fd, data):
+            if armed[0]:
+                real_write(fd, data[:9])
+                raise OSError(28, "No space left on device")
+            return real_write(fd, data)
+
+        def ftruncate(fd, n):
+            if armed[0]:
+                armed[0] = False
+                raise OSError(5, "Input/output error")
+            return real_trunc(fd, n)
+        with mock.patch.object(backups, "_write_whole", write), \
+                mock.patch.object(backups.os, "ftruncate", ftruncate):
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertEqual(self.index_lines()[0], backups.INDEX_HEADER)
+        self.assertNotIn("may have left part of a header", out)
+        self.assertIn("Restore generation: 0", out)
+
+    def test_a_closure_retried_in_the_same_call_is_said_once(self):
+        # Astra, code round 2: the uncertain open-time closure and the
+        # listing's successful retry were both published.
+        self.backups_taken(1)
+        self.append_index("backup 1111111111111111 pending reason=manual")
+        real = backups.IndexHandle.append
+        armed = [True]
+
+        def append(handle, *fields):
+            if fields[:1] == ("backup",) and fields[2:3] == ("aborted",) \
+                    and armed[0]:
+                armed[0] = False
+                raise backups.BackupError("torn", written=None)
+            return real(handle, *fields)
+        with mock.patch.object(backups.IndexHandle, "append", append):
+            out = dispatch("list_backups", data_dir=self.data)
+        self.assertIn("recorded interrupted backup 1111111111111111 as "
+                      "aborted", out)
+        self.assertNotIn("may have recorded", out)
+        self.assertEqual(out.count("1111111111111111 as aborted"), 1, out)
+
     def test_a_rename_failure_whose_abort_record_is_unflushed_says_so(self):
         self.warm()
         real_rename, real_append = os.rename, backups.IndexHandle.append
@@ -374,29 +424,53 @@ class TestTheClaimHasOneSpelling(unittest.TestCase):
             left, right = self._static(node.left), self._static(node.right)
             if left is None and right is None:
                 return None
-            return (left or self.HOLE) + (right or self.HOLE)
+            # `is None`, never truthiness: an empty constant is text, and
+            # treating it as a hole split "Nothing" + "" + " was changed."
+            return self._or_hole(left) + self._or_hole(right)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             fmt = self._static(node.left)
             if fmt is None:
                 return None
+            if isinstance(node.right, ast.Dict):
+                named = {self._static(k): self._or_hole(self._static(v))
+                         for k, v in zip(node.right.keys, node.right.values)
+                         if k is not None}
+                return re.sub(r"%\(([^)]*)\)[-#0 +]*\d*(?:\.\d+)?[sdrfx]",
+                              lambda m: named.get(m.group(1), self.HOLE), fmt)
             args = (node.right.elts if isinstance(node.right, ast.Tuple)
                     else [node.right])
-            vals = iter([self._static(a) or self.HOLE for a in args])
+            vals = iter([self._or_hole(self._static(a)) for a in args])
             return re.sub(r"%[-#0 +]*\d*(?:\.\d+)?[sdrfx]",
                           lambda m: next(vals, self.HOLE), fmt)
         if isinstance(node, ast.JoinedStr):
             return "".join(
                 v.value if isinstance(v, ast.Constant)
-                else (self._static(v.value) or self.HOLE)
+                else self._or_hole(self._static(v.value))
                 for v in node.values)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "format"):
             fmt = self._static(node.func.value)
             if fmt is None:
                 return None
-            vals = iter([self._static(a) or self.HOLE for a in node.args])
-            return re.sub(r"\{[^{}]*\}", lambda m: next(vals, self.HOLE), fmt)
+            pos = [self._or_hole(self._static(a)) for a in node.args]
+            kw = {k.arg: self._or_hole(self._static(k.value))
+                  for k in node.keywords if k.arg}
+            auto = iter(range(len(pos)))
+
+            def field(m):
+                name = m.group(1).split("!")[0].split(":")[0]
+                if name == "":
+                    i = next(auto, None)
+                    return pos[i] if i is not None else self.HOLE
+                if name.isdigit():
+                    i = int(name)
+                    return pos[i] if i < len(pos) else self.HOLE
+                return kw.get(name, self.HOLE)
+            return re.sub(r"\{([^{}]*)\}", field, fmt)
         return None
+
+    def _or_hole(self, text):
+        return self.HOLE if text is None else text
 
     def _claims(self, source, name="<test>"):
         tree = ast.parse(source)
@@ -427,7 +501,12 @@ class TestTheClaimHasOneSpelling(unittest.TestCase):
                        'x = "{} was changed.".format("Nothing")',
                        "x = f\"{'Nothing'} was changed.\"",
                        'x = "%s was deleted." % "nothing"',
-                       'x = "a; nothing has been " + "removed"'):
+                       'x = "a; nothing has been " + "removed"',
+                       # Astra, code round 2: each passed the gate.
+                       'x = "Nothing" + "" + " was changed."',
+                       'x = "{claim} was changed.".format(claim="Nothing")',
+                       'x = "{1} was changed.".format("Other", "Nothing")',
+                       'x = "%(claim)s was deleted." % {"claim": "Nothing"}'):
             with self.subTest(source=source):
                 self.assertTrue(self._claims(source), source)
         self.assertFalse(self._claims('x = "a " + backups.unchanged()'))
