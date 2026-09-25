@@ -818,6 +818,88 @@ class TestPurge(DestructiveBase):
         self.assertIn("1 dropped and 1 trimmed", out)
         self.assertIn("NOT PROVEN", out)
 
+    def test_the_output_counts_rows_kept_to_keep_a_chain_whole(self):
+        # Issue #56. The chain itself is pinned on the reconcile path in
+        # test_apply; this is the operator's half: "booked before X" rows
+        # remain, and the reply must not let "Purged ... before X" read as
+        # "nothing older than X is left".
+        self.account()
+        self.tx(ik="pending", booking_date="2023-12-30")
+        self.tx(ik="booked", booking_date="2024-01-02")
+        self.tx(ik="alone", booking_date="2023-06-01")
+        pending, booked = [r[0] for r in self.raw.execute(
+            "SELECT row_id FROM transactions WHERE identity_key IN"
+            " ('pending', 'booked') ORDER BY booking_date")]
+        self.raw.execute("UPDATE transactions SET state='superseded',"
+                         " superseded_by=? WHERE row_id=?", (booked, pending))
+        out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertEqual(sorted(r[0] for r in self.raw.execute(
+            "SELECT identity_key FROM transactions")), ["booked", "pending"])
+        self.assertIn("Purged 1 transaction(s) booked before 2024-01-01", out)
+        self.assertIn("1 transaction(s) booked before 2024-01-01 were kept",
+                      out)
+
+    def _straddling_chain(self, successor_date="2024-01-02"):
+        """A pending row before 2024-01-01 superseded by `successor_date`,
+        each carrying one note and one tag. -> (pending, successor)."""
+        self.tx(ik="pending", booking_date="2023-12-30")
+        self.tx(ik="booked", booking_date="2024-06-01")
+        pending, booked = [r[0] for r in self.raw.execute(
+            "SELECT row_id FROM transactions WHERE identity_key IN"
+            " ('pending', 'booked') ORDER BY booking_date")]
+        self.raw.execute("UPDATE transactions SET booking_date=? WHERE"
+                         " row_id=?", (successor_date, booked))
+        self.raw.execute("UPDATE transactions SET state='superseded',"
+                         " superseded_by=? WHERE row_id=?", (booked, pending))
+        for rid in (pending, booked):
+            self.raw.execute(
+                "INSERT INTO transaction_notes(row_id, author, note,"
+                " created_at) VALUES (?, 'operator', 'n', '2026-01-01')",
+                (rid,))
+            self.raw.execute(
+                "INSERT INTO transaction_tags(row_id, tag, added_at)"
+                " VALUES (?, 't', '2026-01-01')", (rid,))
+        return pending, booked
+
+    def test_a_chain_held_by_an_undated_row_is_not_said_to_be_dated(self):
+        # The schema allows a NULL booking_date, and NULL is never selected
+        # by a dated purge. The reply must not claim the chain has a row on
+        # or after the date when the row that holds it has no date at all.
+        self.account()
+        self._straddling_chain(successor_date=None)
+        out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertEqual(self.count("transactions"), 2)
+        self.assertIn("1 transaction(s) booked before 2024-01-01 were kept",
+                      out)
+        self.assertIn("or with no booking date", out)
+
+    def test_keep_leaves_a_kept_rows_notes_and_tags_in_place(self):
+        self.account()
+        pending, _ = self._straddling_chain()
+        out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertEqual((self.raw.execute(
+            "SELECT COUNT(*) FROM transaction_notes WHERE row_id=?",
+            (pending,)).fetchone()[0], self.raw.execute(
+            "SELECT COUNT(*) FROM transaction_tags WHERE row_id=?",
+            (pending,)).fetchone()[0]), (1, 1))
+        self.assertIn("0 note(s) and 0 tag(s) went with the purged rows", out)
+
+    def test_erase_takes_a_kept_rows_notes_and_tags_and_counts_them(self):
+        self.account()
+        self._straddling_chain()
+        out = call("purge", before_date="2024-01-01", user_work="erase")
+        self.assertEqual(self.count("transactions"), 2)
+        self.assertEqual((self.count("transaction_notes"),
+                          self.count("transaction_tags")), (0, 0))
+        self.assertIn("2 note(s) and 2 tag(s), on surviving rows too", out)
+
+    def test_the_output_says_nothing_of_chains_when_none_was_kept(self):
+        self.account()
+        self.tx(ik="old", booking_date="2021-06-01")
+        out = call("purge", before_date="2024-01-01", user_work="keep")
+        self.assertNotIn("were kept", out)
+        self.assertNotIn("supersession", out)
+
     def test_a_date_that_is_not_exactly_YYYY_MM_DD_is_refused(self):
         # THE GUARD MUST BRANCH ON THE VALUE THAT DELETES. Validating
         # `date.fromisoformat(before[:10])` and then deleting with the RAW

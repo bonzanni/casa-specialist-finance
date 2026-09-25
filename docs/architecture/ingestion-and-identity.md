@@ -113,6 +113,16 @@ observation, that leaves rule 1 inert.
 rows and left the interval asserting they had been observed would report the deleted
 years as quiet ones.
 
+A dated purge deletes a supersession chain whole or not at all (issue #56). A chain is
+every row joined by `superseded_by`, in either direction; a booked row restated as
+pending and superseded again makes it longer than two. If any row of the chain is
+booked on or after the cutoff, every row of it stays, and the reply counts the rows
+before the cutoff it kept. Cut at the cutoff, the only link between a pending row and
+the row that replaced it would go with the deleted end, and a consumer tracking the
+payment could not tell an erased payment from one that lives on under another row id.
+Coverage is trimmed at the cutoff regardless: a kept row sits in a span that reads as
+not proven, which is true of it.
+
 ### What a renewal can reach
 
 Coverage records what was observed. It does not record what was **asked for**, and the
