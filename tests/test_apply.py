@@ -1774,10 +1774,14 @@ class TestPurgeKeepsSupersessionChainsWhole(Base):
                 (ids[0],)).fetchone()[0] for table in (
                     "transaction_refs", "transaction_notes",
                     "transaction_tags"))
+        # An unrelated row the purge DOES delete, so the delete statements
+        # run: with nothing doomed, a mutant that also swept the kept rows'
+        # annotations would never execute.
+        self._sync(row("2026-02-01", ref="R2", counterparty="Ander"))
         before = held()
         self.assertEqual(before[1:], (1, 1))
         stats = apply.purge_before(self.conn, "2026-03-01")
-        self.assertEqual(stats["refs"], 0)
+        self.assertEqual((stats["transactions"], stats["refs"]), (1, 1))
         self.assertEqual(held(), before)
 
 
