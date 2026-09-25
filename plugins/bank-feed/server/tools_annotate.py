@@ -68,7 +68,7 @@ def _invalid_tag(raw_value) -> str:
     """Refusal text for a tag outside the grammar. Deliberately silent about
     the `owner::` form: it must not nudge a classifier that wrote
     'food:groceries' into minting a namespace for hierarchy."""
-    return "invalid tag %r: %s. Nothing was changed." % (raw_value, TAG_RULE)
+    return "invalid tag %r: %s. %s" % (raw_value, TAG_RULE, backups.unchanged())
 
 
 def _normalize_tags(raw):
@@ -79,18 +79,18 @@ def _normalize_tags(raw):
     Duplicates collapsing AFTER normalization (' A ' and 'a') is fine.
     """
     if not isinstance(raw, list) or not raw:
-        return [], "tags must be a non-empty array. Nothing was changed."
+        return [], "tags must be a non-empty array. " + backups.unchanged()
     if len(raw) > MAX_TAGS_PER_CALL:
-        return [], ("at most %d tags per call (%d given). Nothing was "
-                    "changed." % (MAX_TAGS_PER_CALL, len(raw)))
+        return [], ("at most %d tags per call (%d given). %s"
+                    % (MAX_TAGS_PER_CALL, len(raw), backups.unchanged()))
     seen, out = set(), []
     for t in raw:
         # Type-checked, not coerced: the server invokes tool functions without
         # schema validation, and str() would silently mint tags 'none', 'true'
         # and '123' from JSON null/true/123.
         if not isinstance(t, str):
-            return [], ("tags must be strings (got %r). Nothing was changed."
-                        % (t,))
+            return [], ("tags must be strings (got %r). %s"
+                        % (t, backups.unchanged()))
         norm = t.strip().lower()
         if not TAG_RE.fullmatch(norm):
             return [], _invalid_tag(t)
@@ -106,16 +106,16 @@ def _normalize_row_ids(raw):
     schema validation. The cap fires on the RAW length,
     before dedupe, so the documented bound is the enforced one."""
     if not isinstance(raw, list) or not raw:
-        return [], "row_ids must be a non-empty array. Nothing was changed."
+        return [], "row_ids must be a non-empty array. " + backups.unchanged()
     if len(raw) > MAX_ROWS_PER_CALL:
-        return [], ("at most %d row_ids per call (%d given). Nothing was "
-                    "changed." % (MAX_ROWS_PER_CALL, len(raw)))
+        return [], ("at most %d row_ids per call (%d given). %s"
+                    % (MAX_ROWS_PER_CALL, len(raw), backups.unchanged()))
     seen, out = set(), []
     for rid in raw:
         # bool is an int subclass: True would silently address row #1.
         if isinstance(rid, bool) or not isinstance(rid, int):
-            return [], ("row_ids must be integers (got %r). Nothing was "
-                        "changed." % (rid,))
+            return [], ("row_ids must be integers (got %r). %s"
+                        % (rid, backups.unchanged()))
         if rid not in seen:
             seen.add(rid)
             out.append(rid)
@@ -130,7 +130,7 @@ def _load_row(c, row_id):
     """
     # bool is an int subclass: True would silently address row #1.
     if isinstance(row_id, bool) or not isinstance(row_id, int):
-        return None, "row_id must be an integer. Nothing was changed."
+        return None, "row_id must be an integer. " + backups.unchanged()
     rid = row_id
     row = c.execute(
         "SELECT row_id, account_id, state, superseded_by, booking_date,"
@@ -138,20 +138,20 @@ def _load_row(c, row_id):
         " WHERE row_id=?", (rid,)).fetchone()
     if row is None:
         return None, ("no transaction #%d — row handles come from "
-                      "list_transactions. Nothing was changed." % rid)
+                      "list_transactions. %s" % (rid, backups.unchanged()))
     if row["state"] == "superseded":
         return None, ("row #%d was superseded by #%s; annotate that row "
-                      "instead. Nothing was changed."
-                      % (rid, row["superseded_by"]))
+                      "instead. %s"
+                      % (rid, row["superseded_by"], backups.unchanged()))
     if row["state"] not in ("active", "vanished"):
         # An ALLOWLIST, not "anything that is not superseded": a
         # state this module has never heard of is a row whose semantics it
         # cannot vouch for — fail closed, the codebase's dominant-bug-shape
         # lesson (a guard must branch on the truth, not a proxy for it).
         return None, ("row #%d is in state %s, which the annotation tools "
-                      "do not touch. Nothing was changed."
+                      "do not touch. %s"
                       % (rid, row["state"] if isinstance(row["state"], str)
-                         and row["state"].isalnum() else "?"))
+                         and row["state"].isalnum() else "?", backups.unchanged()))
     return row, None
 
 
@@ -167,7 +167,7 @@ def _load_rows(c, row_ids):
     for rid in row_ids:
         row, refusal = _load_row(c, rid)
         if refusal:
-            problems.append(refusal.replace(" Nothing was changed.", ""))
+            problems.append(backups.strip_unchanged(refusal))
         else:
             rows.append(row)
     return rows, problems
@@ -210,16 +210,16 @@ def _workflow_args(args):
         return None, None, None
     if wf is None:
         return None, None, ("expected_generation is only meaningful with a workflow "
-                            "string. Nothing was changed.")
+                            "string. " + backups.unchanged())
     if not isinstance(wf, str) or not backups.WORKFLOW_RE.fullmatch(wf):
-        return None, None, "invalid workflow %r: %s. Nothing was changed." % (wf, WORKFLOW_RULE)
+        return None, None, "invalid workflow %r: %s. %s" % (wf, WORKFLOW_RULE, backups.unchanged())
     if eg is None:
         return None, None, ("a write carrying workflow %s must carry expected_generation "
                             "— the restore generation list_backups reported to this pass. "
-                            "Nothing was changed." % wf)
+                            "%s" % (wf, backups.unchanged()))
     if isinstance(eg, bool) or not isinstance(eg, int) or eg < 0:
         return None, None, ("expected_generation must be a non-negative integer. "
-                            "Nothing was changed.")
+                            + backups.unchanged())
     return wf, eg, None
 
 
@@ -235,7 +235,7 @@ def _namespaced_without_workflow(tags, workflow):
                 return ("%r belongs to another workflow (the '%s' namespace); writing "
                         "it needs that workflow's string in `workflow` and its "
                         "expected_generation, so a restore point precedes the first "
-                        "write. Nothing was changed." % (t, ns))
+                        "write. %s" % (t, ns, backups.unchanged()))
     return None
 
 
@@ -286,18 +286,17 @@ def _fenced_write(c, workflow, expected, validate, write):
                 state, handle = backups.settle(c, paths)
                 if expected != state.generation:
                     c.execute("ROLLBACK")
-                    return backups.settled_refusal(
-                        "the ledger was restored since this pass began (restore "
-                        "generation is %d, the pass expected %d) — re-read the "
-                        "ledger before writing. Nothing was changed."
-                        % (state.generation, expected), state)
+                    return ("the ledger was restored since this pass began "
+                            "(restore generation is %d, the pass expected %d) "
+                            "— re-read the ledger before writing. %s"
+                            % (state.generation, expected,
+                               backups.unchanged()))
             refusal, ctx = validate(c)
             if refusal:
                 c.execute("ROLLBACK")
-                # A settlement that completed an interrupted erasure removed
-                # copies before this refusal; its "Nothing was changed." would
-                # be false of the directory.
-                return backups.settled_refusal(refusal, state)
+                # Built AFTER the settlement above, so its "nothing" is
+                # already scoped when settlement wrote anything (#53).
+                return refusal
             if workflow is not None and (workflow not in state.registrations
                                          or workflow in state.broken):
                 # A REGISTRATION WHOSE COPY IS GONE RE-MINTS HERE. Refusing
@@ -328,13 +327,10 @@ def _fenced_write(c, workflow, expected, validate, write):
                 c.execute("ROLLBACK")
             if minted is not None:
                 _orphan_quietly(paths, handle, minted)
-            # An ErasureIncomplete out of `settle` above is not "nothing was
-            # changed": that settlement unlinked copies before it refused, and
-            # the text for what it did travels with the exception — or with
-            # the settled state, when the refusal came after it. A mint whose
-            # copy was already renamed into place says so: the copy exists,
-            # and only this write did not run.
-            text = backups.refusal_text(exc, state)
+            # What settlement did before this refusal is the dispatcher's
+            # sentence (#48). A mint whose copy was already renamed into place
+            # says so: the copy exists, and only this write did not run.
+            text = backups.refusal_text(exc)
             if exc.placed is not None:
                 text += " The write itself did not run."
             return text
@@ -416,7 +412,7 @@ def tag_transaction(args: dict) -> str:
             if why is not None:
                 problems.append("row #%d %s" % (row["row_id"], why))
         if problems:
-            return "; ".join(problems) + " Nothing was changed.", None
+            return "; ".join(problems) + " " + backups.unchanged(), None
         echo = _echo(rows)                     # before COMMIT, see _echo
         return None, {"rows": rows, "echo": echo,
                       "existing_by_row": existing_by_row}
@@ -477,7 +473,7 @@ def untag_transaction(args: dict) -> str:
     def validate(c):
         rows, problems = _load_rows(c, row_ids)
         if problems:
-            return "; ".join(problems) + " Nothing was changed.", None
+            return "; ".join(problems) + " " + backups.unchanged(), None
         echo = _echo(rows)                     # before COMMIT, see _echo
         return None, {"rows": rows, "echo": echo}
 
@@ -523,17 +519,17 @@ def add_note(args: dict) -> str:
     author = args.get("author")
     if author not in AUTHORS:
         return ("author must be 'user' or 'agent' — it records who is "
-                "speaking. Nothing was changed.")
+                "speaking. " + backups.unchanged())
     note = args.get("note")
     if not isinstance(note, str):
         # Type-checked, not coerced: str() would store JSON true as
         # "True", and `or ""` branched numeric zero into "empty".
-        return "note must be a string. Nothing was changed."
+        return "note must be a string. " + backups.unchanged()
     if not note.strip():
-        return "the note is empty. Nothing was changed."
+        return "the note is empty. " + backups.unchanged()
     if len(note) > NOTE_MAX:
         return ("notes are capped at %d characters (this one is %d). "
-                "Nothing was changed." % (NOTE_MAX, len(note)))
+                "%s" % (NOTE_MAX, len(note), backups.unchanged()))
     workflow, expected, refusal = _workflow_args(args)
     if refusal:
         return refusal
@@ -545,7 +541,7 @@ def add_note(args: dict) -> str:
     def validate(c):
         rows, problems = _load_rows(c, row_ids)
         if problems:
-            return "; ".join(problems) + " Nothing was changed.", None
+            return "; ".join(problems) + " " + backups.unchanged(), None
         echo = _echo(rows)                     # before COMMIT, see _echo
         return None, {"rows": rows, "echo": echo}
 
@@ -569,8 +565,8 @@ def _one_tag(value):
     """Normalize a single tag argument by the exact rules written tags
     obey. -> (tag, refusal-or-None)."""
     if not isinstance(value, str):
-        return None, ("tag names must be strings (got %r). Nothing was "
-                      "changed." % (value,))
+        return None, ("tag names must be strings (got %r). %s"
+                      % (value, backups.unchanged()))
     norm = value.strip().lower()
     if not TAG_RE.fullmatch(norm):
         return None, _invalid_tag(value)
@@ -633,8 +629,8 @@ def rename_tag(args: dict) -> str:
     if refusal:
         return refusal
     if old == new:
-        return ("old and new normalize to the same tag %r. Nothing was "
-                "changed." % old)
+        return ("old and new normalize to the same tag %r. %s"
+                % (old, backups.unchanged()))
     # Checked on the NAMES, before any lookup: moving a tag into, out of or
     # within another workflow's namespace would change what that workflow
     # asserts behind its back (issue #31) — including onto an unused name.
@@ -643,14 +639,14 @@ def rename_tag(args: dict) -> str:
         if ns is not None:
             return ("%r belongs to the '%s' workflow's namespace; rename_tag "
                     "only edits the classification vocabulary. Change it "
-                    "through the workflow that owns it. Nothing was changed."
-                    % (name, ns))
+                    "through the workflow that owns it. %s"
+                    % (name, ns, backups.unchanged()))
     merge = args.get("merge", False)
     if not isinstance(merge, bool):
         # Only a JSON boolean enables the irreversible path. isinstance,
         # not `in (True, False)`: Python equates 1 == True, so a numeric
         # merge would slip the membership check and WRITE.
-        return "merge must be boolean true or false. Nothing was changed."
+        return "merge must be boolean true or false. " + backups.unchanged()
     c = tools_read.conn()
     c.execute("BEGIN IMMEDIATE")
     try:
@@ -658,7 +654,7 @@ def rename_tag(args: dict) -> str:
                           " tag=?", (old,)).fetchone()[0]
         if not old_n and not _rule_tag_count(c, old):
             c.execute("ROLLBACK")
-            return "tag %r is not in use. Nothing was changed." % old
+            return "tag %r is not in use. %s" % (old, backups.unchanged())
         new_n = c.execute("SELECT COUNT(*) FROM transaction_tags WHERE"
                           " tag=?", (new,)).fetchone()[0]
         new_rules_n = _rule_tag_count(c, new)
@@ -670,8 +666,8 @@ def rename_tag(args: dict) -> str:
                     "rule(s) (%r is on %d row(s)). Renaming onto it "
                     "MERGES the two tags, which is irreversible — call "
                     "again with merge: true if that is what you mean. "
-                    "Nothing was changed."
-                    % (new, new_n, new_rules_n, old, old_n))
+                    "%s"
+                    % (new, new_n, new_rules_n, old, old_n, backups.unchanged()))
         c.execute("UPDATE OR IGNORE transaction_tags SET tag=? WHERE tag=?",
                   (new, old))
         collapsed = c.execute(
@@ -724,7 +720,7 @@ def delete_tag(args: dict) -> str:
         total = sum(buckets.values())
         if not total and not _rule_tag_count(c, tag):
             c.execute("ROLLBACK")
-            return "tag %r is not in use. Nothing was changed." % tag
+            return "tag %r is not in use. %s" % (tag, backups.unchanged())
         c.execute("DELETE FROM transaction_tags WHERE tag=?", (tag,))
         rules_changed, rules_deleted = _rewrite_rule_tags(c, tag, None)
         c.execute("COMMIT")

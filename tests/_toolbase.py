@@ -119,6 +119,24 @@ def call(name, **args):
     return Delivered(out) if isinstance(out, dict) else out
 
 
+def dispatch(name, data_dir=None, **args):
+    """The reply as the operator receives it: through the real dispatcher,
+    which is where settlement's work is rendered (issues #48, #53). `call`
+    reaches the tool function alone and never shows that sentence."""
+    env = dict(os.environ)
+    if data_dir is not None:
+        env["CLAUDE_PLUGIN_DATA"] = str(data_dir)
+    saved = dict(os.environ)
+    os.environ.clear(); os.environ.update(env)
+    try:
+        resp = bank_feed_server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}})
+    finally:
+        os.environ.clear(); os.environ.update(saved)
+    return resp["result"]["content"][0]["text"]
+
+
 class FakeBroker:
     """casa's deposit route, as `tools_auth.DEPOSIT_LINK` reaches it.
 

@@ -1916,7 +1916,7 @@ class TestStructuralGuarantees(Base):
         self.assertIsNone(tools_auth._require_declared("unlink_bank"))
         refusal = tools_auth._require_declared("a_tool_no_manifest_declares")
         self.assertIn("Refusing", refusal)
-        self.assertIn("Nothing has been changed", refusal)
+        self.assertIn("This call's own operation has changed nothing", refusal)
         self.assertIn("casa.protectedTools", refusal)
 
     def test_an_unknown_purpose_binds_nothing(self):

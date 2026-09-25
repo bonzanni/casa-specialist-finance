@@ -49,7 +49,7 @@ class TestValidate(unittest.TestCase):
             {"direction": "debit", "tags": ["snacks"]})
         self.assertIsNone(fields)
         self.assertIn("counterparty", refusal)
-        self.assertIn("Nothing was changed.", refusal)
+        self.assertIn("This call's own operation changed nothing.", refusal)
 
     def test_anchor_gap_reported_beside_other_problems(self):
         # A type-invalid anchor must NOT suppress the anchor problem — one
@@ -81,7 +81,7 @@ class TestValidate(unittest.TestCase):
     def test_amount_band_sane(self):
         _, r = rules.validate_rule(valid(amount_min_minor=-1,
                                          currency="EUR"))
-        self.assertIn("Nothing was changed.", r)
+        self.assertIn("This call's own operation changed nothing.", r)
         _, r = rules.validate_rule(valid(amount_min_minor=500,
                                          amount_max_minor=100,
                                          currency="EUR"))
@@ -127,9 +127,9 @@ class TestValidate(unittest.TestCase):
 
     def test_tags_reuse_row_tag_rules_and_refuse_workflow_tags(self):
         _, r = rules.validate_rule(valid(tags=["Bad Tag!"]))
-        self.assertIn("Nothing was changed.", r)
+        self.assertIn("This call's own operation changed nothing.", r)
         _, r = rules.validate_rule(valid(tags=[]))
-        self.assertIn("Nothing was changed.", r)
+        self.assertIn("This call's own operation changed nothing.", r)
         fields, r = rules.validate_rule(valid(tags=["food"]))
         self.assertIsNone(r)
         _, r = rules.validate_rule(valid(tags=["awaiting-operator"]))

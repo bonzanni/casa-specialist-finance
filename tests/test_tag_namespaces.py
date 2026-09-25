@@ -67,7 +67,7 @@ class TestGrammar(unittest.TestCase):
                     "acct::" + "b" * 33, "acct::-x", "acct ::x"):
             tags, refusal = self.norm(bad)
             self.assertEqual(tags, [], bad)
-            self.assertIn("Nothing was changed", refusal, bad)
+            self.assertIn("This call's own operation changed nothing", refusal, bad)
 
     def test_single_colon_refusal_does_not_suggest_a_namespace(self):
         # The classifier must not be nudged into minting namespaces for
@@ -188,7 +188,7 @@ class TestCapacity(LedgerCase):
                    workflow="owner@1", expected_generation=0)
         self.assertIn("Tagged 1 row", out)
         refused = call("tag_transaction", row_ids=[rid], tags=["one-more"])
-        self.assertIn("Nothing was changed", refused)
+        self.assertIn("This call's own operation changed nothing", refused)
 
     def test_per_namespace_cap(self):
         rid = self.row()
@@ -197,7 +197,7 @@ class TestCapacity(LedgerCase):
              workflow="owner@1", expected_generation=0)
         out = call("tag_transaction", row_ids=[rid], tags=["acct::extra"],
                    workflow="owner@1", expected_generation=0)
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertIn("acct", out)
         # A different namespace has its own budget.
         out = call("tag_transaction", row_ids=[rid], tags=["tax::q3"],
@@ -213,7 +213,7 @@ class TestCapacity(LedgerCase):
         self.assertEqual(len(self.tags_of(rid)), 64)
         out = call("tag_transaction", row_ids=[rid], tags=["n5::t"],
                    workflow="owner@1", expected_generation=0)
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertIn("64", out)
 
 
@@ -228,7 +228,7 @@ class TestRename(LedgerCase):
         for merge in (False, True):
             out = call("rename_tag", old="acct::matched",
                        new="invoice-confirmed", merge=merge)
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
             self.assertIn("acct", out)
         # The owner's retraction still lands.
         call("untag_transaction", row_ids=[self.rid], tags=["acct::matched"],
@@ -242,7 +242,7 @@ class TestRename(LedgerCase):
         for merge in (False, True):
             out = call("rename_tag", old="food", new="acct::matched",
                        merge=merge)
-            self.assertIn("Nothing was changed", out)
+            self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.rid), ["food"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM tag_rules"
                                            ).fetchone()[0], rule_before)
@@ -251,7 +251,7 @@ class TestRename(LedgerCase):
         call("tag_transaction", row_ids=[self.rid], tags=["acct::matched"],
              workflow="owner@1", expected_generation=0)
         out = call("rename_tag", old="acct::matched", new="acct::confirmed")
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
         self.assertEqual(self.tags_of(self.rid), ["acct::matched"])
 
     def test_classification_rename_unaffected(self):

@@ -11,7 +11,7 @@ import backups  # noqa: E402
 import tools_auth  # noqa: E402
 import tools_backup  # noqa: E402  (registration side effect)
 import tools_read  # noqa: E402
-from _toolbase import Base as _ToolBase, call  # noqa: E402
+from _toolbase import Base as _ToolBase, call, dispatch  # noqa: E402
 
 
 class Base(_ToolBase):
@@ -28,9 +28,9 @@ class TestBackupTool(Base):
     def test_backup_takes_weekly_or_manual_only(self):
         out = call("backup", reason="manual")
         self.assertRegex(out, r"Backup [0-9a-f]{16} written \(manual, \d+ bytes\)")
-        self.assertIn("Nothing was changed", call("backup", reason="install:acct@1.0.0"))
-        self.assertIn("Nothing was changed", call("backup", reason="daily"))
-        self.assertIn("Nothing was changed", call("backup"))
+        self.assertIn("This call's own operation changed nothing", call("backup", reason="install:acct@1.0.0"))
+        self.assertIn("This call's own operation changed nothing", call("backup", reason="daily"))
+        self.assertIn("This call's own operation changed nothing", call("backup"))
 
     def test_list_backups_shows_generation_backups_registrations_and_restores(self):
         call("backup", reason="weekly")
@@ -105,7 +105,7 @@ class TestAnIncompleteErasureIsStillReported(Base):
     """Settlement that unlinks copies and cannot unlink them all.
 
     By the time it can raise, the ledger's own erasure is already committed and
-    some whole-ledger copies are gone, so "Nothing was changed" — the sentence
+    some whole-ledger copies are gone, so "This call's own operation changed nothing" — the sentence
     every one of these tools printed for it — was false about the one event the
     operator most needed to hear about. The call itself really did not run, and
     that is the second half of the sentence, not the whole of it.
@@ -133,13 +133,19 @@ class TestAnIncompleteErasureIsStillReported(Base):
 
     def test_backup_reports_what_the_settlement_removed(self):
         doomed, removed = self._stuck_erasure()
-        out = call("backup", reason="manual")
+        out = dispatch("backup", reason="manual")
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("settlement removed 1 backup copy(ies)", out)
-        self.assertIn("1 whole copy(ies) could not be removed — EVERY BACKUP "
-                      "IS A WHOLE COPY OF THIS LEDGER, so the copies that may "
-                      "still be on disk hold this ledger's data. This call "
-                      "did not run.", out)
+        # Said ONCE, by the dispatcher, ahead of the tool's own refusal.
+        self.assertTrue(out.startswith(
+            "While settling the backup index, this call removed 1 backup "
+            "copy; recorded the removal of 1 backup copy. When this call "
+            "last released the backup index, a recorded erasure of the "
+            "backup copies was not finished: 1 whole copy still present — "
+            "EVERY BACKUP IS A WHOLE COPY OF THIS LEDGER"), out)
+        self.assertTrue(out.endswith(
+            "\nA recorded erasure of the backup copies could not be "
+            "finished, so this call did not run."), out)
+        self.assertEqual(out.count("still present"), 1, out)
         # It really did not run: no third copy, and the doomed one is what is
         # left of the two that were there.
         self.assertEqual([p.name for p in self.paths.backups_dir.iterdir()],
@@ -148,30 +154,31 @@ class TestAnIncompleteErasureIsStillReported(Base):
 
     def test_restore_backup_reports_it_too(self):
         doomed, _ = self._stuck_erasure()
-        out = call("restore_backup", backup_id=doomed)
+        out = dispatch("restore_backup", backup_id=doomed)
         self.assertNotIn("Nothing was changed", out)
-        self.assertIn("This call did not run.", out)
+        self.assertIn("this call removed 1 backup copy", out)
+        self.assertIn("was not finished: 1 whole copy still present", out)
+        self.assertIn("so this call did not run.", out)
 
     def test_list_backups_shows_the_residue_the_count_refers_to(self):
         # THE ONE CALL THAT CHANGES NOTHING STILL ANSWERS. Refusing it left the
         # operator told that a copy could not be removed and denied the only
         # in-tool view of which copy that is — while every other call refuses.
         doomed, removed = self._stuck_erasure()
-        out = call("list_backups")
-        # Whole copies and copies in flight are counted APART: a `.partial`
-        # never reached the index, so the listing below has no row for one and
-        # a single lumped count promised the operator rows that are not there.
-        # The set of calls that refuse is named exactly, and this listing --
+        out = dispatch("list_backups")
+        # What went and what is left is the dispatcher's sentence, once; the
+        # listing says the erasure is incomplete and shows the rows. The set
+        # of calls that refuse is named exactly, and this listing --
         # answered rather than refused -- is the proof a read is not in it.
-        self.assertIn("Backup erasure incomplete: settlement removed 1 backup "
-                      "copy(ies); 1 whole copy(ies) could not "
-                      "be removed — EVERY BACKUP IS A WHOLE COPY OF THIS "
-                      "LEDGER, so the copies that may still be on disk hold "
-                      "this ledger's data. No backup, restore, total erasure "
-                      "or workflow write runs until the erasure completes; "
-                      "reads, this one included, still answer. Every INDEXED "
-                      "copy is listed below — a copy in flight never reached "
-                      "the index and has no row.", out)
+        self.assertIn("this call removed 1 backup copy", out)
+        self.assertIn("was not finished: 1 whole copy still present", out)
+        self.assertIn("\nA recorded erasure of the backup copies could not "
+                      "be finished. Every INDEXED copy is listed below — a "
+                      "copy in flight never reached the index and has no "
+                      "row.", out)
+        # The blocked set and the residue are said once, by the dispatcher.
+        self.assertEqual(out.count("still present"), 1, out)
+        self.assertEqual(out.count("no backup, restore"), 1, out)
         self.assertRegex(out, r"%s  \d{8}T\d{6}Z  \d+ B  manual  committed"
                          % doomed)
         self.assertIn("%s  " % removed, out)
@@ -193,11 +200,11 @@ class TestAnIncompleteErasureIsStillReported(Base):
         def refuse(p, *a, **k):
             raise PermissionError(13, "Permission denied")
         pathlib.Path.unlink = refuse
-        out = call("list_backups")
+        out = dispatch("list_backups")
         pathlib.Path.unlink = real_unlink
-        self.assertIn("1 whole copy(ies) could not be removed", out)
-        self.assertIn("1 unfinished copy(ies) could not be removed", out)
-        self.assertNotIn("2 copy(ies) could not be removed", out)
+        self.assertIn("1 whole copy still present", out)
+        self.assertIn("1 unfinished copy still present", out)
+        self.assertNotIn("2 ", out.split("\n")[0])
 
 
 class TestRestoreTool(Base):
@@ -222,7 +229,7 @@ class TestRestoreTool(Base):
 
     def test_a_refusal_says_nothing_was_changed(self):
         out = call("restore_backup", backup_id="0000000000000000")
-        self.assertIn("Nothing was changed", out)
+        self.assertIn("This call's own operation changed nothing", out)
 
     def test_a_committed_restore_whose_index_record_fails_is_not_reported_as_a_refusal(self):
         # `backups.restore` COMMITs and THEN appends the terminal record. A
@@ -243,9 +250,8 @@ class TestRestoreTool(Base):
             out = call("restore_backup", backup_id=bid)
         self.assertNotIn("Nothing was changed", out)
         self.assertIn("Restored backup %s" % bid, out)
-        self.assertIn("The restore is complete; its index record could not be "
-                      "written (the backup index could not be written: ENOSPC) "
-                      "— it settles at the next listing.", out)
+        self.assertIn("The restore is complete; its index record could not be written "
+                      "(the backup index could not be written: ENOSPC).", out)
         # The rows really are restored, and the generation the next listing
         # reports is 1: the `pending` record plus the committed marker settle
         # the operation the append could not record.
@@ -277,9 +283,8 @@ class TestRestoreTool(Base):
         with mock.patch.object(backups.os, "write", write), \
                 mock.patch.object(backups.os, "fsync", fsync):
             out = call("restore_backup", backup_id=bid)
-        self.assertIn("The restore is complete; its index record was written "
-                      "but could not be flushed (the backup index could not "
-                      "be flushed: EIO); it is readable now.", out)
+        self.assertIn("The restore is complete; its index record was written but could "
+                      "not be flushed (the backup index could not be flushed: EIO).", out)
         self.assertNotIn("could not be written", out)
         self.assertNotIn("Nothing was changed", out)
         last = self.paths.index.read_text().splitlines()[-1].split()
@@ -291,7 +296,7 @@ class TestAPlacedCopyIsNotNothing(Base):
     """`take_backup` renames the copy into place and then flushes the
     directory. A flush that fails after the rename leaves a readable copy
     whose `pending` record the next settlement commits, so the refusal is
-    never "Nothing was changed"."""
+    never "This call's own operation changed nothing"."""
 
     def _break_dir_flush(self):
         import errno

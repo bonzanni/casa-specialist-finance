@@ -69,6 +69,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+import backups
 import apply
 import callbacks
 import casa_broker
@@ -399,8 +400,8 @@ def _require_declared(name: str):
     if name not in protected_tools():
         return ("Refusing: %s changes or destroys data and is NOT declared in "
                 "casa.protectedTools, so casa's authorization hook is not "
-                "gating it and no operator grant was demanded. Nothing has been "
-                "changed. Fix the plugin manifest." % name)
+                "gating it and no operator grant was demanded. %s Fix the "
+                "plugin manifest." % (name, backups.unchanged(perfect=True)))
     return None
 
 
@@ -1740,8 +1741,8 @@ def _reconcile(args: dict) -> str:
             lines.append(
                 "4. Application: GET /api/applications failed (%s) — "
                 "cannot tell whether '%s' exists, and creating blind is "
-                "how duplicates accumulate. Nothing was changed. "
-                "Stopping." % (type(exc).__name__, _app_name()))
+                "how duplicates accumulate. %s Stopping."
+                % (type(exc).__name__, _app_name(), backups.unchanged()))
             return "\n".join(lines)
         by_id = {str(a.get("app_id") or a.get("kid") or ""): a for a in apps}
         # The RECORDED binding outranks the name search: once this setup has
@@ -1799,7 +1800,7 @@ def _reconcile(args: dict) -> str:
                 "4. Application: the application this setup previously "
                 "bound (%s) is NO LONGER in the control-panel list. "
                 "Registering a replacement would orphan every bank "
-                "session that rode it, so nothing was created — "
+                "session that rode it, so no application was created — "
                 "re-registration is an informed operator action. If "
                 "the app is truly gone and you accept "
                 "re-linking every bank, run the PROTECTED tool "
@@ -2161,7 +2162,7 @@ def accept_app_reregistration(args: dict) -> str:
     except Exception as exc:                     # noqa: BLE001
         return ("Could not verify the application's absence (%s) — "
                 "refusing to record an acceptance for a state that may "
-                "not exist. Nothing was changed." % type(exc).__name__)
+                "not exist. %s" % (type(exc).__name__, backups.unchanged()))
     ids = {str(a.get("app_id") or a.get("kid") or "") for a in apps}
     if recorded in ids:
         return ("The bound application (%s) is still registered — "
@@ -3781,8 +3782,8 @@ def consent_status(args: dict) -> str:
                 "all — though it does not by itself prove setup ever ran. "
                 "Consent status cannot be reported until the key is "
                 "fixed: re-check the 1Password item, then run setup_bank_feed. No "
-                "provider call was attempted and nothing has been changed."
-                % WIRE_KEY_VAR)
+                "provider call was attempted and %s"
+                % (WIRE_KEY_VAR, backups.unchanged(perfect=True, start=False)))
     state = provenance.check(c, fingerprint)
     if state.get("state") == "mismatch":
         lines.append(

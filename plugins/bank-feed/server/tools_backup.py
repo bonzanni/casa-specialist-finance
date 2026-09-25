@@ -67,7 +67,7 @@ def render_listing(state: backups.LedgerState) -> str:
 def backup(args: dict) -> str:
     reason = args.get("reason")
     if reason not in backups.REASONS:
-        return "reason must be 'weekly' or 'manual'. Nothing was changed."
+        return "reason must be 'weekly' or 'manual'. " + backups.unchanged()
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
     c.execute("BEGIN IMMEDIATE")
@@ -85,11 +85,9 @@ def backup(args: dict) -> str:
             c.execute("ROLLBACK")
         if handle is not None:
             handle.close()
-        # Neither an ErasureIncomplete out of `settle` nor a refusal after a
-        # settlement that completed an erasure is "nothing was changed": the
-        # settlement this call triggered removed copies, and the text for
-        # that lives with the exception and the settled state.
-        return backups.refusal_text(exc, state)
+        # What settlement did on the way is the dispatcher's sentence; this
+        # text says only what the backup itself did.
+        return backups.refusal_text(exc)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -103,24 +101,15 @@ def backup(args: dict) -> str:
         # already real and durable by the time retention can fail, so this
         # is never "nothing was changed" -- it is "one more thing than
         # retention managed to do", and the operator needs the id either way.
-        return _with_settled(
-            "Backup %s written (%s, %d bytes). %s; the backup itself is "
-            "complete." % (b.op_id, reason, b.size,
-                           backups.retention_failed(exc)), state)
+        return ("Backup %s written (%s, %d bytes). %s; the backup itself is "
+                "complete." % (b.op_id, reason, b.size,
+                               backups.retention_failed(exc)))
     finally:
         handle.close()
     out = "Backup %s written (%s, %d bytes)." % (b.op_id, reason, b.size)
     if pruned:
         out += " Retention pruned %s." % ", ".join(pruned)
-    return _with_settled(out, state)
-
-
-def _with_settled(text: str, state) -> str:
-    """A reply that SUCCEEDED still says what its settlement removed on the
-    way: completing an interrupted erasure changed the directory, and a
-    reply silent about it leaves the operator looking for files that went."""
-    note = backups.settled_note(state.settled if state is not None else None)
-    return text + " " + note if note else text
+    return out
 
 
 @register("list_backups",
@@ -136,9 +125,6 @@ def list_backups(args: dict) -> str:
     try:
         state, handle = backups.settle(c, paths)
         text = render_listing(state)          # captured under both locks
-        note = backups.settled_note(state.settled)
-        if note:
-            text = note + "\n" + text
         c.execute("COMMIT")
     except backups.BackupError as exc:
         # Guarded like every sibling: SQLite auto-rolls-back on SQLITE_FULL and
@@ -156,26 +142,24 @@ def list_backups(args: dict) -> str:
             # already detached from the index and the directory it was read
             # from, so nothing it prints can change under it.
             #
-            # `residue()` carries the counts, which is what keeps whole copies
-            # and copies in flight apart here: one lumped total promised rows
-            # that are not below it, because a `.partial` never reached the
-            # index and the listing has no line for one. The set of calls that
-            # refuse is named exactly — this listing is itself the proof that a
-            # read is not in it.
+            # What the erasure removed and what it left — whole copies and
+            # copies in flight apart — is the dispatcher's settlement
+            # sentence, rendered once ahead of this text (issues #48, #53);
+            # saying it here too would say it twice. The set of calls that
+            # refuse is named exactly — this listing is itself the proof that
+            # a read is not in it.
             #
             # The generation it prints counts committed restores only, and that
             # is complete here because a pending restore cannot coexist with a
             # pending erase: the `erase <op> pending` line is appended on the
             # handle of a settle that has already terminated every pending
             # restore, and no restore can start one while that record stands.
-            return ("Backup erasure incomplete: %s. No backup, restore, total "
-                    "erasure or workflow write runs until the erasure "
-                    "completes; reads, this one included, still answer. Every "
-                    "INDEXED copy is listed below — a copy in flight never "
-                    "reached the index and has no row.\n%s"
-                    % (exc.describe(), render_listing(exc.state)))
-        if exc.settled is not None:
-            return "%s. %s" % (exc, backups.settled_sentence(exc.settled))
+            # What is left, what that blocks and how to finish it is the
+            # dispatcher's lock-release sentence (state is said once, #48).
+            return ("A recorded erasure of the backup copies could not be "
+                    "finished. Every INDEXED copy is listed below — a copy in "
+                    "flight never reached the index and has no row.\n%s"
+                    % render_listing(exc.state))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is
@@ -208,7 +192,7 @@ def restore_backup(args: dict) -> str:
         return refusal
     backup_id = args.get("backup_id")
     if not isinstance(backup_id, str):
-        return "backup_id must be a string. Nothing was changed."
+        return "backup_id must be a string. " + backups.unchanged()
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
     c.execute("BEGIN IMMEDIATE")
@@ -219,17 +203,16 @@ def restore_backup(args: dict) -> str:
             return ("A bank authorization is in progress (a link or renewal "
                     "is completing), and a restore now could make its reply "
                     "wrong about which consent is live. Try again in a few "
-                    "minutes. Nothing was changed.")
+                    "minutes. " + backups.unchanged())
         state, handle = backups.settle(c, paths)
         r = backups.restore(c, paths, handle, state, backup_id,
                             schema_version=store.SCHEMA_VERSION)
     except backups.BackupError as exc:
         if c.in_transaction:
             c.execute("ROLLBACK")
-        # `state` is the settlement's: when it completed an interrupted
-        # erasure the copies it removed are gone whatever refused next — the
-        # restore of an id that erasure just removed is the ordinary case.
-        return backups.refusal_text(exc, state)
+        # A settlement that removed the very copy asked for is the ordinary
+        # case here; the dispatcher's sentence says what it removed.
+        return backups.refusal_text(exc)
     except Exception:
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -249,23 +232,11 @@ def restore_backup(args: dict) -> str:
                      % ", ".join(r.unregistered))
     if r.index_error:
         # The restore committed and only its terminal index record did not
-        # land. Saying "nothing was changed" here — which is what a
-        # BackupError out of that append used to produce — would be the one
-        # untrue sentence this whole subsystem exists to avoid. The three
-        # outcomes of the append are three different states of the index:
-        # a line that is readable now, a line that is absent, and a line
-        # that may stand part-written until a settlement cuts it.
-        if r.index_written is True:
-            lines.append("The restore is complete; its index record was "
-                         "written but could not be flushed (%s); it is "
-                         "readable now." % r.index_error)
-        elif r.index_written is None:
-            lines.append("The restore is complete; its index record may be "
-                         "partially written (%s); the next settlement "
-                         "recovers it." % r.index_error)
-        else:
-            lines.append("The restore is complete; its index record could "
-                         "not be written (%s) — it settles at the next "
-                         "listing." % r.index_error)
+        # land cleanly. That append is THIS call's event, worded once
+        # (`backups.record_event`); what the index holds afterwards is the
+        # dispatcher's lock-release sentence (#48).
+        lines.append("The restore is complete; %s."
+                     % backups.record_event("index", r.index_written,
+                                            r.index_error))
     lines.append(STALE_LINE)
     return "\n".join(lines)

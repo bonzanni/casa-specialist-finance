@@ -17,6 +17,7 @@ attempt is a refusal, never a hang.
 """
 from __future__ import annotations
 
+import contextvars
 import errno
 import fcntl
 import os
@@ -57,10 +58,296 @@ class BackupError(Exception):
 
     settled = None
     placed = None
+    #: Set when the failing operation had already written its own index
+    #: record (a `take_backup` whose rename failed): "nothing was changed"
+    #: is false of the index, so the refusal says the copy was not kept.
+    recorded = False
 
     def __init__(self, message: str = "", *, written: bool | None = False):
         super().__init__(message)
         self.written = written
+
+
+class SettleLog:
+    """What settlement did during ONE dispatched tool call, and what the
+    backup index looked like when the call last let go of it (issues #48,
+    #53). Two kinds of fact, never mixed:
+
+    EFFECTS are events. Each is logged by the code that performed it, once,
+    right after the syscall that makes the change returned — never before it,
+    never on an uncertain outcome — and counted, never de-duplicated. Only
+    settlement logs effects; a tool's own writes are the tool's to report.
+
+    STATE is read, never recorded: at every release of the index lock (every
+    writer holds it, so the last release follows the call's last write), and
+    it is worded as what the call SAW then — another process can change it the
+    moment the lock is released. A part that cannot be read claims nothing,
+    and never cancels an effect.
+
+    `bank_feed_server.handle` opens one per `tools/call` and renders it once,
+    on every exit (`render_log`). No tool renders settlement."""
+
+    def __init__(self):
+        #: Effects, in order: tuples whose first element names the kind.
+        self.effects: list = []
+        #: Settlement writes to the index whose outcome is unknown
+        #: (`BackupError.written` None): said only when the state below
+        #: cannot answer for what they left.
+        self.unverified = 0
+        #: Durability, the one state no read can see: a failed flush of
+        #: settlement's sets it; any later successful flush of the index in
+        #: the call clears it (an fsync flushes every earlier write).
+        self.unflushed = False
+        #: The latest lock-release observation (`_observe`), or None.
+        self.state = None
+
+    def effect(self, *fact) -> None:
+        self.effects.append(fact)
+
+
+_LOG: contextvars.ContextVar = contextvars.ContextVar("bank_feed_settle_log",
+                                                      default=None)
+
+
+def open_log():
+    """-> the token `close_log` takes. The dispatcher's, once per call."""
+    return _LOG.set(SettleLog())
+
+
+def close_log(token) -> str:
+    """Render the call's log and drop it; "" when there is nothing to say.
+    Never raises: a report must not cost the operator the reply."""
+    log = _LOG.get()
+    _LOG.reset(token)
+    try:
+        return render_log(log)
+    except Exception:                         # noqa: BLE001 — see docstring
+        return ""
+
+
+def _effect(*fact) -> None:
+    log = _LOG.get()
+    if log is not None:
+        log.effect(*fact)
+
+
+def unchanged(verb: str = "changed", *, perfect: bool = False,
+              start: bool = True, stop: bool = True) -> str:
+    """THE ONE SPELLING of a refusal's "nothing changed" (issue #53). It
+    claims only what is always true — what THIS call's own operation did —
+    because settlement may have changed the index or the backups directory
+    on the way, and the dispatcher's sentence says what it did."""
+    text = "%s own %s %s%s nothing" % (
+        "This call's" if start else "this call's",
+        "erasure" if verb == "erased" else "operation",
+        "has " if perfect else "", verb)
+    return text + ("." if stop else "")
+
+
+def record_event(what: str, written, error) -> str:
+    """THE ONE WORDING of a tool's own failed index append, as the EVENT it
+    was — what this call's write did — never as the index's state now, which
+    the dispatcher's lock-release sentence reports once (#48). `written` is
+    `BackupError.written`'s three outcomes."""
+    if written is True:
+        return ("its %s record was written but could not be flushed (%s)"
+                % (what, error))
+    if written is None:
+        return "writing its %s record failed part way (%s)" % (what, error)
+    return "its %s record could not be written (%s)" % (what, error)
+
+
+def no_other_copy_changed() -> str:
+    """The scoped form of "no other backup copy was changed"."""
+    return "This call's own erasure changed no other backup copy."
+
+
+def _observe(paths) -> dict:
+    """The state of the index and the copies beside it, read while the index
+    lock is still held. Every read is contained: an unreadable part is None,
+    and nothing is claimed about it."""
+    obs = {"paths": paths, "partial_tail": None, "pending_erase": None,
+           "whole": None, "partials": None, "snapshots": None,
+           "journals": None}
+    try:
+        raw = paths.index.read_bytes()
+        obs["partial_tail"] = bool(raw) and not raw.endswith(b"\n")
+        cut = raw[:raw.rfind(b"\n") + 1] if raw else b""
+        # Through settlement's own parser: an index settlement rejects is
+        # "unknown" here, never a naive reading of its lines.
+        pending = set()
+        for rec in (_parse(cut) if cut else []):
+            if rec["kind"] == "erase":
+                if rec["state"] == "pending":
+                    pending.add(rec["op_id"])
+                else:
+                    pending.discard(rec["op_id"])
+        obs["pending_erase"] = bool(pending)
+    except (OSError, BackupError):
+        pass
+    if obs["pending_erase"]:
+        try:
+            names = [p.name for p in paths.backups_dir.iterdir()]
+            obs["whole"] = sum(n.endswith(".sqlite") for n in names)
+            obs["partials"] = sum(n.endswith(".sqlite.partial") for n in names)
+        except FileNotFoundError:
+            obs["whole"] = obs["partials"] = 0
+        except OSError:
+            pass
+        try:
+            snaps = [p.name[len(paths.snapshot_prefix):]
+                     for p in paths.db.parent.iterdir()
+                     if p.name.startswith(paths.snapshot_prefix)]
+            obs["snapshots"] = sum(1 for s in snaps
+                                   if SNAPSHOT_STAMP_RE.fullmatch(s))
+            obs["journals"] = len(snaps) - obs["snapshots"]
+        except OSError:
+            pass
+    return obs
+
+
+def _observe_release(paths) -> None:
+    """Called at every release of the index lock, while it is still held."""
+    log = _LOG.get()
+    if log is None:
+        return
+    try:
+        log.state = _observe(paths)
+    except Exception:                         # noqa: BLE001 — never a refusal
+        log.state = None
+
+
+def _index_fsync(fd, *, settling: bool) -> None:
+    """fsync the index, keeping the call's one durability fact current: a
+    success flushes every earlier write to the file; a failure is
+    settlement's to report only when settlement made the write."""
+    log = _LOG.get()
+    try:
+        os.fsync(fd)
+    except OSError:
+        if log is not None and settling:
+            log.unflushed = True
+        raise
+    if log is not None:
+        log.unflushed = False
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return "%d %s" % (n, one if n == 1 else many)
+
+
+def render_log(log) -> str:
+    """Up to two sentences: what settlement DID (effects), then what the call
+    SAW when it last released the index (state). "" when neither says
+    anything."""
+    if log is None:
+        return ""
+    out = []
+    effects = _effects_phrase(log.effects)
+    if effects:
+        out.append("While settling the backup index, this call %s."
+                   % effects)
+    state = _state_phrase(log)
+    if state:
+        out.append("When this call last released the backup index, %s."
+                   % state)
+    return " ".join(out)
+
+
+def _effects_phrase(effects) -> str:
+    parts, n = [], {}
+    for fact in effects:
+        n[fact[0]] = n.get(fact[0], 0) + 1
+    for fact in effects:
+        if fact[0] == "created":
+            parts.append("created the %s" % fact[1])
+        elif fact[0] == "mode":
+            parts.append("reset the %s's permissions to %s (they were %s)"
+                         % fact[1:])
+    if n.get("header"):
+        parts.append("wrote the backup index's header")
+    if n.get("cut"):
+        parts.append("cut %s from the backup index"
+                     % ("an incomplete last line" if n["cut"] == 1 else
+                        "%d incomplete last lines" % n["cut"]))
+    gone = []
+    for kind, one, many in (("copy", "backup copy", "backup copies"),
+                            ("partial", "unfinished copy", "unfinished copies"),
+                            ("snapshot", "pre-migration snapshot",
+                             "pre-migration snapshots"),
+                            ("journal", "snapshot journal file",
+                             "snapshot journal files")):
+        k = sum(1 for f in effects if f[0] == "unlinked" and f[1] == kind)
+        if k:
+            gone.append(_count(k, one, many))
+    if gone:
+        parts.append("removed " + (", ".join(gone[:-1]) + " and " + gone[-1]
+                                   if len(gone) > 1 else gone[0]))
+    for fact in effects:
+        if fact[0] == "record" and fact[1] in ("backup", "restore"):
+            parts.append("recorded interrupted %s %s as %s" % fact[1:4])
+    prunes = sum(1 for f in effects if f[0] == "record" and f[1] == "prune")
+    if prunes:
+        parts.append("recorded the removal of %s"
+                     % _count(prunes, "backup copy", "backup copies"))
+    done = [f[2] for f in effects if f[0] == "record" and f[1] == "erase"]
+    for op in done:
+        parts.append("recorded pending erasure %s as complete" % op)
+    return "; ".join(parts)
+
+
+def _state_phrase(log) -> str:
+    st, parts = log.state, []
+    if st is not None and st["pending_erase"]:
+        left = []
+        if st["whole"]:
+            left.append("%s still present — EVERY BACKUP IS A WHOLE COPY OF "
+                        "THIS LEDGER, so they hold this ledger's data"
+                        % _count(st["whole"], "whole copy", "whole copies"))
+        if st["partials"]:
+            left.append("%s still present — not restorable, but holding "
+                        "this ledger's pages"
+                        % _count(st["partials"], "unfinished copy",
+                                 "unfinished copies"))
+        if st["snapshots"]:
+            left.append("%s beside the ledger still present — each a WHOLE "
+                        "COPY OF THIS LEDGER"
+                        % _count(st["snapshots"], "pre-migration snapshot",
+                                 "pre-migration snapshots"))
+        if st["journals"]:
+            left.append("%s beside a snapshot still present"
+                        % _count(st["journals"], "journal file",
+                                 "journal files"))
+        if st["whole"] is None or st["snapshots"] is None:
+            left.append("what is left could not be read")
+        text = "a recorded erasure of the backup copies was not finished"
+        text += (": " + "; ".join(left)) if left else (
+            " (every copy was gone; the next settlement records it complete)")
+        text += (". While an erasure is pending, no backup, restore, total "
+                 "erasure or workflow write runs (reads and every other call "
+                 "do); if it still is, any backup, restore, listing or "
+                 "workflow write retries it, or delete %s by hand"
+                 % by_hand_for(st))
+        parts.append(text)
+    if st is not None and st["partial_tail"]:
+        parts.append("the index ended in an incomplete line, which the next "
+                     "settlement cuts")
+    elif log.unverified and (st is None or st["partial_tail"] is None):
+        parts.append("a write of settlement's to the index had failed part "
+                     "way, and what it left could not be read back")
+    if log.unflushed:
+        parts.append("its last write to the index had not been flushed, so "
+                     "it may not survive a power loss")
+    return "; ".join(parts)
+
+
+def by_hand_for(st) -> str:
+    """`by_hand`, from an observation instead of an erasure's counts."""
+    what = st["paths"].backups_dir.name
+    if st["snapshots"] or st["journals"] or st["snapshots"] is None:
+        what += (" and the %s* files beside the ledger"
+                 % st["paths"].snapshot_prefix)
+    return what
 
 
 INDEX_HEADER = "bank-feed backup index v1"
@@ -154,12 +441,49 @@ def _write_whole(fd: int, data: bytes) -> None:
     """Write every byte of `data` or raise OSError. `os.write` may write a
     prefix and report it (a full disk, a file-size limit): the loop goes on
     while writes make progress, and a write that makes none is a failure,
-    never a silent stop with a prefix on disk."""
-    while data:
-        n = os.write(fd, data)
-        if n <= 0:
-            raise OSError(errno.EIO, "a write made no progress")
-        data = data[n:]
+    never a silent stop with a prefix on disk.
+
+    The OSError it raises carries `landed`: how many bytes `os.write`
+    returned before the failure — the only proof a later cut-back removed
+    anything."""
+    landed = 0
+    try:
+        while data:
+            n = os.write(fd, data)
+            if n <= 0:
+                raise OSError(errno.EIO, "a write made no progress")
+            landed += n
+            data = data[n:]
+    except OSError as exc:
+        exc.landed = landed
+        raise
+
+
+def _write_or_cut(fd: int, data: bytes, start: int, *, settling: bool) -> None:
+    """Write every byte of `data`, or cut the file back to `start`. THE ONE
+    write-and-cut-back of the index: its two callers (a record append, the
+    header) each reported the cut differently until it lived here.
+
+    On failure the OSError is re-raised carrying `cut`: None when the
+    cut-back returned, else the OSError of the cut that failed. For a
+    settlement write, a cut that removed bytes `os.write` PROVED landed is a
+    "cut" effect; a cut that failed is an unverified attempt, read back as
+    the index's tail at the release."""
+    try:
+        _write_whole(fd, data)
+    except OSError as exc:
+        try:
+            os.ftruncate(fd, start)
+        except OSError as cut:
+            exc.cut = cut
+            log = _LOG.get()
+            if log is not None and settling:
+                log.unverified += 1
+            raise exc
+        exc.cut = None
+        if settling and getattr(exc, "landed", 0) > 0:
+            _effect("cut")
+        raise
 
 
 def _fsync_dir(d: Path) -> None:
@@ -174,8 +498,23 @@ def _prepare(paths: Paths) -> None:
     _refuse_symlink(paths.backups_dir)
     _refuse_symlink(paths.index)
     try:
-        paths.backups_dir.mkdir(mode=0o700, exist_ok=True)
+        # CREATION IS THIS CALL'S mkdir SUCCEEDING, never an inference
+        # from an existence check: a check can race another process's
+        # create, or fail and read as "absent".
+        try:
+            paths.backups_dir.mkdir(mode=0o700)
+            created = True
+            _effect("created", "backups directory")
+        except FileExistsError:
+            created = False
+        try:
+            prior = stat.S_IMODE(os.lstat(str(paths.backups_dir)).st_mode)
+        except OSError:
+            prior = None                # unmeasured: no reset is claimed
         os.chmod(str(paths.backups_dir), 0o700)
+        if not created and prior is not None and prior != 0o700:
+            _effect("mode", "backups directory", "0700",
+                    oct(prior)[2:].zfill(4))
         # A freshly-created directory ENTRY is not durable until its PARENT
         # is fsynced -- that metadata lives in the parent's own blocks, not
         # the new directory's. Harmless to call unconditionally when the
@@ -191,15 +530,26 @@ def _acquire_index(paths: Paths) -> int:
     truncation lands at the real end, never past a NUL hole. Non-blocking,
     bounded: flock is not re-entrant in-process, and a blocking call from a
     path that already holds it would hang the MCP server for ever."""
+    # CREATION IS AN EFFECT ONLY WHEN THIS CALL'S OWN SYSCALL DID IT: an
+    # exclusive create that succeeded. A pre-check of existence would claim
+    # a file another process created between the check and the open.
+    flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
+    created = False
     try:
-        fd = os.open(str(paths.index),
-                     os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            fd = os.open(str(paths.index), flags | os.O_CREAT | os.O_EXCL,
+                         0o600)
+            created = True
+        except FileExistsError:
+            fd = os.open(str(paths.index), flags)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.EMLINK):
             raise BackupError("refusing %s: it is a symlink" % paths.index.name
                               ) from None
         raise BackupError("cannot open the backup index: %s" % _oserr(exc)
                           ) from None
+    if created:
+        _effect("created", "backup index")
     deadline = time.monotonic() + LOCK_WAIT_S
     while True:
         try:
@@ -209,18 +559,23 @@ def _acquire_index(paths: Paths) -> int:
             if time.monotonic() >= deadline:
                 os.close(fd)
                 raise BackupError(
-                    "the backup index is busy (another backup, restore or "
-                    "listing holds it); nothing was changed — try again"
+                    "the backup index was busy (another backup, restore or "
+                    "listing held it); %s — try again"
+                    % unchanged(start=False, stop=False)
                     ) from None
             time.sleep(_LOCK_POLL_S)
     try:
+        prior = stat.S_IMODE(os.fstat(fd).st_mode)
         os.fchmod(fd, 0o600)
+        if not created and prior != 0o600:
+            _effect("mode", "backup index", "0600", oct(prior)[2:].zfill(4))
         # Same durability note as `_prepare`: a freshly-CREATED index
         # file's directory entry needs its parent fsynced, or a crash right
         # after can lose the entry even though the header write below is
         # itself fsynced.
         _fsync_dir(paths.index.parent)
     except OSError as exc:
+        _observe_release(paths)         # the lock is released here too
         os.close(fd)
         raise BackupError("cannot prepare the backup index: %s" % _oserr(exc)
                           ) from None
@@ -241,16 +596,19 @@ class IndexHandle:
         #: complete, malformed line — one no settlement can remove — so this
         #: handle writes nothing more. A new settlement truncates the tail.
         self._poisoned = False
+        #: True while `settle` itself appends through this handle: its writes
+        #: are settlement's, and a tool's own appends after it are not.
+        self.settling = False
 
     def append(self, *fields: str) -> None:
         for f in fields:
             if not f or any(ch.isspace() for ch in f):
                 raise BackupError("index field is empty or carries whitespace")
         if self._poisoned:
-            raise BackupError("the backup index may end in a partial record "
-                              "from an earlier failed write; nothing more is "
-                              "written until the next settlement removes it",
-                              written=False)
+            raise BackupError("an earlier write through this handle failed "
+                              "part way and could not be cut back, so it "
+                              "writes nothing more; the next settlement cuts "
+                              "what that write left", written=False)
         data = (now_ts() + " " + " ".join(fields) + "\n").encode("ascii")
         # A RECORD IS WHOLE OR ABSENT. A write can land a prefix of the line
         # (a full disk, a file-size limit); the operation's next append would
@@ -271,22 +629,29 @@ class IndexHandle:
             raise BackupError("the backup index could not be written: %s"
                               % _oserr(exc), written=False) from None
         try:
-            _write_whole(self.fd, data)
+            _write_or_cut(self.fd, data, start, settling=self.settling)
         except OSError as exc:
-            try:
-                os.ftruncate(self.fd, start)
-                os.fsync(self.fd)
-            except OSError as cut:
+            if exc.cut is not None:
                 self._poisoned = True
                 raise BackupError(
                     "the backup index could not be written (%s) and the "
-                    "partial record could not be removed (%s); the next "
-                    "settlement removes it" % (_oserr(exc), _oserr(cut)),
-                    written=None) from None
+                    "partial record could not be removed (%s)"
+                    % (_oserr(exc), _oserr(exc.cut)), written=None) from None
+            # THE CUT RETURNED: the partial record is gone, and the append is
+            # "not written". Whether the cut is durable is state (the call's
+            # index-level flush fact), not a different outcome of this write.
+            try:
+                _index_fsync(self.fd, settling=self.settling)
+            except OSError:
+                pass
             raise BackupError("the backup index could not be written: %s"
                               % _oserr(exc), written=False) from None
+        # THE BYTES LANDED: settlement's record is an effect from here, flushed
+        # or not (durability is state).
+        if self.settling:
+            _effect("record", *fields[:3])
         try:
-            os.fsync(self.fd)
+            _index_fsync(self.fd, settling=self.settling)
         except OSError as exc:
             raise BackupError("the backup index could not be flushed: %s"
                               % _oserr(exc), written=True) from None
@@ -294,6 +659,8 @@ class IndexHandle:
     def close(self) -> None:
         if self._open:
             self._open = False
+            # STATE IS READ AT EVERY RELEASE, while the lock is still held.
+            _observe_release(self.paths)
             try:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
             finally:
@@ -319,13 +686,13 @@ def _parse(raw: bytes) -> list:
     try:
         text = raw[:cut].decode("utf-8")
     except UnicodeDecodeError:
-        raise BackupError("the backup index is unreadable (a line is not "
+        raise BackupError("the backup index was unreadable (a line is not "
                           "UTF-8)") from None
     complete = text.split("\n")[:-1]
     if not complete:
         return []
     if complete[0] != INDEX_HEADER:
-        raise BackupError("the backup index is unreadable (bad header)")
+        raise BackupError("the backup index was unreadable (bad header)")
     records = []
     seen_terminal = set()
     seen_pending = set()
@@ -333,7 +700,7 @@ def _parse(raw: bytes) -> list:
         parts = line.split(" ")
         if len(parts) < 4 or not TS_RE.fullmatch(parts[0]) \
                 or parts[1] not in _TERMINAL or not OP_ID_RE.fullmatch(parts[2]):
-            raise BackupError("the backup index is unreadable (line %d)" % n)
+            raise BackupError("the backup index was unreadable (line %d)" % n)
         ts, kind, op, state = parts[0], parts[1], parts[2], parts[3]
         # `seq` is the record's position in the index: the durable ORDER of
         # events. Timestamps are second-resolution and two backups in one
@@ -342,7 +709,7 @@ def _parse(raw: bytes) -> list:
         rec = {"ts": ts, "kind": kind, "op_id": op, "state": state, "seq": n}
         if kind == "prune":
             if state != "done" or len(parts) != 4:
-                raise BackupError("the backup index is unreadable (line %d)" % n)
+                raise BackupError("the backup index was unreadable (line %d)" % n)
         elif state == "pending":
             # Every op id is a fresh secrets.token_hex(8) mint -- a SECOND
             # pending record for the same (kind, op_id) is never
@@ -353,7 +720,7 @@ def _parse(raw: bytes) -> list:
             # terminal lines for one id, and the index then refuses its
             # own output on the very next settle.
             if (kind, op) in seen_pending:
-                raise BackupError("the backup index is unreadable (line %d:"
+                raise BackupError("the backup index was unreadable (line %d:"
                                   " a second pending record)" % n)
             seen_pending.add((kind, op))
             if kind == "erase":
@@ -362,7 +729,7 @@ def _parse(raw: bytes) -> list:
                 # every copy there is. A junk field is unreadable here for the
                 # same reason a missing one is unreadable below.
                 if len(parts) != 4:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
             else:
                 # The grammar is closed, not best-effort: exactly one extra
                 # field, exactly the key this record kind takes, nothing else.
@@ -373,25 +740,25 @@ def _parse(raw: bytes) -> list:
                 expected_key = "reason" if kind == "backup" else "backup"
                 extra = parts[4:]
                 if len(extra) != 1 or "=" not in extra[0]:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
                 key, _, value = extra[0].partition("=")
                 if key != expected_key or not value:
-                    raise BackupError("the backup index is unreadable (line %d)" % n)
+                    raise BackupError("the backup index was unreadable (line %d)" % n)
                 if kind == "backup":
                     if not reason_is_valid(value):
-                        raise BackupError("the backup index is unreadable (line %d)" % n)
+                        raise BackupError("the backup index was unreadable (line %d)" % n)
                     rec["reason"] = value
                 else:
                     if not OP_ID_RE.fullmatch(value):
-                        raise BackupError("the backup index is unreadable (line %d)" % n)
+                        raise BackupError("the backup index was unreadable (line %d)" % n)
                     rec["backup_id"] = value
         elif state in _TERMINAL[kind] and len(parts) == 4:
             if (kind, op) in seen_terminal:
-                raise BackupError("the backup index is unreadable (line %d:"
+                raise BackupError("the backup index was unreadable (line %d:"
                                   " a second terminal record)" % n)
             seen_terminal.add((kind, op))
         else:
-            raise BackupError("the backup index is unreadable (line %d)" % n)
+            raise BackupError("the backup index was unreadable (line %d)" % n)
         records.append(rec)
     return records
 
@@ -513,6 +880,7 @@ def settle(conn, paths: Paths, *, hold: bool = True):
     if not conn.in_transaction:
         raise BackupError("settle() needs the caller's BEGIN IMMEDIATE: the "
                           "ledger lock is taken before the index lock, always")
+    log = _LOG.get()
     _prepare(paths)
     fd = _acquire_index(paths)
     handle = None
@@ -532,7 +900,8 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 # refuse ("bad header") for ever.
                 cut = raw.rfind(b"\n") + 1
                 os.ftruncate(fd, cut)
-                os.fsync(fd)
+                _effect("cut")          # the line is gone, flushed or not
+                _index_fsync(fd, settling=True)
                 raw = raw[:cut]
             if not raw:
                 # THE HEADER IS WHOLE OR ABSENT, like every record. A prefix
@@ -543,12 +912,18 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 # starts from) and this settle refuses, returning no handle.
                 header = (INDEX_HEADER + "\n").encode("ascii")
                 try:
-                    _write_whole(fd, header)
-                except OSError:
-                    os.ftruncate(fd, 0)
-                    os.fsync(fd)
+                    _write_or_cut(fd, header, 0, settling=True)
+                except OSError as exc:
+                    if exc.cut is None:
+                        # Cut back to empty: flush it (durability is
+                        # state, a failed flush sets the call's fact).
+                        try:
+                            _index_fsync(fd, settling=True)
+                        except OSError:
+                            pass
                     raise
-                os.fsync(fd)
+                _effect("header")       # the write returned
+                _index_fsync(fd, settling=True)
                 raw = header
         except OSError as exc:
             raise BackupError(
@@ -556,6 +931,7 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                 % _oserr(exc)) from None
         records = _parse(raw)
         handle = IndexHandle(fd, paths, records)
+        handle.settling = True
         regs = _registrations(conn)
         state = _derive(records, paths, regs)
         marker = _marker(conn)
@@ -615,6 +991,8 @@ def settle(conn, paths: Paths, *, hold: bool = True):
                     paths.partial_file(op).unlink()
                 except FileNotFoundError:
                     pass
+                else:
+                    _effect("unlinked", "partial")
                 terminal = "aborted"
             handle.append("backup", op, terminal)
             b["state"] = terminal
@@ -637,10 +1015,14 @@ def settle(conn, paths: Paths, *, hold: bool = True):
         if handle is not None:
             handle.close()
         else:
+            _observe_release(paths)     # a release all the same
             os.close(fd)
         raise
     if settled.removed_any():
         state.settled = settled
+    # From here the handle is the CALLER's: what it appends is the tool's
+    # own operation, which its own reply reports.
+    handle.settling = False
     if not hold:
         handle.close()
         return state, None
@@ -721,7 +1103,21 @@ def take_backup(conn, paths: Paths, handle: IndexHandle, reason: str,
         os.rename(str(partial), str(final))
     except OSError as exc:
         abort_partial(paths, op_id)
-        raise BackupError("the backup could not be placed: %s" % _oserr(exc)) from None
+        # THIS CALL'S `pending` LINE IS IN THE INDEX, so the refusal is not
+        # "nothing was changed" (issue #53): the attempt is closed here, as
+        # the next settlement would close it, and the reply says the copy
+        # was not kept rather than that nothing happened.
+        try:
+            handle.append("backup", op_id, "aborted")
+            how = "this call recorded the attempt as aborted"
+        except BackupError as closing:
+            # This call's own event only; what the index holds afterwards
+            # is the dispatcher's lock-release sentence (#48).
+            how = record_event("abort", closing.written, closing)
+        placed = BackupError("the backup could not be placed (%s); %s"
+                             % (_oserr(exc), how))
+        placed.recorded = True
+        raise placed from None
     try:
         _fsync_dir(paths.backups_dir)
     except OSError as exc:
@@ -952,12 +1348,12 @@ class ErasureIncomplete(BackupError):
         if self.erasure.failed:
             clauses.append(
                 "%d whole copy(ies) could not be removed — EVERY BACKUP IS A "
-                "WHOLE COPY OF THIS LEDGER, so the copies that may still be "
-                "on disk hold this ledger's data" % self.erasure.failed)
+                "WHOLE COPY OF THIS LEDGER, so each holds this ledger's data"
+                % self.erasure.failed)
         if self.erasure.failed_partials:
             clauses.append(
                 "%d unfinished copy(ies) could not be removed — a partial "
-                "cannot be restored, but it still holds this ledger's pages"
+                "cannot be restored, but it holds this ledger's pages"
                 % self.erasure.failed_partials)
         if self.erasure.failed_snapshots:
             clauses.append(
@@ -977,8 +1373,8 @@ class ErasureIncomplete(BackupError):
             # No count: an earlier attempt's unlinks are as much at risk as
             # this one's, and this call cannot know how many those were.
             clauses.append(
-                "the directory holding them could not be flushed, so "
-                "removals made in this attempt are not yet durable")
+                "the directory holding them could not be flushed, so the "
+                "removals made in this attempt were not made durable")
         return "; ".join(clauses)
 
     def describe(self) -> str:
@@ -1037,64 +1433,30 @@ def by_hand(paths: Paths, er: Erasure | None) -> str:
     return what
 
 
-def settled_note(settled: Erasure | None) -> str:
-    """The sentence a reply adds when the settlement it ran removed files —
-    a call that SUCCEEDED as much as one that refused: completing an
-    erasure on the way is a change to the directory either way. "" when it
-    removed nothing."""
-    if settled is None or not settled.removed_any():
-        return ""
-    return ("Settlement first %s an interrupted erasure and removed %s."
-            % ("completed" if settled.finished else "resumed", settled.went()))
-
-
-def settled_sentence(settled: Erasure) -> str:
-    """The sentence a refusal ends with when the settlement it ran removed
-    copies: this call's own operation did not run, and the directory still
-    changed under it."""
-    text = ("This call did not run; settlement first %s an interrupted "
-            "erasure and removed %s"
-            % ("completed" if settled.finished else "resumed",
-               settled.went()))
-    if not settled.finished:
-        text += ", and the erasure is not finished yet"
-    return text + "."
-
-
-def refusal_text(exc: BackupError, state: LedgerState | None = None) -> str:
-    """What a tool says when `exc` made it refuse. Shared by the tools that
-    refuse on one, because the branch is about what the call DID, not about
-    any one tool: an `ErasureIncomplete` out of settlement has ALREADY
-    unlinked copies, so "Nothing was changed" is false — what it did leads,
-    and this call's own no-op follows it. The same holds for a refusal of
-    ANY cause after a settlement that completed an erasure: `exc.settled`
-    when settlement itself refused, `state.settled` when it succeeded and the
-    refusal came after it (a restore of an id that erasure just removed)."""
+def refusal_text(exc: BackupError) -> str:
+    """What a tool says when `exc` made it refuse. What settlement did on the
+    way — copies an interrupted erasure removed, what it left, records it
+    closed — is NOT said here: the call's `SettleLog` carries it and the
+    dispatcher renders it once, ahead of this text (issues #48, #53). This
+    text says only what THIS call's own operation did (`unchanged()`)."""
     if isinstance(exc, ErasureIncomplete):
-        return exc.describe() + ". This call did not run."
-    settled = exc.settled or (state.settled if state is not None else None)
+        return ("A recorded erasure of the backup copies could not be "
+                "finished, so this call did not run.")
     if exc.placed is not None:
-        text = ("Backup %s was written, but the directory holding it could "
+        return ("Backup %s was written, but the directory holding it could "
                 "not be flushed (%s); it may not survive a power loss. The "
                 "next listing settles it." % (exc.placed, exc))
-        if settled is not None:
-            text += " " + settled_note(settled)
-        return text
-    if settled is not None:
-        return "%s. %s" % (exc, settled_sentence(settled))
-    return "%s. Nothing was changed." % exc
+    if exc.recorded:
+        return "%s. This call's backup copy was not kept." % exc
+    return "%s. %s" % (exc, unchanged())
 
 
-def settled_refusal(text: str, state: LedgerState | None) -> str:
-    """A refusal a tool composed itself (not from an exception), after a
-    settlement that may have removed copies: its "Nothing was changed." is
-    replaced by what settlement did."""
-    if state is None or state.settled is None:
-        return text
-    body = text.rstrip()
-    if body.endswith("Nothing was changed."):
-        body = body[:-len("Nothing was changed.")].rstrip()
-    return body + " " + settled_sentence(state.settled)
+def strip_unchanged(text: str) -> str:
+    """`text` without its trailing `unchanged()` sentence, for a caller that
+    folds one refusal into a longer one and ends that with its own. Exact:
+    `unchanged()` is a constant."""
+    tail = " " + unchanged()
+    return text[:-len(tail)] if text.endswith(tail) else text
 
 
 def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
@@ -1125,6 +1487,10 @@ def erase_backups(paths: Paths, handle: IndexHandle, state: LedgerState,
 
     `out` is the account the counts go into; a caller passes its own so the
     counts of what went survive an exception raised part way.
+
+    When settlement runs it (`handle.settling`), each unlink and record is
+    an effect in the call's `SettleLog`; a tool's own erasure is reported by
+    the tool.
 
     PRECONDITION: the caller's ledger COMMIT has already happened (or
     settlement is completing an erasure whose COMMIT did) and `handle` (from
@@ -1188,8 +1554,12 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
             continue
         if suffix == ".sqlite.partial":
             out.partials += 1
+            if handle.settling:
+                _effect("unlinked", "partial")
             continue
         out.removed += 1
+        if handle.settling:
+            _effect("unlinked", "copy")
         # One audit record per INDEXED backup. A `.partial` never reached the
         # index (settle unlinks it and settles the operation `aborted`), and a
         # copy already recorded pruned needs no second line.
@@ -1272,6 +1642,8 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
             out.snapshots += 1
         else:
             out.snapshot_sidecars += 1
+        if handle.settling:
+            _effect("unlinked", "snapshot" if whole else "journal")
     # THE UNLINKS ARE NOT DURABLE UNTIL THE DIRECTORY IS. An entry's removal
     # lives in the directory's own blocks, not in the file's, so without this
     # flush a power loss after `erase <op> committed` can bring every unlinked
@@ -1331,6 +1703,7 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
         # just emptied. A failed WRITE is the other event: no terminal record
         # exists, the erasure is still pending, and the refusal is right.
         out.index_warning = str(exc)
+        return out
     return out
 
 

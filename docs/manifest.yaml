@@ -150,9 +150,11 @@
   covers:
     - plugins/bank-feed/server/backups.py::settle
     - plugins/bank-feed/server/store.py::_settle_best_effort
+    - plugins/bank-feed/server/bank_feed_server.py::handle
   tests:
     - tests/test_backups.py
     - tests/test_store.py
+    - tests/test_settle_log.py
   related: [architecture/backups-and-restore.md, architecture/backups-erasure.md]
 
 - doc: architecture/credentials.md
