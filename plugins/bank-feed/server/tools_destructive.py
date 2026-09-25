@@ -659,10 +659,11 @@ def purge(args: dict) -> str:
             # the first line when rows before X remain.
             lines.insert(1, (
                 "%d transaction(s) booked before %s were kept: each belongs "
-                "to a supersession "
-                "chain (a pending row and the row that replaced it) that has "
-                "a row on or after %s, and a chain is deleted whole or not "
-                "at all, so no surviving row points at an erased one."
+                "to a supersession chain (a pending row and the row that "
+                "replaced it) with a row this purge does not select — one "
+                "booked on or after %s, or with no booking date — and a "
+                "chain is deleted whole or not at all, so no surviving row "
+                "points at an erased one."
                 % (stats["kept_for_chains"], before, before)))
     if erase:
         lines.append(

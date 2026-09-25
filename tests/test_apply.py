@@ -1758,16 +1758,27 @@ class TestPurgeKeepsSupersessionChainsWhole(Base):
         self.assertEqual(set(ids) - {r["row_id"] for r in self._all()}, set())
         self.assertEqual(self._dangling(), 0)
 
-    def test_a_kept_row_keeps_its_reference_history(self):
+    def test_a_kept_row_keeps_its_references_notes_and_tags(self):
         ids = self._chain(("2026-02-27", "PDNG"), ("2026-03-02", "BOOK"))
-        refs = self.conn.execute(
-            "SELECT COUNT(*) FROM transaction_refs WHERE row_id=?",
-            (ids[0],)).fetchone()[0]
+        # Annotations on the SUPERSEDED row: migration moved the ones made
+        # before supersession, but one made after it stays put.
+        self.conn.execute(
+            "INSERT INTO transaction_notes(row_id, author, note, created_at)"
+            " VALUES (?, 'operator', 'n', '2026-03-03')", (ids[0],))
+        self.conn.execute("INSERT INTO transaction_tags(row_id, tag, added_at)"
+                          " VALUES (?, 't', '2026-03-03')", (ids[0],))
+
+        def held():
+            return tuple(self.conn.execute(
+                "SELECT COUNT(*) FROM %s WHERE row_id=?" % table,
+                (ids[0],)).fetchone()[0] for table in (
+                    "transaction_refs", "transaction_notes",
+                    "transaction_tags"))
+        before = held()
+        self.assertEqual(before[1:], (1, 1))
         stats = apply.purge_before(self.conn, "2026-03-01")
         self.assertEqual(stats["refs"], 0)
-        self.assertEqual(self.conn.execute(
-            "SELECT COUNT(*) FROM transaction_refs WHERE row_id=?",
-            (ids[0],)).fetchone()[0], refs)
+        self.assertEqual(held(), before)
 
 
 class TestPurgeDeletesAnnotations(Base):
