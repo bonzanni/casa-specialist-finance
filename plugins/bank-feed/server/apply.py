@@ -1092,6 +1092,46 @@ def purge_before(conn, cutoff: str, account_id=None) -> dict:
     return stats
 
 
+def _chain_members_kept(conn, candidates: set) -> set:
+    """The candidates a date purge must keep because their supersession
+    chain reaches a row that is not a candidate (issue #56).
+
+    A chain is every row joined by `superseded_by`, followed in either
+    direction: pending -> booked, and a booked row restated as pending and
+    superseded again makes it longer, so this is union-find over the whole
+    table rather than one hop. A chain is deleted whole or not at all. Cut
+    at the cutoff, the only link between a pending row and the booked row
+    that replaced it goes with whichever end was deleted, and a consumer
+    tracking the payment reads "erased" for a payment that still exists.
+
+    Across the whole table, not the purge's account scope: an edge never
+    crosses accounts (`apply_plan` scopes every supersede), and reading
+    wider cannot delete more. A `superseded_by` naming a row that does not
+    exist contributes no member and keeps nothing.
+    """
+    edges = [(r[0], r[1]) for r in conn.execute(
+        "SELECT row_id, superseded_by FROM transactions"
+        " WHERE superseded_by IS NOT NULL")]
+    if not edges:
+        return set()
+    parent = {}
+
+    def root(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in edges:
+        parent[root(a)] = root(b)
+    existing = {r[0] for r in conn.execute(
+        "SELECT row_id FROM transactions WHERE superseded_by IS NOT NULL"
+        " OR row_id IN (SELECT superseded_by FROM transactions)")}
+    blocked = {root(m) for m in existing if m not in candidates}
+    return {m for m in existing & candidates if root(m) in blocked}
+
+
 def purge_rows(conn, cutoff, account_id=None) -> dict:
     """The body of a purge, run INSIDE the caller's transaction: the `purge`
     tool takes its pre-erasure backup under the same write lock, and the copy
@@ -1102,10 +1142,15 @@ def purge_rows(conn, cutoff, account_id=None) -> dict:
     intervals wholly before the cutoff are dropped, and intervals that SPAN it
     are trimmed to start at it. `cutoff=None` is the whole-ledger purge: every
     row, and every interval, since nothing is left for one to attest.
+
+    A dated purge keeps a row booked before the cutoff whose supersession
+    chain reaches a row that stays (`_chain_members_kept`), and counts it in
+    `kept_for_chains`. Coverage is trimmed at the cutoff all the same: a kept
+    row sits in a span that reads NOT PROVEN, which is true of it.
     """
     scope = () if account_id is None else (account_id,)
     where = "" if account_id is None else " AND account_id=?"
-    stats = {"transactions": 0, "refs": 0,
+    stats = {"transactions": 0, "refs": 0, "kept_for_chains": 0,
              "coverage_dropped": 0, "coverage_trimmed": 0}
     if cutoff is None:
         doomed = [r[0] for r in conn.execute(
@@ -1114,6 +1159,9 @@ def purge_rows(conn, cutoff, account_id=None) -> dict:
         doomed = [r[0] for r in conn.execute(
             "SELECT row_id FROM transactions WHERE booking_date < ?" + where,
             (cutoff,) + scope)]
+        kept = _chain_members_kept(conn, set(doomed))
+        doomed = [rid for rid in doomed if rid not in kept]
+        stats["kept_for_chains"] = len(kept)
     for row_id in doomed:
         cur = conn.execute(
             "DELETE FROM transaction_refs WHERE row_id=?", (row_id,))

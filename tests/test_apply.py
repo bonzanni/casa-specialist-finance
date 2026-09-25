@@ -1674,6 +1674,102 @@ class TestFanInSupersede(Base):
             "SELECT row_id, tag FROM transaction_tags")], [(new_id, "shared")])
 
 
+class TestPurgeKeepsSupersessionChainsWhole(Base):
+    """Issue #56. A date purge deletes a row only when every row of its
+    supersession chain goes with it. A chain cut at the cutoff leaves a
+    downstream consumer unable to tell "this payment is gone" from "this
+    payment lives on under another row_id" -- and nothing inside bank-feed
+    notices, so these assert counts on the real reconcile -> apply_plan ->
+    purge path rather than any status."""
+
+    def _sync(self, *fetched):
+        return apply.apply_plan(self.conn, "acc1", ingest.reconcile(
+            self._all(), list(fetched), IV, CAP_STABLE))
+
+    def _dangling(self):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM transactions t WHERE t.superseded_by"
+            " IS NOT NULL AND NOT EXISTS (SELECT 1 FROM transactions s"
+            " WHERE s.row_id = t.superseded_by)").fetchone()[0]
+
+    def _chain(self, *steps):
+        """One payment, restated by the bank once per step, all under the
+        same reference. Returns the row_ids oldest first."""
+        for date, status in steps:
+            self._sync(row(date, ref="R1", status=status))
+        rows = self._all()
+        self.assertEqual(sum(r["state"] == "active" for r in rows), 1)
+        return [r["row_id"] for r in rows]
+
+    def test_a_pending_row_before_the_cutoff_stays_with_its_booked_successor(self):
+        ids = self._chain(("2026-02-27", "PDNG"), ("2026-03-02", "BOOK"))
+        self.assertEqual(len(ids), 2)
+        stats = apply.purge_before(self.conn, "2026-03-01")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (0, 1))
+        self.assertEqual([r["row_id"] for r in self._all()], ids)
+        self.assertEqual(self._dangling(), 0)
+
+    def test_a_successor_booked_before_the_cutoff_stays_with_its_predecessor(self):
+        # The reverse: the bank books the payment on a date EARLIER than the
+        # pending restatement carried.
+        ids = self._chain(("2026-03-02", "PDNG"), ("2026-02-27", "BOOK"))
+        self.assertEqual(len(ids), 2)
+        stats = apply.purge_before(self.conn, "2026-03-01")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (0, 1))
+        self.assertEqual([r["row_id"] for r in self._all()], ids)
+        self.assertEqual(self._dangling(), 0)
+
+    def test_a_three_row_chain_is_kept_by_its_middle_row(self):
+        # Reachable: a booked row restated as pending is updated in place,
+        # then superseded again -- A(02-10) -> B(02-09) -> C(02-12). Only B
+        # is before the cutoff, and it is linked to both ends.
+        ids = self._chain(("2026-02-10", "PDNG"), ("2026-02-09", "BOOK"),
+                          ("2026-02-09", "PDNG"), ("2026-02-12", "BOOK"))
+        self.assertEqual(len(ids), 3)
+        stats = apply.purge_before(self.conn, "2026-02-10")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (0, 1))
+        self.assertEqual(len(self._all()), 3)
+        stats = apply.purge_before(self.conn, "2026-02-11")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (0, 2))
+        self.assertEqual(len(self._all()), 3)
+        self.assertEqual(self._dangling(), 0)
+
+    def test_a_chain_wholly_before_the_cutoff_is_deleted_whole(self):
+        self._chain(("2026-02-10", "PDNG"), ("2026-02-09", "BOOK"),
+                    ("2026-02-09", "PDNG"), ("2026-02-12", "BOOK"))
+        stats = apply.purge_before(self.conn, "2026-02-13")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (3, 0))
+        self.assertEqual(self._all(), [])
+
+    def test_a_kept_chain_does_not_shelter_unrelated_rows(self):
+        ids = self._chain(("2026-02-27", "PDNG"), ("2026-03-02", "BOOK"))
+        self._sync(row("2026-02-01", ref="R2", counterparty="Ander"),
+                   row("2026-03-05", ref="R3", counterparty="Derde"))
+        stats = apply.purge_before(self.conn, "2026-03-01")
+        self.assertEqual((stats["transactions"], stats["kept_for_chains"]),
+                         (1, 1))
+        self.assertEqual(sorted(r["booking_date"] for r in self._all()),
+                         ["2026-02-27", "2026-03-02", "2026-03-05"])
+        self.assertEqual(set(ids) - {r["row_id"] for r in self._all()}, set())
+        self.assertEqual(self._dangling(), 0)
+
+    def test_a_kept_row_keeps_its_reference_history(self):
+        ids = self._chain(("2026-02-27", "PDNG"), ("2026-03-02", "BOOK"))
+        refs = self.conn.execute(
+            "SELECT COUNT(*) FROM transaction_refs WHERE row_id=?",
+            (ids[0],)).fetchone()[0]
+        stats = apply.purge_before(self.conn, "2026-03-01")
+        self.assertEqual(stats["refs"], 0)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM transaction_refs WHERE row_id=?",
+            (ids[0],)).fetchone()[0], refs)
+
+
 class TestPurgeDeletesAnnotations(Base):
     def test_purged_rows_lose_annotations_kept_rows_keep_them(self):
         plan = ingest.reconcile(

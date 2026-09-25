@@ -183,7 +183,9 @@ the names understate two of them and overstate one.
   is no default, so ask the operator: `keep` keeps the auto-tagging rules and
   every account label, category and include flag; `erase` deletes all of
   them and **every** note and tag, on the rows that survive a dated purge too.
-  Notes and tags always go with their rows. A whole-ledger purge also marks
+  Notes and tags always go with their rows. A dated purge deletes a pending
+  row and the row that replaced it together or not at all, so rows before the
+  date can remain; its reply counts them — relay that count. A whole-ledger purge also marks
   every account's history partial and resets cached balances; its reply names,
   per bank, what brings older history back from the bank (a renewal through
   `link_bank`, or `unlink_bank` then `link_bank`) — relay that list as printed.

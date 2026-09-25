@@ -497,7 +497,9 @@ def _reapproval_lines(c) -> list:
 @register("purge",
           "Really delete transactions — every one booked before a date, or "
           "the whole ledger with before_date='all' — with their notes and "
-          "tags, trim or drop the proven-coverage intervals to match, then "
+          "tags (a dated purge keeps a pending row and the row that "
+          "replaced it together, so it deletes such a pair only when both "
+          "are before the date), trim or drop the proven-coverage intervals to match, then "
           "VACUUM. user_work is required: 'keep' keeps auto-tagging rules and "
           "account labels, categories and include flags; 'erase' erases ALL "
           "of them and every note and tag, on surviving rows too. A backup is "
@@ -652,6 +654,16 @@ def purge(args: dict) -> str:
             "erased history must never come back as a confident answer."
             % (stats["coverage_dropped"], stats["coverage_trimmed"], before),
         ]
+        if stats["kept_for_chains"]:
+            # Issue #56: "purged everything before X" must not be read into
+            # the first line when rows before X remain.
+            lines.insert(1, (
+                "%d transaction(s) booked before %s were kept: each belongs "
+                "to a supersession "
+                "chain (a pending row and the row that replaced it) that has "
+                "a row on or after %s, and a chain is deleted whole or not "
+                "at all, so no surviving row points at an erased one."
+                % (stats["kept_for_chains"], before, before)))
     if erase:
         lines.append(
             "Erased with user_work=erase: %d note(s) and %d tag(s)%s, %d "
