@@ -280,11 +280,19 @@ class TestPluginManifest(unittest.TestCase):
         summary = {p["name"]: p["summary"]
                    for p in manifest["casa"]["protectedTools"]}
         purge = summary["purge"]
-        self.assertIn("keep = rules, account settings stay", purge)
-        self.assertIn("erase = ", purge)
+        self.assertIn("keep=rules, account settings;", purge)
+        self.assertIn("erase=ALL notes/tags/rules/settings", purge)
+        self.assertIn("(all: + balances)", purge)
+        # Coverage can prove a period had NO transactions; purging it loses
+        # that proof even when no row is deleted, so it is named (#65).
+        self.assertIn("notes/tags/coverage", purge)
         # "Backup first." read as an instruction; the tool backs up itself.
         for name in ("purge", "forget_local_account"):
             self.assertNotIn("Backup first", summary[name])
+            # Issue #65: a committed erasure prunes its class to the newest
+            # ERASURE_KEEP copies, which can end an older copy's restore.
+            self.assertIn("may drop oldest erasure backup",
+                          summary[name].lower())
         wipe = summary["delete_all_data"]
         self.assertIn("every plugin backup (not HA backups)", wipe)
         self.assertIn("withdraw", wipe)
