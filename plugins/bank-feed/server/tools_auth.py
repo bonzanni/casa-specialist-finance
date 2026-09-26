@@ -3232,6 +3232,78 @@ def _bind_first_link(c, fenced, attempt, *, records, session_id, secret, prior):
 _BINDERS = {"link": _bind_first_link, "renew": _bind_renewal}
 
 
+#: The provider operations `eb_ais.AIS` names in an `ApiError`, each with the
+#: step an operator would recognise. A FIXED map: an `op` outside it is not
+#: printed, so nothing an exception carries can reach a reply as free text.
+_FAILED_STEP = {"create_session": "the session exchange",
+                "transactions": "the history download",
+                "balances": "the balance download",
+                "application": "the application check",
+                "aspsps": "the bank list", "start_auth": "the authorization "
+                "start", "get_session": "the session lookup",
+                "delete_session": "the consent withdrawal"}
+
+
+def failure_cause(exc) -> str:
+    """Why an authorization's exchange raised, in a FIXED vocabulary (issue
+    #60). Recorded in `attempts.outcome` and printed by `collect_authorization`
+    and `consent_status`, so it is built only from literals, an HTTP status
+    integer and — as the last resort — `callbacks.default_cause`'s class name.
+    Never the exception's text: a provider body or an authorization code must
+    not be able to reach the ledger or a reply through it.
+
+    The status alone is what tells the cases in the issue apart: a rejected
+    date range is a 4xx on the history download, rate limiting is a 429, a
+    dropped socket is a network error.
+    """
+    if isinstance(exc, eb_ais.ApiError):
+        status = exc.status if isinstance(exc.status, int) \
+            and not isinstance(exc.status, bool) and 100 <= exc.status <= 599 \
+            else None
+        step = _FAILED_STEP.get(exc.op if isinstance(exc.op, str) else "")
+        return "%s was answered with %s" % (
+            step or "a provider call",
+            "HTTP %d" % status if status is not None else "an error status")
+    if isinstance(exc, httpx.RateLimited):
+        return "the provider rate-limited the request (HTTP 429)"
+    if isinstance(exc, httpx.TooLarge):
+        return "a provider response was larger than this plugin accepts"
+    if isinstance(exc, WorldMismatch):
+        return ("the application answering is not the one this mode is "
+                "configured for")
+    if isinstance(exc, WorldUnverified):
+        return "the application check could not be completed"
+    if isinstance(exc, callbacks.Indeterminate):
+        return "this collector lost its lease to another one"
+    if isinstance(exc, apply.RebindRefused):
+        return "binding an account would have re-bound one already linked"
+    if isinstance(exc, TimeoutError):
+        return "a provider call timed out"
+    if isinstance(exc, OSError):
+        return "a network error interrupted a provider call"
+    if isinstance(exc, sqlite3.Error):
+        return "a local database error"
+    if isinstance(exc, ValueError):
+        return "a provider response could not be read"
+    return callbacks.default_cause(exc)
+
+
+def retire_stale_failure_notes(c) -> int:
+    """Replace a failed backfill's advice on every account nothing is bound to.
+
+    `flows.FAILED_NOTE` says to re-run the backfill inside the authorization
+    window, which cannot apply once the account is released. `callbacks._contain`
+    rewrites the note in the same transaction as the release; this is the
+    repair for rows released before it did (issue #60). Keyed on the exact note
+    AND an absent binding, so a bound account's note is never touched.
+    """
+    return c.execute(
+        "UPDATE sync_state SET last_error=? WHERE resource='transactions'"
+        " AND last_error=? AND account_id IN (SELECT account_id FROM accounts"
+        " WHERE session_id IS NULL OR session_id='')",
+        (callbacks.RELEASED_NOTE, flows.FAILED_NOTE)).rowcount
+
+
 def _exchange(code: str, attempt: dict) -> None:
     """Injected into casa's collection loop: code -> provider session.
 
@@ -3325,24 +3397,26 @@ def _exchange(code: str, attempt: dict) -> None:
 
     # ---- verify BEFORE anything is bound ---------------------------------
     app_id = os.environ.get("CASA_BANKFEED_EB_APP_ID") or ""
-    try:
-        admin = _admin()
-        # This is link_bank's OTHER app-id resolution site — the exchange
-        # re-reads the env id — so it asserts too. Cached after the link_bank
-        # chokepoint, so no extra call in the normal flow; a WorldMismatch
-        # lands in the same unable-to-verify-is-not-verified return below,
-        # leaving the consent quarantined rather than bound.
-        _assert_world(app_id, admin=admin)
-        # SANDBOX has no whitelist gate (issue #10): link_bank never runs
-        # tap 1 there, so there are no entries to read and nothing for the
-        # verification below to compare against. The read is skipped rather
-        # than tolerated-empty, so the mode carries through this call site
-        # the same way it carries through link_bank's.
-        listed = [] if ebmode.is_sandbox() else admin.whitelisted(app_id)
-    except Exception:                            # noqa: BLE001
-        # Unable to verify is NOT verified: return without declaring, and the
-        # noted consent is quarantined for the operator to see and revoke.
-        return
+    # Unable to verify is NOT verified, and it is not a mismatch either: a
+    # failure here RAISES, before anything is declared, so the collector
+    # settles the attempt `indeterminate` with its cause recorded and the noted
+    # consent quarantined. Swallowing it into a no-verdict return reported a
+    # control-panel outage as "the accounts it returned were not the ones
+    # approved", and sent the operator to fix a whitelist that was fine
+    # (issue #60).
+    admin = _admin()
+    # This is link_bank's OTHER app-id resolution site — the exchange
+    # re-reads the env id — so it asserts too. Cached after the link_bank
+    # chokepoint, so no extra call in the normal flow; a WorldMismatch
+    # raises out of here like any other failure to verify, leaving the
+    # consent quarantined rather than bound.
+    _assert_world(app_id, admin=admin)
+    # SANDBOX has no whitelist gate (issue #10): link_bank never runs
+    # tap 1 there, so there are no entries to read and nothing for the
+    # verification below to compare against. The read is skipped rather
+    # than tolerated-empty, so the mode carries through this call site
+    # the same way it carries through link_bank's.
+    listed = [] if ebmode.is_sandbox() else admin.whitelisted(app_id)
     # `aspsp` and `country` name the bank THIS authorization was for — the
     # ATTEMPT's values, checked against the returned session above — and
     # `verify_accounts` narrows the application-wide whitelist to them. Passing
@@ -3510,7 +3584,9 @@ def collect_authorization(args: dict) -> str:
     del _HANDOFFS[:]
     del _INCOMPLETE[:]
     del _MISMATCHES[:]
-    outcomes = CB.run_collection(c, CB.spool(), entry["plugin_dir"], _exchange)
+    outcomes = CB.run_collection(c, CB.spool(), entry["plugin_dir"], _exchange,
+                                 failure_cause)
+    retire_stale_failure_notes(c)
     if not outcomes:
         return ("Nothing to collect — no authorization result is waiting. This "
                 "tool is idempotent and safe to call at any time; casa's nudge "
@@ -3728,6 +3804,10 @@ def collect_authorization(args: dict) -> str:
           {"type": "object", "properties": {}})
 def consent_status(args: dict) -> str:
     c = _conn()
+    # A note written before `_contain` rewrote it on release; see
+    # `retire_stale_failure_notes`. Here as well as in collect_authorization,
+    # so a ledger that never collects again is repaired too.
+    retire_stale_failure_notes(c)
     lines = []
 
     # Configuration FIRST. `provenance.fingerprint` rightly refuses to
@@ -3862,6 +3942,46 @@ def consent_status(args: dict) -> str:
             # false. The accumulation half stays true regardless — each retry
             # really does mint another consent — so only the standing-grant
             # clause and the reason to revoke move.
+            revoke = {
+                EXPIRED: "Its recorded validity passed %s, so there is very "
+                         "likely nothing left to withdraw — run unlink_bank "
+                         "consent_ref=%s to clear the record" % (lapse, ref),
+                LIVE: "Revoke it with unlink_bank consent_ref=%s" % ref,
+                # `callbacks` records a quarantine with `valid_until` NULL
+                # when the provider never told us the term, so this is the
+                # COMMON quarantine, not an exotic one — and it printed "it
+                # stays a live consent at the bank" two lines under a
+                # header saying the term was unknown.
+                UNKNOWN: "How long it is valid for is not recorded here, so "
+                         "whether the bank still holds it cannot be said "
+                         "from here — run unlink_bank consent_ref=%s to "
+                         "withdraw it either way" % ref}[state]
+            accumulates = {
+                EXPIRED: "every retry leaves another consent at the bank, "
+                         "and another record to clear once each one lapses",
+                LIVE: "it stays a live consent at the bank and every retry "
+                      "adds another one",
+                UNKNOWN: "every retry leaves another consent at the bank, "
+                         "however many of them the bank still holds"}[state]
+            # Issue #60: a THIRD cause, and the most common one — the exchange
+            # raised (a history download refused, a dropped socket). The
+            # account-set wording below is false for it and its remedy, "fix
+            # the whitelist", sends the operator after a list that was fine.
+            # The cause the collector recorded is what they need instead.
+            failed = c.execute(
+                "SELECT outcome FROM attempts WHERE session_id=?"
+                " AND phase='indeterminate' ORDER BY created_at DESC LIMIT 1",
+                (s["session_id"],)).fetchone()
+            if failed is not None:
+                lines.append(
+                    "  NEEDS ATTENTION: this consent exists at %s but nothing "
+                    "is linked from it — the authorization it came from did "
+                    "not complete: %s. It is quarantined: no account is bound "
+                    "to it and it is never refreshed. %s, then link the bank "
+                    "again. Leaving it costs you nothing locally, but %s."
+                    % (bank, _safe(callbacks.indeterminate_cause(
+                        failed["outcome"])), revoke, accumulates))
+                continue
             lines.append(
                 "  NEEDS ATTENTION: this consent exists at %s but nothing was "
                 "linked from it — the accounts it returned were not the ones "
@@ -3869,27 +3989,7 @@ def consent_status(args: dict) -> str:
                 "is already linked. It is quarantined: no account is bound to "
                 "it and it is never refreshed. %s, then fix the whitelist and "
                 "link again. Leaving it costs you nothing locally, but %s."
-                % (bank,
-                   {EXPIRED: "Its recorded validity passed %s, so there is very "
-                             "likely nothing left to withdraw — run unlink_bank "
-                             "consent_ref=%s to clear the record"
-                             % (lapse, ref),
-                    LIVE: "Revoke it with unlink_bank consent_ref=%s" % ref,
-                    # `callbacks` records a quarantine with `valid_until` NULL
-                    # when the provider never told us the term, so this is the
-                    # COMMON quarantine, not an exotic one — and it printed "it
-                    # stays a live consent at the bank" two lines under a
-                    # header saying the term was unknown.
-                    UNKNOWN: "How long it is valid for is not recorded here, so "
-                             "whether the bank still holds it cannot be said "
-                             "from here — run unlink_bank consent_ref=%s to "
-                             "withdraw it either way" % ref}[state],
-                   {EXPIRED: "every retry leaves another consent at the bank, "
-                             "and another record to clear once each one lapses",
-                    LIVE: "it stays a live consent at the bank and every retry "
-                          "adds another one",
-                    UNKNOWN: "every retry leaves another consent at the bank, "
-                             "however many of them the bank still holds"}[state]))
+                % (bank, revoke, accumulates))
             continue
 
         # A revocation was owed on this consent and did not complete, so the
@@ -4097,6 +4197,44 @@ def consent_status(args: dict) -> str:
                 ("about %d min left of the 30-minute window" % int(left // 60))
                 if left > 0 else "the 30-minute window has passed; mint a fresh "
                                  "link, never replay the old one"))
+
+    # Issue #60: the DURABLE telling of an authorization that did not
+    # complete. `collect_authorization` reports it once and acks it; if that
+    # reply never reached the operator — a crash between the ack and the
+    # turn — this is where it is still said, cause included. An attempt
+    # that noted no consent has no session row, so nothing else in this tool
+    # would ever mention it. It is listed until a LATER authorization for the
+    # same bank completes, which is the event that makes it history; a time
+    # window would silently drop the one bank that never links.
+    for row in c.execute(
+            "SELECT a.aspsp_name AS aspsp_name, a.country AS country,"
+            " a.psu_type AS psu_type, a.created_at AS created_at,"
+            " a.outcome AS outcome, a.session_id AS session_id"
+            " FROM attempts a WHERE a.phase='indeterminate'"
+            " AND NOT EXISTS (SELECT 1 FROM attempts b"
+            "   WHERE b.phase='exchanged' AND b.aspsp_name IS a.aspsp_name"
+            "   AND b.country IS a.country AND b.psu_type IS a.psu_type"
+            "   AND b.created_at > a.created_at)"
+            " ORDER BY a.created_at"):
+        bank = _safe(row["aspsp_name"]) or "a bank"
+        left = callbacks.left_behind(c, row["session_id"])
+        lines.append(
+            "Did not complete: %s (%s, %s), authorization started %s — %s. %s"
+            % (bank, _safe(row["country"]), _safe(row["psu_type"]),
+               _stamp(float(row["created_at"] or 0)),
+               _safe(callbacks.indeterminate_cause(row["outcome"])),
+               {"unknown": "No consent id was recorded, so whether %s created "
+                           "a consent is not known here; if it did, it shows "
+                           "in %s's own consent screen" % (bank, bank),
+                "quarantined": "Its consent is quarantined and listed above "
+                               "as consent_ref %s"
+                               % _consent_ref(row["session_id"] or ""),
+                "listed": "Its consent is still open and listed above as "
+                          "consent_ref %s, with what to do about it"
+                          % _consent_ref(row["session_id"] or ""),
+                "closed": "Its consent has since been revoked",
+                "live": "Its consent went live before the failure and is "
+                        "linked"}[left]))
 
     # The durable half. `apply.upsert_account` records a refused rebinding in
     # `sync_state` under `resource='account_binding'` rather than a table of

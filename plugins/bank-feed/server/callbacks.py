@@ -572,8 +572,32 @@ MIN_REMAINING_S = 60
 #: `review_required` is settled DELIBERATELY: the code has been spent, the
 #: provider consent exists, and no amount of re-nudging turns an unverified
 #: account set into a verified one. It needs an operator, not a retry.
+#:
+#: `indeterminate` is settled for the same reason (issue #60). It is written
+#: only in the transaction that also contains whatever the exchange left, so
+#: a later pass has nothing left to do for it — and leaving it unsettled made
+#: every later pass, for any bank, re-contain it and report it again as if it
+#: were new, still advising `unlink_bank` after that consent was revoked.
 SETTLED_PHASES = frozenset({"exchanged", "declined", "closed", "abandoned",
-                            "review_required"})
+                            "review_required", "indeterminate"})
+
+#: `attempts.outcome` of an `indeterminate` attempt that a LATER pass settled:
+#: the collector that started the exchange stopped before it finished, so its
+#: cause was never seen. Any other outcome on an `indeterminate` attempt is a
+#: cause in the fixed vocabulary `collect_one`'s `describe` produces, or
+#: `'indeterminate'` on a row settled before causes were recorded.
+INTERRUPTED = "interrupted"
+
+#: `sync_state.last_error` for an account `_contain` released. The note it
+#: replaces was written by a backfill for a binding that no longer exists, and
+#: its advice ("re-run the backfill inside the authorization window") cannot
+#: apply to an account nothing is bound to.
+RELEASED_NOTE = ("not linked: the authorization that bound this account did "
+                 "not complete, so the account was released and nothing is "
+                 "fetched for it. Link the bank again")
+
+_CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_CAUSE_MAX = 120
 
 #: The ONLY `Outcome.status` a caller may report to the operator as a completed
 #: link, and the only one that may trigger the renewal handoff. It is a set of
@@ -932,9 +956,111 @@ def _contain(conn, attempt: dict, session_id) -> bool:
         " AND status IS NOT ? AND closed_at IS NULL",
         (REVIEW_REQUIRED_STATUS, REVIEW_REQUIRED_GENERATION, str(session_id),
          LIVE_SESSION_STATUS))
+    # Before the release, while the binding still says which accounts these
+    # are. Any note a backfill left on them was about this binding.
+    conn.execute(
+        "UPDATE sync_state SET last_error=? WHERE resource='transactions'"
+        " AND account_id IN (SELECT account_id FROM accounts"
+        " WHERE session_id=?)", (RELEASED_NOTE, str(session_id)))
     conn.execute("UPDATE accounts SET session_id=NULL, uid=NULL"
                  " WHERE session_id=?", (str(session_id),))
     return True
+
+
+def left_behind(conn, session_id) -> str:
+    """What an indeterminate exchange left at the bank, as the ledger now
+    records it — read INSIDE the settle transaction, after `_contain`, so the
+    reply describes the state that committed.
+
+    * `'unknown'` — no consent id was noted. The exchange may have failed
+      before the provider answered, or after it created a consent whose id
+      never reached us; nothing here can tell which, or revoke it.
+    * `'live'` — the consent is live (a renewal whose switch committed before
+      the failure). `_contain` never demotes it, and nothing was quarantined.
+    * `'closed'` — the consent was already revoked (`unlink_bank`).
+    * `'quarantined'` — `REVIEW_REQUIRED`: visible and revocable, nothing
+      bound to it.
+    * `'listed'` — open in any other status. `_contain` never leaves one, but
+      the row moves on afterwards: a live renewal whose withdrawal then failed
+      is `REVOKE_FAILED` and still bound. Its own `consent_status` entry says
+      what it is; calling it quarantined would contradict that.
+    """
+    if not session_id:
+        return "unknown"
+    row = conn.execute("SELECT status, closed_at FROM sessions"
+                       " WHERE session_id=?", (str(session_id),)).fetchone()
+    if row is None:
+        return "unknown"
+    if row["closed_at"] is not None:
+        return "closed"
+    if row["status"] == LIVE_SESSION_STATUS:
+        return "live"
+    if row["status"] == REVIEW_REQUIRED_STATUS:
+        return "quarantined"
+    return "listed"
+
+
+def default_cause(exc) -> str:
+    """The cause recorded when the caller supplies no `describe`: the
+    exception's CLASS, never its text or arguments, which may carry a provider
+    body. A class name comes from code, not from input; one that is not a
+    plain identifier is dropped anyway."""
+    name = type(exc).__name__
+    if _CLASS_NAME_RE.match(name):
+        return "unexpected error (%s)" % name
+    return "unexpected error"
+
+
+def _cause(describe, exc) -> str:
+    """`describe(exc)`, or `default_cause(exc)` when there is no describer or
+    it fails. The describer is the caller's code: a raise inside it, or a
+    result that is not a short string, must not lose the failure it was asked
+    to name."""
+    if describe is not None:
+        try:
+            text = describe(exc)
+        except Exception:              # noqa: BLE001 - fall back, never lose it
+            text = None
+        if isinstance(text, str) and text and len(text) <= _CAUSE_MAX:
+            return text
+    return default_cause(exc)
+
+
+def indeterminate_cause(outcome) -> str:
+    """The cause of an `indeterminate` attempt, from its `attempts.outcome`,
+    worded for the operator. One renderer, so the collect reply and
+    `consent_status` cannot describe the same attempt two ways."""
+    if outcome == INTERRUPTED:
+        return ("the collection that started it stopped before it finished, "
+                "so its cause was never seen")
+    if not outcome or outcome == "indeterminate":
+        return "its cause was not recorded (it failed before this version)"
+    return str(outcome)
+
+
+def _indeterminate_detail(attempt: dict, cause: str, left: str) -> str:
+    """The reply for an indeterminate attempt, rendered from what the settle
+    transaction committed (`left_behind`), never from what was expected."""
+    bank = attempt.get("aspsp_name") or "the bank"
+    head = ("the authorization for %s did not complete: %s. The code is spent "
+            "and will not be retried. " % (bank, cause))
+    return head + {
+        "unknown": "No consent id was recorded, so whether %s created a "
+                   "consent before the failure is not known here, and none "
+                   "can be revoked from here. If one was created, it shows in "
+                   "%s's own consent screen" % (bank, bank),
+        "live": "The consent had already gone live before the failure — a "
+                "renewal whose switch had committed — so it is linked and "
+                "nothing was quarantined. Run consent_status to check it",
+        "closed": "Nothing was linked, and the consent it created has already "
+                  "been revoked",
+        "listed": "Its consent is still open; run consent_status for what "
+                  "it is now and what to do about it",
+        "quarantined": "Nothing was linked: the consent it created is "
+                       "quarantined and every account it had bound was "
+                       "released. Run consent_status to see it, and "
+                       "unlink_bank to revoke it",
+    }[left]
 
 
 def note_session(conn, attempt: dict, session_id: str) -> None:
@@ -1238,22 +1364,25 @@ def pending_attempts(conn, sp, plugin_dir: str) -> list[dict]:
     return out
 
 
-def _run_exchange(conn, attempt: dict, exchange, code: str):
+def _run_exchange(conn, attempt: dict, exchange, code: str, describe=None):
     """Call the injected exchange with the ledger closed, then read back the
-    DURABLE verdict it left behind. Returns `(marker, session_id, failed)`.
+    DURABLE verdict it left behind. Returns `(marker, session_id, failure)`.
 
     `marker` is `attempts.outcome` as the exchange left it — `'verified'`,
     `'verified_partial'`, or anything else (including None), which means no
     verdict was declared. The exchange's RETURN VALUE is never consulted, and
     that is the point: there is no boolean here that could be read at the
     wrong time.
+
+    `failure` is None when the exchange returned, else the cause `_cause`
+    names for what it raised — never the exception's text.
     """
     _close_ledger(conn)
-    failed = False
+    failure = None
     try:
         exchange(code, attempt)
-    except Exception:                  # noqa: BLE001 - the class, not the text
-        failed = True
+    except Exception as exc:           # noqa: BLE001 - the class, not the text
+        failure = _cause(describe, exc)
     finally:
         # An exchange that died INSIDE its own transaction — `apply.apply_plan`
         # and `apply.switch_bindings` both take one — would otherwise leave it
@@ -1271,11 +1400,11 @@ def _run_exchange(conn, attempt: dict, exchange, code: str):
         (attempt["state_hash"],)).fetchone()
     marker = row["outcome"] if row is not None else None
     session_id = row["session_id"] if row is not None else None
-    return marker, session_id, failed
+    return marker, session_id, failure
 
 
 def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
-                exchange) -> Outcome:
+                exchange, describe=None) -> Outcome:
     """Collect → exchange → COMMIT → ack, in exactly that order.
 
     `record` is casa's attempt record; `fence` is the token `take_lease`
@@ -1298,7 +1427,9 @@ def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
     Three settled shapes come out of a completed exchange: `verified` →
     `succeeded`; `verified_partial` → **`partial`** (a capped backfill is
     never reported as success); no verdict → **`review_required`**, with the
-    consent quarantined so it can be seen and revoked.
+    consent quarantined so it can be seen and revoked. An exchange that RAISES
+    settles **`indeterminate`**, with `describe(exc)` — the caller's fixed
+    vocabulary, or `default_cause` — recorded as its cause.
     """
     state_hash = record.get("state_hash")
     if not isinstance(state_hash, str) or not _HASH_RE.match(state_hash):
@@ -1420,17 +1551,27 @@ def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
 
     try:
         begin_exchange(conn, state_hash, fence)   # durable BEFORE the call
-    except Indeterminate as exc:
+    except Indeterminate:
         # A previous collector committed `exchange_started` and never came back
         # — it was killed, or it lost its lease mid-exchange. Nothing runs in a
         # killed process, so this later turn is where its half-done work gets
         # contained: the consent it noted is quarantined and every account
         # it bound is released. `heartbeat` proves the fence first, and the
         # whole thing is one transaction, so a stale owner changes nothing.
+        #
+        # It is then SETTLED and acked (issue #60): the containment is the
+        # whole of what a later pass could do, and an unsettled attempt was
+        # re-contained and re-reported by every pass until its result expired.
+        # A phase of `indeterminate` no longer reaches this branch at all —
+        # `SETTLED_PHASES` answers it above.
         conn.execute("BEGIN IMMEDIATE")
         try:
             heartbeat(conn, state_hash, fence)
-            contained = _contain(conn, attempt, attempt.get("session_id"))
+            _contain(conn, attempt, attempt.get("session_id"))
+            left = left_behind(conn, attempt.get("session_id"))
+            if not _settle(conn, state_hash, fence, phase="indeterminate",
+                           outcome=INTERRUPTED):
+                raise Indeterminate("the collection lease moved")
         except Indeterminate:
             conn.execute("ROLLBACK")
             return Outcome(state_hash, "skipped",
@@ -1440,35 +1581,30 @@ def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
             conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
-        if contained:
-            return Outcome(
-                state_hash, "indeterminate",
-                str(exc) + ". Nothing is linked to the consent that exchange "
-                "created: it is quarantined and every account it had bound has "
-                "been released. Run consent_status to see it, and unlink_bank "
-                "to revoke it")
-        return Outcome(state_hash, "indeterminate", str(exc))
+        sp.ack(plugin_dir, state_hash)
+        return Outcome(state_hash, "indeterminate", _indeterminate_detail(
+            attempt, indeterminate_cause(INTERRUPTED), left))
 
-    marker, session_id, failed = _run_exchange(conn, attempt, exchange,
-                                               parsed["code"])
+    marker, session_id, failure = _run_exchange(conn, attempt, exchange,
+                                                parsed["code"], describe)
 
-    if failed:
+    if failure is not None:
         # `exchange_started` is already committed, so the code is never
-        # re-posted. The message names no provider text. The write
-        # is fenced like every other one, and a lost fence means a successor
-        # owns this flow's outcome — we record nothing and ack nothing.
+        # re-posted. The cause is `describe`'s fixed vocabulary, never provider
+        # text. The write is fenced like every other one, and a lost fence
+        # means a successor owns this flow's outcome — we record nothing and
+        # ack nothing.
         #
         # The failure may have landed AFTER the verdict, with a
         # session row and one or more bindings already written. `_contain` is
         # what makes that state harmless, and it shares this transaction with
-        # the settle so there is no half-contained ledger to find.
+        # the settle so there is no half-contained ledger to find. Settled and
+        # acked like every other decided outcome (issue #60): the cause is in
+        # `attempts.outcome`, where `consent_status` reads it back.
         conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = conn.execute(
-                "UPDATE attempts SET phase='indeterminate',"
-                " outcome='indeterminate'"
-                " WHERE state_hash=? AND lease_token=?", (state_hash, fence))
-            if cur.rowcount != 1:
+            if not _settle(conn, state_hash, fence, phase="indeterminate",
+                           outcome=failure):
                 conn.execute("ROLLBACK")
                 return Outcome(state_hash, "skipped",
                                "the collection lease moved before the failure "
@@ -1479,15 +1615,14 @@ def collect_one(conn, sp, plugin_dir: str, record: dict, fence: str,
             # and release whatever it had already bound, so no account is left
             # naming a consent that is not live.
             _contain(conn, attempt, session_id)
+            left = left_behind(conn, session_id)
         except BaseException:
             conn.execute("ROLLBACK")
             raise
         conn.execute("COMMIT")
+        sp.ack(plugin_dir, state_hash)
         return Outcome(state_hash, "indeterminate",
-                       "the exchange did not complete; the code is spent and "
-                       "will not be retried. Nothing was linked: any consent "
-                       "the bank did create is quarantined and listed by "
-                       "consent_status for review")
+                       _indeterminate_detail(attempt, failure, left))
 
     if marker not in ("verified", "verified_partial"):
         # The account set was never declared verified against the
@@ -1598,7 +1733,7 @@ def _context_changed(row, current) -> bool:
     return False
 
 
-def run_collection(conn, sp, plugin_dir: str, exchange) -> list:
+def run_collection(conn, sp, plugin_dir: str, exchange, describe=None) -> list:
     """One collection pass — what a nudged turn runs.
 
     Idempotent and safe with nothing to collect: the nudge is at-least-once,
@@ -1642,5 +1777,6 @@ def run_collection(conn, sp, plugin_dir: str, exchange) -> list:
                     "the collection lease moved; not acknowledging"))
             continue
         outcomes.append(
-            collect_one(conn, sp, plugin_dir, record, fence, exchange))
+            collect_one(conn, sp, plugin_dir, record, fence, exchange,
+                        describe))
     return outcomes

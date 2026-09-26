@@ -608,7 +608,10 @@ class TestCollect(Base):
         def boom():
             raise RuntimeError("control panel unreachable")
         tools_auth.ADMIN_FACTORY = boom
-        self.collect()
+        # It RAISES (issue #60), so the collector settles it `indeterminate`
+        # with its cause, rather than reporting an account-set mismatch.
+        with self.assertRaises(RuntimeError):
+            self.collect()
         self.assertIsNone(self.marker())
         self.assertEqual(self.count("accounts"), 0)
 
@@ -4039,3 +4042,150 @@ class TestCollectNamesErasure(Base):
         self.assertEqual(old["status"], "AUTHORIZED")
         self.assertIsNone(old["closed_at"])
         self.assertEqual(self.ais.deleted, [])
+
+
+class TestAnAuthorizationThatDidNotComplete(Base):
+    """Issue #60. A first link whose history download failed left no cause
+    anywhere: the reply had none, the attempt row had none, and consent_status
+    described the quarantined consent as an account-set mismatch and sent the
+    operator to fix a whitelist that was fine."""
+
+    def _attempt(self, *, aspsp="Rabobank", country="NL", phase="indeterminate",
+                 outcome="the history download was answered with HTTP 400",
+                 session_id=None, created_at=FROZEN_NOW, tag="a"):
+        self.raw.execute(
+            "INSERT INTO attempts(state_hash, aspsp_name, country, psu_type,"
+            " purpose, created_at, phase, outcome, session_id)"
+            " VALUES (?,?,?,'personal','link',?,?,?,?)",
+            (hashlib.sha256(tag.encode()).hexdigest(), aspsp, country,
+             created_at, phase, outcome, session_id))
+
+    # --- the cause vocabulary --------------------------------------------
+    def test_a_refused_history_download_names_the_step_and_the_status(self):
+        import eb_ais
+        self.assertEqual(
+            tools_auth.failure_cause(eb_ais.ApiError(400, "transactions")),
+            "the history download was answered with HTTP 400")
+        self.assertEqual(
+            tools_auth.failure_cause(eb_ais.ApiError(502, "create_session")),
+            "the session exchange was answered with HTTP 502")
+
+    def test_nothing_an_exception_carries_reaches_the_cause(self):
+        import eb_ais
+        import httpx
+
+        class Odd(Exception):
+            pass
+        leaky = eb_ais.ApiError(500, "transactions")
+        leaky.op = "code=SPENT-AUTH-CODE"
+        cases = {
+            leaky: "a provider call was answered with HTTP 500",
+            httpx.RateLimited("provider body", 30): "HTTP 429",
+            TimeoutError("provider body"): "timed out",
+            OSError("provider body"): "network error",
+            ValueError("provider body"): "could not be read",
+            Odd("provider body"): "unexpected error (Odd)",
+        }
+        for exc, expected in cases.items():
+            with self.subTest(exc=type(exc).__name__):
+                cause = tools_auth.failure_cause(exc)
+                self.assertIn(expected, cause)
+                self.assertNotIn("provider body", cause)
+                self.assertNotIn("SPENT-AUTH-CODE", cause)
+
+    def test_collect_authorization_hands_the_collector_that_vocabulary(self):
+        self.collect()
+        self.assertIs(self.cb.describe, tools_auth.failure_cause)
+
+    def test_a_whitelist_that_could_not_be_read_is_a_failure_not_a_mismatch(self):
+        # Swallowed, it settled `review_required` and read "the accounts it
+        # returned were not the ones approved". It raises now, so the
+        # collector records WHY.
+        class Down(FakeAdmin):
+            def whitelisted(self, app_id):
+                raise OSError("control panel down")
+        tools_auth.ADMIN_FACTORY = lambda: Down()
+        with self.assertRaises(OSError):
+            self.collect()
+        self.assertNotIn(self.marker(), ("verified", "verified_partial"))
+
+    # --- consent_status ---------------------------------------------------
+    def test_its_quarantined_consent_names_the_cause_not_the_whitelist(self):
+        self.session(days=100, status=callbacks.REVIEW_REQUIRED_STATUS)
+        self._attempt(session_id=SESSION_ID)
+        out = call("consent_status")
+        self.assertIn("did not complete: the history download was answered "
+                      "with HTTP 400", out)
+        self.assertNotIn("fix the whitelist", out)
+        self.assertIn("unlink_bank consent_ref=%s"
+                      % tools_auth._consent_ref(SESSION_ID), out)
+        self.assertNotIn(SESSION_ID, out)
+
+    def test_a_quarantine_for_another_reason_keeps_its_own_wording(self):
+        self.session(days=100, status=callbacks.REVIEW_REQUIRED_STATUS)
+        out = call("consent_status")
+        self.assertIn("fix the whitelist", out)
+        self.assertNotIn("Did not complete", out)
+
+    def test_one_that_recorded_no_consent_is_still_reported(self):
+        # Nothing else in consent_status would ever mention it: there is no
+        # session row. This is where the report survives a lost reply.
+        self._attempt(aspsp="Nordea", country="FI", session_id=None)
+        out = call("consent_status")
+        self.assertIn("Did not complete: Nordea (FI, personal)", out)
+        self.assertIn("HTTP 400", out)
+        self.assertIn("No consent id was recorded", out)
+
+    def test_it_is_listed_until_a_later_link_of_that_bank_completes(self):
+        self._attempt(aspsp="Nordea", country="FI", created_at=FROZEN_NOW)
+        self._attempt(aspsp="Nordea", country="FI", phase="exchanged",
+                      outcome="collected", created_at=FROZEN_NOW - 60, tag="b")
+        self._attempt(aspsp="Nordea", country="SE", phase="exchanged",
+                      outcome="collected", created_at=FROZEN_NOW + 60, tag="c")
+        self.assertIn("Did not complete: Nordea", call("consent_status"))
+        self._attempt(aspsp="Nordea", country="FI", phase="exchanged",
+                      outcome="collected", created_at=FROZEN_NOW + 60, tag="d")
+        self.assertNotIn("Did not complete", call("consent_status"))
+
+    def test_an_attempt_from_before_causes_were_recorded_says_so(self):
+        self._attempt(outcome="indeterminate")
+        self.assertIn("its cause was not recorded", call("consent_status"))
+
+    def test_a_revoked_consent_is_not_sent_back_to_unlink_bank(self):
+        self.session(days=100, status=callbacks.REVIEW_REQUIRED_STATUS)
+        self.raw.execute("UPDATE sessions SET closed_at='2026-09-01T00:00:00Z'")
+        self._attempt(session_id=SESSION_ID)
+        out = call("consent_status")
+        self.assertIn("Its consent has since been revoked", out)
+        self.assertNotIn("unlink_bank", out)
+
+    def test_a_consent_whose_withdrawal_failed_is_not_called_quarantined(self):
+        # A live renewal that then failed, and whose unlink_bank did not
+        # confirm: open, REVOKE_FAILED, still bound. Its own entry above says
+        # so; the list must not contradict it.
+        self.session(days=100, status=tools_auth.REVOKE_FAILED_STATUS)
+        self._attempt(session_id=SESSION_ID)
+        out = call("consent_status")
+        line = [l for l in out.splitlines() if l.startswith("Did not complete")]
+        self.assertEqual(len(line), 1)
+        self.assertNotIn("quarantined", line[0])
+        self.assertIn("still open and listed above as consent_ref %s"
+                      % tools_auth._consent_ref(SESSION_ID), line[0])
+
+    # --- the note a failed backfill left behind ---------------------------
+    def test_a_released_account_loses_the_backfill_advice(self):
+        for account_id, session_id in (("acc-free", None),
+                                       ("acc-bound", SESSION_ID)):
+            self.raw.execute(
+                "INSERT INTO accounts(account_id, uid, session_id, currency)"
+                " VALUES (?,?,?,'EUR')", (account_id, "u-" + account_id,
+                                          session_id))
+            self.raw.execute(
+                "INSERT INTO sync_state(account_id, resource, completeness,"
+                " last_error) VALUES (?,'transactions','partial',?)",
+                (account_id, flows.FAILED_NOTE))
+        call("consent_status")
+        notes = dict(self.raw.execute(
+            "SELECT account_id, last_error FROM sync_state").fetchall())
+        self.assertEqual(notes, {"acc-free": callbacks.RELEASED_NOTE,
+                                 "acc-bound": flows.FAILED_NOTE})

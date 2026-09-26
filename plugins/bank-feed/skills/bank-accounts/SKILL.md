@@ -23,6 +23,15 @@ like that, call `collect_authorization()` immediately. It is idempotent and
 safe to call when nothing is pending — call it every time you see this turn
 shape, even if you believe nothing is outstanding.
 
+An `indeterminate` line means that authorization did not complete. It names
+the bank and the cause (for example "the history download was answered with
+HTTP 400"), and says what was left: a quarantined consent to revoke, a
+consent already revoked, or no consent id recorded. Relay the cause as
+printed, since it is the error the operator will ask for. Each failed
+authorization is reported once. `consent_status` keeps listing it under
+`Did not complete` until a later link of that bank succeeds, so check there
+before saying no error was recorded.
+
 ## 2. Never hide staleness or a coverage hole
 
 - Every cached figure carries a fetch time. Never state a balance or a

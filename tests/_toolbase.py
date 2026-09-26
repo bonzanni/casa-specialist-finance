@@ -716,8 +716,9 @@ class FakeCB:
     # second entry point into one half of that is how the harness came to model
     # `collect_one` instead of running it.
 
-    def run_collection(self, conn, sp, plugin_dir, exchange):
+    def run_collection(self, conn, sp, plugin_dir, exchange, describe=None):
         self.collections += 1
+        self.describe = describe
         if self._run is not None:
             return self._run(exchange)
         return list(self.outcomes)
