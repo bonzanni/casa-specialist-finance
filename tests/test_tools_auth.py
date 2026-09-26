@@ -4159,6 +4159,19 @@ class TestAnAuthorizationThatDidNotComplete(Base):
         self.assertIn("Its consent has since been revoked", out)
         self.assertNotIn("unlink_bank", out)
 
+    def test_a_consent_whose_withdrawal_failed_is_not_called_quarantined(self):
+        # A live renewal that then failed, and whose unlink_bank did not
+        # confirm: open, REVOKE_FAILED, still bound. Its own entry above says
+        # so; the list must not contradict it.
+        self.session(days=100, status=tools_auth.REVOKE_FAILED_STATUS)
+        self._attempt(session_id=SESSION_ID)
+        out = call("consent_status")
+        line = [l for l in out.splitlines() if l.startswith("Did not complete")]
+        self.assertEqual(len(line), 1)
+        self.assertNotIn("quarantined", line[0])
+        self.assertIn("still open and listed above as consent_ref %s"
+                      % tools_auth._consent_ref(SESSION_ID), line[0])
+
     # --- the note a failed backfill left behind ---------------------------
     def test_a_released_account_loses_the_backfill_advice(self):
         for account_id, session_id in (("acc-free", None),

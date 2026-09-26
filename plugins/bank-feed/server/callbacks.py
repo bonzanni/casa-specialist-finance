@@ -978,7 +978,12 @@ def left_behind(conn, session_id) -> str:
     * `'live'` — the consent is live (a renewal whose switch committed before
       the failure). `_contain` never demotes it, and nothing was quarantined.
     * `'closed'` — the consent was already revoked (`unlink_bank`).
-    * `'quarantined'` — visible and revocable, nothing bound to it.
+    * `'quarantined'` — `REVIEW_REQUIRED`: visible and revocable, nothing
+      bound to it.
+    * `'listed'` — open in any other status. `_contain` never leaves one, but
+      the row moves on afterwards: a live renewal whose withdrawal then failed
+      is `REVOKE_FAILED` and still bound. Its own `consent_status` entry says
+      what it is; calling it quarantined would contradict that.
     """
     if not session_id:
         return "unknown"
@@ -990,7 +995,9 @@ def left_behind(conn, session_id) -> str:
         return "closed"
     if row["status"] == LIVE_SESSION_STATUS:
         return "live"
-    return "quarantined"
+    if row["status"] == REVIEW_REQUIRED_STATUS:
+        return "quarantined"
+    return "listed"
 
 
 def default_cause(exc) -> str:
@@ -1047,6 +1054,8 @@ def _indeterminate_detail(attempt: dict, cause: str, left: str) -> str:
                 "nothing was quarantined. Run consent_status to check it",
         "closed": "Nothing was linked, and the consent it created has already "
                   "been revoked",
+        "listed": "Its consent is still open; run consent_status for what "
+                  "it is now and what to do about it",
         "quarantined": "Nothing was linked: the consent it created is "
                        "quarantined and every account it had bound was "
                        "released. Run consent_status to see it, and "

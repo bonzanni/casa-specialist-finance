@@ -4229,6 +4229,9 @@ def consent_status(args: dict) -> str:
                 "quarantined": "Its consent is quarantined and listed above "
                                "as consent_ref %s"
                                % _consent_ref(row["session_id"] or ""),
+                "listed": "Its consent is still open and listed above as "
+                          "consent_ref %s, with what to do about it"
+                          % _consent_ref(row["session_id"] or ""),
                 "closed": "Its consent has since been revoked",
                 "live": "Its consent went live before the failure and is "
                         "linked"}[left]))
