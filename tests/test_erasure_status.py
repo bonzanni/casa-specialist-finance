@@ -68,6 +68,25 @@ class TestErasureStatus(DestructiveBase):
         self.assertEqual(out["erasure"], "incomplete")
         self.assertIn("WARNING", out["report"])
 
+    def test_a_second_sweep_that_left_a_copy_is_incomplete(self):
+        """Diff r1 (Astra S2): a copy taken while the banks answered holds the
+        destroyed session rows; when the second sweep cannot remove it, the
+        erasure is not complete."""
+        self.session()
+        real = backups.erase_backups
+        calls = []
+
+        def erase_backups(*a, **kw):
+            calls.append(1)
+            if len(calls) == 2:
+                raise backups.BackupError("EACCES")
+            return real(*a, **kw)
+        with mock.patch.object(backups, "erase_backups", side_effect=erase_backups):
+            out = self.erase()
+        self.assertEqual(len(calls), 2)          # the second sweep did run
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertEqual(out["erasure"], "incomplete")
+
     def test_the_call_helper_reads_the_report(self):
         self.account()
         self.assertIn("Done.", call("delete_all_data"))
