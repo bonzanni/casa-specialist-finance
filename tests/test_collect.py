@@ -414,7 +414,9 @@ class TestCollectionLoop(Base):
         self.assertNotEqual(self._phase()["phase"], "exchanged")
         self.assertEqual(self._sessions(), [])     # and no quarantine row
 
-    def test_a_failing_exchange_is_indeterminate_and_never_acked(self):
+    def test_a_failing_exchange_is_indeterminate_and_settled(self):
+        # Acked since issue #60: the code is spent and the containment has
+        # committed, so a later pass has nothing to add but a repeat report.
         self.sp.write_attempt(self.h, "result_ready")
         self.sp.publish(self.h, self._record())
 
@@ -423,7 +425,7 @@ class TestCollectionLoop(Base):
 
         out = callbacks.run_collection(self.conn, self.sp, self.pd, exchange)
         self.assertEqual([o.status for o in out], ["indeterminate"])
-        self.assertEqual(self.sp.acked, [])
+        self.assertEqual(self.sp.acked, [self.h])
         self.assertEqual(self._phase()["phase"], "indeterminate")
         self.assertNotIn("connection reset", out[0].detail)
 
@@ -826,7 +828,7 @@ class TestStagedUntilPromoted(Ready):
         self.assertEqual(self._live_count(), 0)          # no live link
         self.assertEqual(self._bound_count(), 0)         # nothing bound to it
         self.assertEqual(self._sessions(), [self._staged_row()])
-        self.assertEqual(self.sp.acked, [])
+        self.assertEqual(self.sp.acked, [self.h])         # settled (#60)
 
     def test_the_stranded_consent_is_visible_and_revocable(self):
         out = callbacks.run_collection(self.conn, self.sp, self.pd,
@@ -1164,8 +1166,191 @@ class TestStagedUntilPromoted(Ready):
         self.assertEqual(self._live_count(), 0)
         self.assertEqual(self._bound_count(), 0)
         self.assertEqual(self._sessions(), [self._staged_row()])
-        self.assertEqual(self.sp.acked, [])
+        self.assertEqual(self.sp.acked, [self.h])         # settled (#60)
         self.assertIn("unlink_bank", out[0].detail)
+
+
+class TestIndeterminateIsSettledOnce(Ready):
+    """Issue #60. An exchange that raised was contained in the same
+    transaction that recorded it, and then left unsettled and unacked, so
+    every later pass — for any bank — re-contained it and reported it again as
+    if it were new, naming no bank and no cause. Now it is settled, acked,
+    carries its cause, and says what it actually left behind."""
+
+    # The production-order doubles, borrowed rather than inherited: inheriting
+    # would run every `TestStagedUntilPromoted` test a second time.
+    SID, OLD, RETIRED = (TestStagedUntilPromoted.SID,
+                         TestStagedUntilPromoted.OLD,
+                         TestStagedUntilPromoted.RETIRED)
+    _link_shaped = TestStagedUntilPromoted._link_shaped
+    _renewal_shaped = TestStagedUntilPromoted._renewal_shaped
+    _live_old_consent = TestStagedUntilPromoted._live_old_consent
+    _staged_row = TestStagedUntilPromoted._staged_row
+    _bound_count = TestStagedUntilPromoted._bound_count
+
+    @staticmethod
+    def _raises(code, attempt):
+        raise OSError("reset before the provider answered")
+
+    def _redispatch_after_the_lease(self):
+        """What casa does next: re-dispatch the unacked attempt, with the
+        result still well inside its TTL, after the first lease has expired —
+        exactly the window the issue reproduced the repeats in."""
+        self.sp.write_attempt(self.h, "result_ready")
+        self.conn.execute("UPDATE attempts SET lease_expiry=? WHERE"
+                          " state_hash=? AND lease_token IS NOT NULL",
+                          (time.time() - 1.0, self.h))
+        return callbacks.run_collection(self.conn, self.sp, self.pd,
+                                        self._never)
+
+    def _contain_calls(self):
+        calls = []
+        real = callbacks._contain
+
+        def spy(conn, attempt, session_id):
+            calls.append(session_id)
+            return real(conn, attempt, session_id)
+        self.addCleanup(setattr, callbacks, "_contain", real)
+        callbacks._contain = spy
+        return calls
+
+    def test_a_failed_exchange_is_acked_once_and_never_reported_again(self):
+        out = callbacks.run_collection(self.conn, self.sp, self.pd,
+                                       self._link_shaped(fail_at="acc-1"))
+        self.assertEqual([o.status for o in out], ["indeterminate"])
+        self.assertEqual(self.sp.acked, [self.h])
+        calls = self._contain_calls()
+        for _ in range(2):
+            again = self._redispatch_after_the_lease()
+            self.assertEqual([o.status for o in again], ["skipped"])
+            self.assertIn("already settled", again[0].detail)
+        self.assertEqual(calls, [])                      # never re-contained
+        self.assertEqual(self.sp.acked, [self.h] * 3)
+        self.assertEqual(self._sessions(), [self._staged_row()])
+
+    def test_an_attempt_left_indeterminate_by_an_older_build_is_acked(self):
+        """The upgrade path: 0.14.x left these unacked in the spool."""
+        self.conn.execute(
+            "UPDATE attempts SET phase='indeterminate', outcome='indeterminate',"
+            " session_id=? WHERE state_hash=?", (self.SID, self.h))
+        calls = self._contain_calls()
+        out = callbacks.run_collection(self.conn, self.sp, self.pd,
+                                       self._never)
+        self.assertEqual([o.status for o in out], ["skipped"])
+        self.assertEqual(self.sp.acked, [self.h])
+        self.assertEqual(calls, [])
+
+    def test_the_cause_is_recorded_and_named_with_the_bank(self):
+        out = callbacks.run_collection(
+            self.conn, self.sp, self.pd, self._link_shaped(fail_at="acc-1"),
+            lambda exc: "the history download was answered with HTTP 400")
+        self.assertEqual(self._phase()["outcome"],
+                         "the history download was answered with HTTP 400")
+        self.assertIn("Revolut", out[0].detail)
+        self.assertIn("HTTP 400", out[0].detail)
+        self.assertIn("quarantined", out[0].detail)
+        self.assertNotIn("dropped the connection", out[0].detail)
+
+    def test_without_a_describer_the_class_is_recorded_never_the_text(self):
+        out = callbacks.run_collection(self.conn, self.sp, self.pd,
+                                       self._link_shaped(fail_at="acc-1"))
+        self.assertEqual(self._phase()["outcome"], "unexpected error (OSError)")
+        self.assertNotIn("dropped the connection", out[0].detail)
+
+    def test_a_describer_that_fails_or_rambles_falls_back_to_the_class(self):
+        def boom(exc):
+            raise KeyError("describer bug")
+        for describe in (boom, lambda exc: "x" * 500, lambda exc: None):
+            with self.subTest(describe=describe):
+                self.conn.execute(
+                    "UPDATE attempts SET phase='minted', outcome=NULL,"
+                    " session_id=NULL, lease_token=NULL, lease_expiry=NULL")
+                self.sp.write_attempt(self.h, "result_ready")
+                callbacks.run_collection(
+                    self.conn, self.sp, self.pd, self._raises, describe)
+                self.assertEqual(self._phase()["outcome"],
+                                 "unexpected error (OSError)")
+
+    def test_a_failure_before_the_consent_was_noted_claims_no_quarantine(self):
+        def exchange(code, attempt):
+            raise OSError("reset before the provider answered")
+        out = callbacks.run_collection(self.conn, self.sp, self.pd, exchange)
+        self.assertEqual([o.status for o in out], ["indeterminate"])
+        self.assertIn("No consent id was recorded", out[0].detail)
+        self.assertNotIn("quarantined", out[0].detail)
+        self.assertNotIn("unlink_bank", out[0].detail)
+        self.assertEqual(self.sp.acked, [self.h])
+
+    def test_a_completed_renewal_that_then_failed_is_not_called_quarantined(self):
+        self._live_old_consent()
+        out = callbacks.run_collection(
+            self.conn, self.sp, self.pd,
+            self._renewal_shaped(fail_after_switch=True))
+        self.assertEqual([o.status for o in out], ["indeterminate"])
+        self.assertIn("already gone live", out[0].detail)
+        self.assertIn("nothing was quarantined", out[0].detail)
+        self.assertNotIn("unlink_bank", out[0].detail)
+        self.assertEqual(self._bound_count(), 1)
+
+    def _killed_collector(self, *, closed=False):
+        self.conn.execute(
+            "UPDATE attempts SET phase='exchange_started', session_id=?,"
+            " lease_owner='dead', lease_token='gone', lease_expiry=?"
+            " WHERE state_hash=?", (self.SID, time.time() - 1.0, self.h))
+        self.conn.execute(
+            "INSERT INTO sessions(session_id, aspsp_name, country, psu_type,"
+            " status, generation, closed_at) VALUES"
+            " (?,'Revolut','NL','business',?,?,?)",
+            (self.SID, "CLOSED" if closed else callbacks.REVIEW_REQUIRED_STATUS,
+             callbacks.REVIEW_REQUIRED_GENERATION,
+             "2026-09-01T00:00:00Z" if closed else None))
+        (self.sp.root / "results" / f".collect-{self.h}-dead").write_text(
+            json.dumps(self._record()), encoding="utf-8")
+
+    def test_a_killed_collector_is_settled_as_interrupted(self):
+        self._killed_collector()
+        out = callbacks.run_collection(self.conn, self.sp, self.pd, self._never)
+        self.assertEqual([o.status for o in out], ["indeterminate"])
+        self.assertEqual(self._phase()["phase"], "indeterminate")
+        self.assertEqual(self._phase()["outcome"], callbacks.INTERRUPTED)
+        self.assertIsNone(self._phase()["lease_token"])
+        self.assertEqual(self.sp.acked, [self.h])
+        self.assertIn("Revolut", out[0].detail)
+
+    def test_a_revoked_consent_is_never_sent_to_unlink_bank_again(self):
+        self._killed_collector(closed=True)
+        out = callbacks.run_collection(self.conn, self.sp, self.pd, self._never)
+        self.assertIn("already been revoked", out[0].detail)
+        self.assertNotIn("unlink_bank", out[0].detail)
+
+    def test_a_released_account_loses_the_backfill_advice(self):
+        """The note a failed backfill leaves says to re-run it inside the
+        authorization window. Once containment releases the account nothing
+        can run, so the note is replaced in the same transaction — and a note
+        on an account this consent never bound is left alone."""
+        for account_id in ("acc-1", "acc-other"):
+            self.conn.execute(
+                "INSERT INTO sync_state(account_id, resource, completeness,"
+                " last_error) VALUES (?,'transactions','partial','backfill')",
+                (account_id,))
+        callbacks.run_collection(self.conn, self.sp, self.pd,
+                                 self._link_shaped(bind=("acc-1",),
+                                                   fail_at="acc-1"))
+        notes = dict(self.conn.execute(
+            "SELECT account_id, last_error FROM sync_state").fetchall())
+        self.assertEqual(notes, {"acc-1": callbacks.RELEASED_NOTE,
+                                 "acc-other": "backfill"})
+
+    def test_a_stale_fence_still_settles_and_acks_nothing(self):
+        def exchange(code, attempt):
+            self.conn.execute(
+                "UPDATE attempts SET lease_token='stolen' WHERE state_hash=?",
+                (self.h,))
+            raise OSError("reset")
+        out = callbacks.run_collection(self.conn, self.sp, self.pd, exchange)
+        self.assertEqual([o.status for o in out], ["skipped"])
+        self.assertEqual(self.sp.acked, [])
+        self.assertEqual(self._phase()["phase"], "exchange_started")
 
 
 class TestCappedBackfillIsNotSuccess(Ready):
