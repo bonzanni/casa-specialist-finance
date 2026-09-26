@@ -154,14 +154,48 @@ second active row (issue #32).
 Matching it to the out-of-window row was built and cut: that row's own restatement is
 never in the fetch, so as a match candidate it is always free to absorb a different
 payment, whether next week's identical standing order or a distinct payment under a
-reused reference. The insert is **disclosed** instead. `backfill` also loads the active
-rows dated up to `AMOUNT_ONLY_MATCH_WINDOW_DAYS` before the window and passes them to
-`reconcile()` as `edge`. They are used for nothing but this check. A fresh insert with
-the same content or the same provider reference as one of them, within that bound, is
-flagged `duplicate_across_window_edge`, and so is the edge row, unless the edge row is
-already under review for another reason. The bound is the one that separates a
-correction from a recurrence everywhere else: a week would flag every weekly standing
-order the bank posts late. An amount-corrected re-date with no reference is not caught.
+reused reference. The insert is **disclosed** instead: it is flagged
+`duplicate_across_window_edge`, and so is the row it looks like, unless that row is
+already under review for another reason. The bound is `AMOUNT_ONLY_MATCH_WINDOW_DAYS`,
+the one that separates a correction from a recurrence everywhere else: a week would flag
+every weekly standing order the bank posts late. An amount-corrected re-date with no
+reference is not caught.
+
+### History older than the window
+
+A bank may answer with rows older than it was asked for, and such history is kept. A
+routine refresh asks from about a week back, so a bank that ignores `date_from` returns
+its whole history on every sync, and every row older than the window used to be inserted
+again, unflagged, because the stored row it restates is out of view (issue #59).
+
+`backfill` therefore loads the stored rows dated before the window, active and
+superseded, from the #32 edge band down to three days below the oldest fetched row, and
+passes them to `reconcile()` as `below` with the request date as `window_from`. A fetched
+row dated before the window **never matches**, the mirror of the rule that stored rows
+before the window are never match candidates. It either pairs with an active stored row
+that is the same booking, or it is inserted:
+
+- **Same booking** means equal content (`identity_key`), booking date, value date and
+  provider reference, with a missing reference its own value. The reference is part of
+  the key whatever the account's trust, so two identical same-day payments under
+  different references stay two payments. Rows equal in all of it pair by count: the
+  ledger holds M, the bank returns N no greater than M, nothing is inserted.
+- Within one key, equal statuses pair first, then a booked row pairs with a stored
+  pending one (a supersession), and a pending restatement of a booked row is consumed
+  without a write. Superseded rows are never paired: a supersession chain is one payment.
+- Rule 1's restatement collapse for trusted references runs over the whole fetch before
+  this pairing, so a pending and booked pair that straddles the window collapses on a
+  refresh exactly as it did on first link.
+- When the bank returns a booking fewer times than the ledger holds it, the extra rows
+  are flagged `duplicate_of_stored_booking`. That is the shape the copies from #59 have.
+  Nothing is deleted, and a booking the bank did not return at all is never flagged.
+
+Whether an insert duplicates something is decided once, over the ledger as the plan
+leaves it, by `_disclose`: an insert that shares content or a reference with another row
+within `AMOUNT_ONLY_MATCH_WINDOW_DAYS`, one of the two dated before the window, flags
+both, on the active end of each supersession chain. `backfill` loads those chain ends by
+pointer as `chain_ends`, because a chain corrected below the window can end on a row
+older than `below` reaches. Two rows inside the window are never compared.
 
 ## Applying a plan
 

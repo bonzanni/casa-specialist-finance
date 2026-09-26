@@ -875,16 +875,45 @@ def backfill(ais, conn, account: dict, session_id: str,
     stored = [dict(r) for r in conn.execute(
         "SELECT * FROM transactions WHERE account_id=? AND booking_date >= ?"
         " AND booking_date < ?", (aid, requested_from, end))]
-    # ACTIVE rows dated just before the window (issue #32). A booking the bank
-    # re-dates from here into the window cannot be matched -- the row that
-    # would match it is out of view -- so reconcile uses these only to FLAG
-    # such an insert and the row it duplicates. Never as match candidates.
-    edge_from = (dt.date.fromisoformat(requested_from) - dt.timedelta(
-        days=ingest.AMOUNT_ONLY_MATCH_WINDOW_DAYS)).isoformat()
-    edge = [dict(r) for r in conn.execute(
-        "SELECT * FROM transactions WHERE account_id=? AND state='active'"
+    # Rows dated BEFORE the window, active and superseded. Never match
+    # candidates (issue #32): their own restatement need not be in the fetch,
+    # so they would absorb a different payment. Reconcile pairs an active one
+    # with a fetched row that is provably the same booking -- a bank may answer
+    # with rows older than it was asked for, and before issue #59 every one of
+    # them was inserted again on every sync -- and uses all of them to FLAG an
+    # insert that looks like one. So the range reaches the edge band that #32
+    # needs AND the band around the oldest fetched row dated before the window.
+    band = dt.timedelta(days=ingest.AMOUNT_ONLY_MATCH_WINDOW_DAYS)
+    below_from = (dt.date.fromisoformat(requested_from) - band).isoformat()
+    older = [r["booking_date"] for r in fetched
+             if _is_iso_date(r.get("booking_date"))
+             and r["booking_date"] < requested_from]
+    if older:
+        below_from = min(below_from, (dt.date.fromisoformat(min(older))
+                                      - band).isoformat())
+    below = [dict(r) for r in conn.execute(
+        "SELECT * FROM transactions WHERE account_id=?"
+        " AND state IN ('active','superseded')"
         " AND booking_date >= ? AND booking_date < ?",
-        (aid, edge_from, requested_from))]
+        (aid, below_from, requested_from))]
+    # The ACTIVE end of every loaded supersession chain, found by pointer and
+    # not by date: a chain corrected below the window can end on a row dated
+    # before `below_from`. Disclosure only.
+    chain_ends = {}
+    for r in stored + below:
+        if r["state"] != "superseded" or r.get("superseded_by") is None:
+            continue
+        seen, nxt = {r["row_id"]}, r["superseded_by"]
+        while nxt is not None and nxt not in seen:
+            seen.add(nxt)
+            row = conn.execute("SELECT * FROM transactions WHERE row_id=?"
+                               " AND account_id=?", (nxt, aid)).fetchone()
+            if row is None:
+                break
+            if row["state"] == "active":
+                chain_ends[r["row_id"]] = dict(row)
+                break
+            nxt = row["superseded_by"]
     aspsp = _aspsp_of(conn, account)
     # MEASURE BEFORE RECONCILE. The run that carries the counter-evidence
     # must not itself rewrite history under the premise it just refuted: a
@@ -972,7 +1001,8 @@ def backfill(ais, conn, account: dict, session_id: str,
     reconcile_interval = (end, end)
 
     plan = ingest.reconcile(stored, fetched, reconcile_interval, capability,
-                            allocated=allocated, edge=edge)
+                            allocated=allocated, below=below,
+                            chain_ends=chain_ends, window_from=requested_from)
 
     def _evidence_and_revalidate(c):
         """Inside apply_plan's BEGIN IMMEDIATE, before any plan row lands.
@@ -1043,7 +1073,8 @@ def backfill(ais, conn, account: dict, session_id: str,
             if not ingest.ref_trusted(current):
                 return ingest.reconcile(stored, fetched, reconcile_interval,
                                         current, allocated=allocated,
-                                        edge=edge)
+                                        below=below, chain_ends=chain_ends,
+                                        window_from=requested_from)
         return None
 
     try:

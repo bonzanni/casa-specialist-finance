@@ -666,7 +666,7 @@ class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
     def test_a_content_twin_is_inserted_and_both_are_flagged(self):
         edge = [row("2026-07-26", rid=5)]
         fetched = [row("2026-07-28")]
-        plan = ingest.reconcile([], fetched, self.WINDOW, UNSTABLE, edge=edge)
+        plan = ingest.reconcile([], fetched, self.WINDOW, UNSTABLE, below=edge)
         self.assertEqual(len(plan.inserts), 1)
         self.assertEqual((plan.inserts[0]["needs_review"],
                           plan.inserts[0]["reason"]), (True, self.REASON))
@@ -676,7 +676,7 @@ class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
     def test_a_reference_twin_with_a_corrected_amount_is_flagged(self):
         edge = [row("2026-07-26", amount=1000, ref="R1", rid=5)]
         fetched = [row("2026-07-28", amount=1100, ref="R1")]
-        plan = ingest.reconcile([], fetched, self.WINDOW, STABLE, edge=edge)
+        plan = ingest.reconcile([], fetched, self.WINDOW, STABLE, below=edge)
         self.assertEqual(plan.inserts[0]["reason"], self.REASON)
         self.assertEqual(plan.flags, [{"row_id": 5, "reason": self.REASON}])
 
@@ -689,7 +689,7 @@ class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
         for cap in (STABLE, UNSTABLE):
             bare = ingest.reconcile(stored, fetched, self.WINDOW, cap)
             seen = ingest.reconcile(stored, fetched, self.WINDOW, cap,
-                                    edge=edge)
+                                    below=edge)
             self.assertEqual(self._decisions(seen), self._decisions(bare))
             self.assertEqual(bare.flags, [])
             # Both inserts are within three days of the edge row; it is
@@ -701,7 +701,7 @@ class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
     def test_a_week_apart_is_a_recurrence_not_a_re_date(self):
         edge = [row("2026-07-23", rid=5)]
         plan = ingest.reconcile([], [row("2026-07-27")], self.WINDOW,
-                                UNSTABLE, edge=edge)
+                                UNSTABLE, below=edge)
         self.assertEqual(plan.flags, [])
         self.assertFalse(plan.inserts[0]["needs_review"])
 
@@ -709,14 +709,14 @@ class TestWindowEdgeIsDisclosureOnly(unittest.TestCase):
         edge = [dict(row("2026-07-26", rid=5), needs_review=1,
                      review_reason="amount_changed")]
         plan = ingest.reconcile([], [row("2026-07-28")], self.WINDOW,
-                                UNSTABLE, edge=edge)
+                                UNSTABLE, below=edge)
         self.assertEqual(plan.flags, [])
         self.assertEqual(plan.inserts[0]["reason"], self.REASON)
 
     def test_a_malformed_date_is_near_nothing(self):
         edge = [row("2026-07-2x", rid=5)]
         plan = ingest.reconcile([], [row("2026-07-28")], self.WINDOW,
-                                UNSTABLE, edge=edge)
+                                UNSTABLE, below=edge)
         self.assertEqual(plan.flags, [])
         self.assertEqual(len(plan.inserts), 1)
 

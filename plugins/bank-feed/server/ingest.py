@@ -106,11 +106,17 @@ and the read tools can report the breakdown by name:
                                do not size either from a sample.
   duplicate_across_window_edge -- a fresh insert shares its content or its
                                reference, within AMOUNT_ONLY_MATCH_WINDOW_DAYS,
-                               with an ACTIVE row dated just before the
-                               caller's window (`edge`). Probably one payment
-                               the bank re-dated into the window. Carried on
-                               the insert AND flagged on the edge row, unless
-                               that row is already under review.
+                               with another row, one of the two dated before
+                               the caller's window. Probably one payment the
+                               bank re-dated across the edge, or returned
+                               twice. Carried on the insert AND flagged on the
+                               other row (the active end of its supersession
+                               chain), unless that row is already under
+                               review. See `_disclose`.
+  duplicate_of_stored_booking -- a stored row dated before the window whose
+                               exact booking (content, both dates, reference)
+                               the bank returned fewer times than the ledger
+                               holds it: the shape issue #59's copies have.
   direction_or_currency_changed -- a reference match rewrote `direction` or
                                `currency`: the magnitude matched, so
                                corroboration scored it 1.0, but a DBIT->CRDT
@@ -258,6 +264,16 @@ def _date(value: str) -> _dt.date:
 
 def _days(a: str, b: str) -> int:
     return abs((_date(a) - _date(b)).days)
+
+
+def _before(value, bound: str) -> bool:
+    """True when `value` is an ISO date earlier than `bound`. Provider text is
+    unvalidated: a date that does not parse is before nothing, and the row takes
+    the ordinary path it always took."""
+    try:
+        return _date(value) < _date(bound)
+    except (TypeError, ValueError):
+        return False
 
 
 def _status(row: dict) -> str:
@@ -545,18 +561,33 @@ def _best_matching(fetched_items, stored_items, window, blocked=frozenset()):
 def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
               match_window_days: int = MATCH_WINDOW_DAYS,
               allocated: dict | None = None,
-              edge: list | None = None) -> Plan:
+              below: list | None = None,
+              chain_ends: dict | None = None,
+              window_from: str | None = None) -> Plan:
     """`stored` must contain rows in EVERY state — passing only state='active'
     rows lets a tombstoned occurrence be reissued (rule 4).
 
-    `edge` is the ACTIVE rows dated just before the caller's window (issue
-    #32), and it is DISCLOSURE ONLY. An edge row never enters rule 1, rule 2,
-    rule 3 or occurrence allocation: its own restatement is never in the fetch,
-    so as a match candidate it would always be free to absorb a DIFFERENT
-    payment -- next week's identical standing order by content, or a distinct
-    payment by a reused reference. Both shapes were built and lost a payment.
-    What an edge row does is name a fresh insert that looks like it: see the
-    insert pass below.
+    `below` is the stored rows, active and superseded, dated before the
+    caller's window (`window_from`). A below row never enters rule 1, rule 2,
+    rule 3 or occurrence allocation (issue #32): its own restatement need not be
+    in the fetch, so as a match candidate it would always be free to absorb a
+    DIFFERENT payment -- next week's identical standing order by content, or a
+    distinct payment by a reused reference. Both shapes were built and lost a
+    payment. A below row does two narrower things. An ACTIVE one pairs with a
+    fetched row that is provably the same booking (the pre-pass below, issue
+    #59). Any of them discloses an insert that looks like it (see disclosure at
+    the end).
+
+    `window_from` is the date the caller asked the bank from. A bank may answer
+    with rows older than that, and a routine refresh asks from about a week
+    back, so everything older was once inserted again on every sync (issue
+    #59). A fetched row dated before it NEVER matches: it pairs exactly with a
+    below row, or it is inserted. None means the caller has no window, and no
+    fetched row counts as below it.
+
+    `chain_ends` maps a superseded row_id to the ACTIVE row at the end of its
+    supersession chain, whatever that row's date, so a disclosure that names
+    a superseded row can flag the row that stands for it. Disclosure only.
 
     `allocated` is `apply.occurrence_allocations(conn, account_id, keys)`: the
     DURABLE high-water occurrence per identity cluster. Omitting it is safe
@@ -568,15 +599,22 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
     start, end = interval
     inserts, updates, tombstones, flags = [], [], [], []
     stored = [dict(s) for s in stored]
-    for s in stored:
+    below_rows = [dict(b) for b in (below or ())]
+    for s in stored + below_rows:
         if not s.get("identity_key"):      # lazy, for the reason in _next_occurrence
             s["identity_key"] = identity_key(s)
         if s.get("occurrence") is None:
             s["occurrence"] = 0
         if not s.get("state"):
             s["state"] = "active"
+    # The rows as loaded, before any shadow row is appended: disclosure reads
+    # the ledger this plan starts from.
+    window_rows = list(stored)
     live = [s for s in stored if s["state"] == "active"]
     matched_rows, matched_fetched, unresolved = set(), set(), set()
+    # Fetched rows dated before the window that the pre-pass could not pair.
+    # They go straight to the insert pass: never a rule-1 rep, never clustered.
+    below_fi = set()
 
     # Every fetched row indexed by content, so any stored row can ask
     # "is my own content sitting in this page?".
@@ -728,18 +766,15 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
         if _changed(s, upd) or rekeyed or needs_review:
             updates.append(upd)
 
-    # ---- rule 1: reference identity, corroborated, PER-ASPSP ---------------
-    # ref_stable means unique WITHIN THE RECORDED SCOPE, and this whole block
-    # is built around that consequence: every fetched row sharing one trusted
-    # reference is resolved as a GROUP, deterministically, rather than
-    # one-fetched-row-at-a-time in provider page order — which would make the
-    # outcome depend on that order, and let a failing candidate be popped and
-    # lost for the fetched row that would actually have corroborated it).
-    if ref_trusted(capability):
-        by_ref_stored = {}
-        for s in live:
-            if s.get("provider_ref"):
-                by_ref_stored.setdefault(s["provider_ref"], []).append(s)
+    # ---- restatement collapse: trusted references, over the WHOLE fetch ----
+    # Part of rule 1, and run ahead of the pre-pass below so both sides of the
+    # window see exactly the rows a first-link deep run sees. Its logic is
+    # rule 1's own: moving it only makes a straddling pair (pending on the day
+    # before the window, booked on the day after) collapse on a refresh exactly
+    # as it collapsed on first link (issue #59).
+    trusted = ref_trusted(capability)
+    reps_by_ref = {}
+    if trusted:
         by_ref_fetched = {}
         for fi, f in enumerate(fetched):
             ref = f.get("provider_ref")
@@ -843,7 +878,105 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
                             matched_fetched.add(dup_fi)   # a restatement of the
                                                           # kept row: no separate
                                                           # Plan record
+            reps_by_ref[ref] = reps
 
+    # ---- pre-pass: fetched rows dated before the window (issue #59) --------
+    # A routine refresh asks the bank from about a week back. A bank may answer
+    # with its whole history anyway, and before this pass every row older than
+    # the window was inserted again, unflagged, on every sync: the stored row
+    # it restates is below the window, out of every rule's view.
+    #
+    # Such a row NEVER matches -- the mirror of the rule that below rows are
+    # never match candidates. It pairs with an ACTIVE below row that is the
+    # same booking by every field the bank sends that identifies one: content
+    # (identity_key), booking date, value date and provider reference, NULL
+    # being its own value. The reference is in the key whatever the account's
+    # trust: two identical same-day payments under different references are
+    # two payments. What cannot be told apart is two rows equal in all of it,
+    # and those pair by count: the ledger holds M, the bank returns N <= M, no
+    # insert. The alternative re-inserts all such history on every sync.
+    # Superseded rows are never candidates: a supersession chain is one
+    # payment, and only its active row stands for it.
+    #
+    # Within a key group, equal status ranks pair first, then a fetched row
+    # outranking its stored one (pending -> booked: emit_match supersedes),
+    # and only then the rest, which are consumed with no record: a pending
+    # restatement never unbooks a settled row. Pairing equal ranks first keeps
+    # an unchanged pending-and-booked pair from being cross-paired into a
+    # false supersession.
+    #
+    # Whatever is left unpaired is inserted, and disclosed at the end when
+    # anything in the ledger looks like it.
+    if window_from is not None:
+        def _pkey(row, ident):
+            return (ident, row.get("booking_date"), row.get("value_date"),
+                    row.get("provider_ref"))
+
+        cand_by_key = {}
+        for b in below_rows:
+            if b["state"] == "active":
+                cand_by_key.setdefault(_pkey(b, b["identity_key"]), []).append(b)
+        fetched_by_key = {}
+        for fi, f in enumerate(fetched):
+            if fi in matched_fetched or not _before(f.get("booking_date"),
+                                                   window_from):
+                continue
+            below_fi.add(fi)
+            fetched_by_key.setdefault(_pkey(f, identity_key(f)), []).append(
+                (fi, f))
+        for key in sorted(fetched_by_key, key=repr):
+            free_f = sorted(fetched_by_key[key],
+                            key=lambda t: (_status_rank(t[1]), t[0]))
+            free_c = sorted(cand_by_key.get(key, ()),
+                            key=lambda r: (r["occurrence"], r["row_id"]))
+            pairs = []
+            for admissible in (lambda fr, cr: fr == cr,
+                               lambda fr, cr: fr < cr,
+                               lambda fr, cr: True):
+                for item in list(free_f):
+                    for c in free_c:
+                        if admissible(_status_rank(item[1]), _status_rank(c)):
+                            pairs.append((item, c))
+                            free_f.remove(item)
+                            free_c.remove(c)
+                            break
+            for (fi, f), c in pairs:
+                below_fi.discard(fi)
+                matched_fetched.add(fi)
+                if _status_rank(f) <= _status_rank(c):
+                    emit_match(c, f, "same_booking", 1.0, False)
+            # The bank returned this exact booking fewer times than the ledger
+            # holds it. Rows the defect copied look exactly like this: same
+            # key, a higher occurrence (pairing takes the lowest first). A
+            # disclosure, never a deletion; and never for a key the bank did
+            # not return at all -- a shorter answer is not evidence of a copy.
+            # That holds by construction: the groups are the FETCHED keys, and
+            # the last pairing round admits any pair, so rows are left over on
+            # at most one side.
+            for c in free_c:
+                if not c.get("needs_review"):
+                    flags.append({"row_id": c["row_id"],
+                                  "reason": "duplicate_of_stored_booking"})
+    # ---- rule 1: reference identity, corroborated, PER-ASPSP ---------------
+    # ref_stable means unique WITHIN THE RECORDED SCOPE, and this whole block
+    # is built around that consequence: every fetched row sharing one trusted
+    # reference is resolved as a GROUP, deterministically, rather than
+    # one-fetched-row-at-a-time in provider page order — which would make the
+    # outcome depend on that order, and let a failing candidate be popped and
+    # lost for the fetched row that would actually have corroborated it).
+    if trusted:
+        by_ref_stored = {}
+        for s in live:
+            if s.get("provider_ref"):
+                by_ref_stored.setdefault(s["provider_ref"], []).append(s)
+
+        for ref in sorted(reps_by_ref):
+            # A rep dated before the window is the pre-pass's to pair or the
+            # insert pass's to insert; one the pre-pass paired is already done.
+            reps = [rf for rf in reps_by_ref[ref]
+                    if rf[0] not in matched_fetched and rf[0] not in below_fi]
+            if not reps:
+                continue
             cands = list(by_ref_stored.get(ref, []))
             if not cands:
                 continue    # no stored anchor for this ref; every rep here
@@ -1061,7 +1194,7 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
     # than handing reconcile a partial interval.
     clusters = {}
     for fi, f in enumerate(fetched):
-        if fi in matched_fetched:
+        if fi in matched_fetched or fi in below_fi:
             continue
         clusters.setdefault(identity_key(f), {"f": [], "s": []})["f"].append((fi, f))
     for s in live:
@@ -1131,61 +1264,21 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
                                   "reason": "unresolved_cluster"})
 
     # ---- inserts: everything still unmatched ------------------------------
-    # An insert that looks like an ACTIVE row just before the window is
-    # probably that row re-dated by the bank into it (issue #32): the booking
-    # the ledger holds is out of view, so nothing above could match it. The
-    # insert still happens -- matching it was the mechanism that lost payments
-    # -- but both rows are flagged, so the double count is disclosed.
-    #
-    # Same content, or the same reference, within AMOUNT_ONLY_MATCH_WINDOW_DAYS:
-    # the bound that separates a correction from a recurrence everywhere else
-    # in this module. MATCH_WINDOW_DAYS would flag every weekly standing order
-    # the bank posts a day or two late, since its previous occurrence then sits
-    # exactly a week back, just outside the window. The reference is compared
-    # whatever the account's trust: this decides a flag, never a match. An
-    # amount-corrected re-date with no reference is not caught.
-    edge_rows = [dict(e) for e in (edge or ())]
-    for e in edge_rows:
-        if not e.get("identity_key"):
-            e["identity_key"] = identity_key(e)
-    edge_flagged = set()
-
-    def _near(a, b) -> bool:
-        # Provider text, unvalidated: a date that does not parse is near
-        # nothing. A disclosure must never be what makes an insert raise.
-        try:
-            return _days(a, b) <= AMOUNT_ONLY_MATCH_WINDOW_DAYS
-        except (TypeError, ValueError):
-            return False
-
-    def _edge_twins(f, ident):
-        ref = f.get("provider_ref")
-        return [e for e in edge_rows
-                if (e["identity_key"] == ident
-                    or (ref and e.get("provider_ref") == ref))
-                and _near(e["booking_date"], f["booking_date"])]
-
+    # Whether an insert looks like a row the ledger already holds is decided
+    # once, over the whole plan, by the disclosure pass at the end.
+    fresh = []                  # local_ids of inserts that add a payment
     for fi, f in enumerate(fetched):
         if fi in matched_fetched:
             continue
         ident = identity_key(f)
-        twins = _edge_twins(f, ident)
         if fi in ref_reuse_fi:
             needs_review, reason = True, "provider_ref_reuse"
         elif ident in unresolved:
             needs_review, reason = True, "windowed_ambiguous"
-        elif twins:
-            needs_review, reason = True, "duplicate_across_window_edge"
         else:
             needs_review, reason = False, None
-        emit_insert(f, "inserted", 1.0, needs_review, reason)
-        for e in twins:
-            # A row already under review keeps the reason it has: apply's flag
-            # ASSIGNS review_reason, and the standing one may be about money.
-            if not e.get("needs_review") and e["row_id"] not in edge_flagged:
-                edge_flagged.add(e["row_id"])
-                flags.append({"row_id": e["row_id"],
-                              "reason": "duplicate_across_window_edge"})
+        fresh.append(emit_insert(f, "inserted", 1.0, needs_review,
+                                 reason)["local_id"])
 
     # ---- rule 3: tombstone only well inside the proven interval -----------
     inner_start = (_date(start) + _dt.timedelta(days=match_window_days)).isoformat()
@@ -1231,4 +1324,137 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
         if inner_start <= s["booking_date"] < inner_end:
             tombstones.append({"row_id": s["row_id"], "state": "vanished",
                                "reason": "absent_from_a_proven_interval"})
+    _disclose(window_rows, below_rows, chain_ends, window_from, fresh,
+              inserts, updates, flags)
     return Plan(inserts=inserts, updates=updates, tombstones=tombstones, flags=flags)
+
+
+def _near(a, b) -> bool:
+    """Within AMOUNT_ONLY_MATCH_WINDOW_DAYS. Provider text, unvalidated: a date
+    that does not parse is near nothing. A disclosure must never be what makes
+    an insert raise."""
+    try:
+        return _days(a, b) <= AMOUNT_ONLY_MATCH_WINDOW_DAYS
+    except (TypeError, ValueError):
+        return False
+
+
+def _disclose(window_rows, below_rows, chain_ends, window_from, fresh,
+              inserts, updates, flags):
+    """Flag every insert this plan adds that looks like a row across the
+    window's edge, and flag that row too (issues #32 and #59).
+
+    Evaluated over the ledger AS THE PLAN LEAVES IT, not over lists of kinds
+    of witness: stored rows (both sides of the window, active and superseded)
+    with every planned update applied, every planned supersession applied, and
+    every planned insert. Each row stands for the ACTIVE row at the end of its
+    supersession chain, and a flag lands there -- on the insert record itself
+    when the end is an insert of this plan, as a `flags` entry otherwise.
+    A list of witness kinds is the brittle alternative: each kind it leaves
+    out -- rows the pre-pass paired, superseded rows, rows this same plan
+    supersedes or rewrites, copies straddling the edge -- is an undisclosed
+    duplicate.
+
+    A fresh insert x and a row y with different chain ends are twins when
+    their booking dates are within AMOUNT_ONLY_MATCH_WINDOW_DAYS, they share
+    content or a non-null provider reference, and at least one of them is
+    dated before the window. The bound is the one that separates a correction
+    from a recurrence everywhere else: a week would flag every weekly standing
+    order posted a day late. Two rows inside the window are never compared,
+    exactly as before. The reference is compared whatever the account's trust:
+    this decides a flag, never a match. A supersession's replacement is not a
+    fresh insert (it adds no payment), but it is a row others are compared
+    with. The pass discloses the duplicates THIS plan would create; it is not
+    an audit of the ledger.
+
+    A row already under review keeps the reason it has: apply's flag ASSIGNS
+    review_reason, and the standing one may be about money. So does a row this
+    plan already flags or updates under review.
+    """
+    if not fresh:
+        return
+    below_ids = {b["row_id"] for b in below_rows}
+    by_id = {r["row_id"]: r for r in window_rows + below_rows}
+    upd = {u["row_id"]: u for u in updates if u.get("op") == "update"}
+    succ = {u["row_id"]: u["superseded_by_local"] for u in updates
+            if u.get("op") == "supersede"}
+    ins = {rec["local_id"]: rec for rec in inserts}
+    ends = dict(chain_ends or {})
+    extra = {}                        # chain ends loaded by pointer, not date
+
+    nodes = {}
+    for r in window_rows + below_rows:
+        if r["state"] not in ("active", "superseded"):
+            continue
+        cur = upd.get(r["row_id"], r)
+        nodes[("s", r["row_id"])] = (
+            cur.get("booking_date"), cur.get("identity_key") or r["identity_key"],
+            cur.get("provider_ref"), r["row_id"] in below_ids)
+    for rec in inserts:
+        nodes[("i", rec["local_id"])] = (
+            rec.get("booking_date"), rec["identity_key"], rec.get("provider_ref"),
+            window_from is not None and _before(rec.get("booking_date"),
+                                                window_from))
+
+    def end_of(node):
+        seen = set()
+        while node not in seen:
+            seen.add(node)
+            kind, key = node
+            if kind == "i":
+                return node
+            if key in succ:
+                node = ("i", succ[key])
+                continue
+            row = by_id.get(key)
+            if row is None:
+                return None
+            if row["state"] == "active":
+                return node
+            nxt = row.get("superseded_by")
+            if nxt in by_id:
+                node = ("s", nxt)
+                continue
+            end = ends.get(key)
+            if end is None:
+                return None
+            extra[end["row_id"]] = end
+            return ("s", end["row_id"])
+        return None
+
+    by_ident, by_ref = {}, {}
+    for node, (_d, ident, ref, _b) in nodes.items():
+        by_ident.setdefault(ident, []).append(node)
+        if ref:
+            by_ref.setdefault(ref, []).append(node)
+
+    targets = set()
+    for local in fresh:
+        x = ("i", local)
+        date, ident, ref, below = nodes[x]
+        ex = end_of(x)
+        for y in set(by_ident.get(ident, ())) | set(by_ref.get(ref, ()) if ref else ()):
+            if y == x:
+                continue
+            ydate, _yi, _yr, ybelow = nodes[y]
+            if not (below or ybelow) or not _near(date, ydate):
+                continue
+            ey = end_of(y)
+            if ey is None or ey == ex:
+                continue
+            targets.update((ex, ey))
+
+    reason = "duplicate_across_window_edge"
+    flagged = {f["row_id"] for f in flags}
+    reviewed = {u["row_id"] for u in updates if u.get("needs_review")}
+    for kind, key in sorted(targets, key=repr):
+        if kind == "i":
+            rec = ins[key]
+            if not rec["needs_review"]:
+                rec["needs_review"], rec["reason"] = True, reason
+            continue
+        row = by_id.get(key) or extra.get(key)
+        if row.get("needs_review") or key in flagged or key in reviewed:
+            continue
+        flagged.add(key)
+        flags.append({"row_id": key, "reason": reason})

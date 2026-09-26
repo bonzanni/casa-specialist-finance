@@ -1044,6 +1044,360 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
             [("2026-07-21", 0), ("2026-07-29", 0), ("2026-07-28", 0)])
 
 
+class IgnoringAIS:
+    """A bank that ignores `date_from` and answers with the same rows, whole,
+    on every call -- what the sandbox did in issue #59."""
+
+    def __init__(self, rows):
+        self.rows, self.asked = rows, []
+
+    def transactions(self, uid, date_from, continuation_key=None):
+        self.asked.append(date_from)
+        return list(self.rows), None
+
+
+class TestHistoryOlderThanTheWindow(unittest.TestCase):
+    """Issue #59. A routine refresh asks from `newest booking - 7 days`, the
+    bank answers with its whole history anyway, and reconcile saw stored rows
+    only inside the window: every older row was inserted again, unflagged, on
+    every sync. A fetched row dated before the window now pairs with the
+    stored row that is the same booking, or is inserted and disclosed."""
+
+    ANCHOR = raw_tx("2026-08-03", amount="3.00", ref="A1", remittance="koffie")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = store.open_db(pathlib.Path(self.tmp.name) / "f.sqlite")
+        self._real_today = flows._today
+        flows._today = lambda: TODAY
+        self.conn.execute(
+            "INSERT INTO accounts(account_id, uid, session_id, currency, aspsp)"
+            " VALUES ('acc1','uid-1','s1','EUR','Revolut')")
+
+    def tearDown(self):
+        flows._today = self._real_today
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _link(self, txs):
+        """A first-link deep backfill (the observed full-history run)."""
+        return flows.backfill(IgnoringAIS(txs), self.conn, ACCOUNT, "s1",
+                              observe=True, incarnation="")
+
+    def _window(self):
+        class Pinned(dt.date):
+            @classmethod
+            def today(cls):
+                return TODAY
+        real = tools_refresh._dt
+        tools_refresh._dt = types.SimpleNamespace(**dict(vars(dt), date=Pinned))
+        try:
+            return tools_refresh._refresh_window_days(self.conn, "acc1")
+        finally:
+            tools_refresh._dt = real
+
+    def _refresh(self, txs):
+        """A routine refresh, with the window `sync` itself would ask for.
+        Returns the date the bank was asked from."""
+        ais = IgnoringAIS(txs)
+        flows.backfill(ais, self.conn, ACCOUNT, "s1",
+                       floor_days=self._window(), incarnation="")
+        return ais.asked[0]
+
+    @staticmethod
+    def _tx(date, amount="12.34", ref=None, status="BOOK", remittance="boodschappen",
+            value_date=None):
+        tx = raw_tx(date, amount=amount, ref=ref, remittance=remittance)
+        tx["status"] = status
+        if value_date is not None:
+            tx["value_date"] = value_date
+        return tx
+
+    def _rows(self):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT row_id, booking_date, value_date, amount_minor, status, state,"
+            " provider_ref, remittance, occurrence, needs_review, review_reason"
+            " FROM transactions ORDER BY row_id")]
+
+    def _active(self):
+        return [r for r in self._rows() if r["state"] == "active"]
+
+    def _history(self, refs=True):
+        """Forty bookings between February and June, one a day on distinct
+        days, plus the anchor on TODAY that sets the refresh window."""
+        start = dt.date(2026, 2, 1)
+        out = []
+        for i in range(40):
+            day = (start + dt.timedelta(days=3 * i)).isoformat()
+            out.append(self._tx(day, amount="%d.00" % (10 + i % 4),
+                                ref=("%s.0" % day) if refs else None,
+                                remittance="betaling %d" % (i % 5)))
+        return out + [self.ANCHOR]
+
+    # ---- (a) the reproduction ------------------------------------------------
+
+    def _assert_refreshes_add_nothing(self, refs):
+        history = self._history(refs)
+        self._link(history)
+        before = self._rows()
+        self.assertEqual(len(before), 41)
+        for _ in range(2):
+            asked = self._refresh(history)
+            # The bank really was asked for a narrow window and ignored it.
+            self.assertEqual(asked, "2026-07-27")
+            self.assertEqual(self._rows(), before)
+
+    def test_untrusted_positional_references_add_nothing(self):
+        self._assert_refreshes_add_nothing(refs=True)
+
+    def test_trusted_references_add_nothing(self):
+        observe(self.conn)
+        self._assert_refreshes_add_nothing(refs=True)
+
+    def test_reference_less_history_adds_nothing(self):
+        self._assert_refreshes_add_nothing(refs=False)
+
+    # ---- (b) and (c) unseen older bookings are still kept ---------------------
+
+    def test_an_unseen_older_booking_is_inserted(self):
+        history = self._history()
+        self._link(history)
+        floor = self.conn.execute(
+            "SELECT history_answered_from FROM accounts").fetchone()[0]
+        unseen = self._tx("2026-03-15", amount="77.00", ref="2026-03-15.9",
+                          remittance="nieuw")
+        self._refresh(history + [unseen])
+        rows = [r for r in self._active() if r["amount_minor"] == 7700]
+        self.assertEqual([(r["booking_date"], r["needs_review"]) for r in rows],
+                         [("2026-03-15", 0)])
+        self.assertEqual(len(self._active()), 42)
+        self.assertEqual(self.conn.execute(
+            "SELECT history_answered_from FROM accounts").fetchone()[0], floor)
+
+    def test_an_unseen_recurrence_on_another_date_is_a_new_occurrence(self):
+        rent = self._tx("2026-04-01", amount="900.00", ref="R-apr",
+                        remittance="huur")
+        self._link([rent, self.ANCHOR])
+        may = self._tx("2026-05-01", amount="900.00", ref="R-may",
+                       remittance="huur")
+        self._refresh([rent, may, self.ANCHOR])
+        rows = [(r["booking_date"], r["occurrence"], r["needs_review"])
+                for r in self._active() if r["amount_minor"] == 90000]
+        self.assertEqual(rows, [("2026-04-01", 0, 0), ("2026-05-01", 1, 0)])
+
+    # ---- existing damage -------------------------------------------------------
+
+    def _copy_row(self, row_id):
+        """What the defect wrote: an exact copy at the cluster's next free
+        occurrence. Returns the copy's row_id."""
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(transactions)")
+                if r[1] != "row_id"]
+        nxt = ("(SELECT MAX(occurrence) + 1 FROM transactions t"
+               " WHERE t.identity_key = transactions.identity_key)")
+        cur = self.conn.execute(
+            "INSERT INTO transactions(%s) SELECT %s FROM transactions"
+            " WHERE row_id=?" % (",".join(cols), ",".join(
+                nxt if c == "occurrence" else c for c in cols)),
+            (row_id,))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def _assert_copies_disclosed(self, refs):
+        history = self._history(refs)
+        self._link(history)
+        victims = [r["row_id"] for r in self._active()
+                   if r["booking_date"] in ("2026-02-01", "2026-03-06")]
+        copies = [self._copy_row(rid) for rid in victims]
+        self._refresh(history)
+        active = self._active()
+        self.assertEqual(len(active), 43)                    # nothing new
+        self.assertEqual(
+            sorted((r["row_id"], r["review_reason"])
+                   for r in active if r["needs_review"]),
+            [(rid, "duplicate_of_stored_booking") for rid in copies])
+
+    def test_existing_copies_are_disclosed(self):
+        self._assert_copies_disclosed(refs=True)
+
+    def test_existing_reference_less_copies_are_disclosed(self):
+        self._assert_copies_disclosed(refs=False)
+
+    def test_a_booking_the_bank_no_longer_returns_is_not_called_a_copy(self):
+        history = self._history()
+        self._link(history)
+        self._refresh(history[1:])                    # the oldest one omitted
+        self.assertEqual([r for r in self._active() if r["needs_review"]], [])
+
+    # ---- what pairing may not do ----------------------------------------------
+
+    def test_a_different_reference_on_the_same_day_is_a_different_payment(self):
+        a = self._tx("2026-07-01", ref="A")
+        self._link([a, self.ANCHOR])
+        b = self._tx("2026-07-01", ref="B")
+        self._refresh([b, self.ANCHOR])               # the bank omits A
+        rows = [(r["provider_ref"], r["needs_review"], r["review_reason"])
+                for r in self._active() if r["booking_date"] == "2026-07-01"]
+        self.assertEqual(sorted(rows), [
+            ("A", 1, "duplicate_across_window_edge"),
+            ("B", 1, "duplicate_across_window_edge")])
+
+    def test_a_superseded_row_is_not_a_second_slot(self):
+        # Pending A booked on the same day: one payment, two physical rows.
+        self._link([self._tx("2026-07-01", status="PDNG"), self.ANCHOR])
+        self._link([self._tx("2026-07-01"), self.ANCHOR])
+        self.assertEqual(len(self._active()), 2)
+        # Booked A and a distinct identical B come back.
+        self._refresh([self._tx("2026-07-01"), self._tx("2026-07-01"),
+                       self.ANCHOR])
+        rows = [r for r in self._active() if r["booking_date"] == "2026-07-01"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r["needs_review"] for r in rows], [1, 1])
+
+    def test_a_pending_restatement_never_unbooks_a_booked_row(self):
+        observe(self.conn)
+        self._link([self._tx("2026-07-01", ref="R"), self.ANCHOR])
+        before = self._rows()
+        self._refresh([self._tx("2026-07-01", ref="R", status="PDNG"),
+                       self.ANCHOR])
+        self.assertEqual(self._rows(), before)
+
+    def test_a_pending_row_is_booked_by_its_restatement(self):
+        self._link([self._tx("2026-07-01", ref="R", status="PDNG"), self.ANCHOR])
+        self._refresh([self._tx("2026-07-01", ref="R"), self.ANCHOR])
+        rows = [(r["status"], r["state"], r["needs_review"]) for r in self._rows()
+                if r["booking_date"] == "2026-07-01"]
+        self.assertEqual(rows, [("PDNG", "superseded", 0),
+                                ("BOOK", "active", 0)])
+
+    def test_an_unchanged_pending_and_booked_pair_stays_as_it_is(self):
+        pair = [self._tx("2026-07-01", status="PDNG"), self._tx("2026-07-01")]
+        self._link(pair + [self.ANCHOR])
+        before = self._rows()
+        self.assertEqual(len(before), 3)
+        for _ in range(3):
+            self._refresh(pair + [self.ANCHOR])
+            self.assertEqual(self._rows(), before)
+
+    def test_a_different_value_date_is_not_the_same_booking(self):
+        self._link([self._tx("2026-07-01", value_date="2026-06-30"),
+                    self.ANCHOR])
+        self._refresh([self._tx("2026-07-01", value_date="2026-07-01"),
+                       self.ANCHOR])
+        rows = [r for r in self._active() if r["booking_date"] == "2026-07-01"]
+        self.assertEqual([r["needs_review"] for r in rows], [1, 1])
+
+    def _assert_in_window_payment_untouched(self):
+        a = self._tx("2026-07-22", ref="RA")
+        c = self._tx("2026-07-28", ref="RC")
+        self._link([a, c, self.ANCHOR])
+        b = self._tx("2026-07-22", ref="RB")
+        self.assertEqual(self._refresh([a, b, self.ANCHOR]), "2026-07-27")
+        active = self._active()
+        self.assertEqual(len(active), 4)
+        self.assertIn(("2026-07-28", "RC"),
+                      [(r["booking_date"], r["provider_ref"]) for r in active])
+
+    def test_an_older_row_never_overwrites_an_in_window_payment(self):
+        self._assert_in_window_payment_untouched()
+
+    def test_an_older_row_never_overwrites_an_in_window_payment_trusted(self):
+        observe(self.conn)
+        self._assert_in_window_payment_untouched()
+
+    def test_a_booking_re_dated_back_across_the_edge_is_disclosed_not_matched(self):
+        # Trusted reference, corroborating date and amount: inside the window
+        # rule 1 would move the row. A fetched row dated before the window
+        # never matches, so it is inserted and both rows are flagged.
+        observe(self.conn)
+        self._link([self._tx("2026-07-28", ref="RC"), self.ANCHOR])
+        self.assertEqual(self._refresh([self._tx("2026-07-26", ref="RC"),
+                                        self.ANCHOR]), "2026-07-27")
+        rows = sorted((r["booking_date"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-26", 1), ("2026-07-28", 1)])
+
+    # ---- disclosure ------------------------------------------------------------
+
+    def test_an_obsolete_pending_row_is_flagged_with_its_booking(self):
+        # Pending on 20 July, booked on 24 July under another reference: rule 2
+        # supersedes it by content on the deep run.
+        self._link([self._tx("2026-07-20", ref="RP", status="PDNG"),
+                    self.ANCHOR])
+        self._link([self._tx("2026-07-24", ref="RB"), self.ANCHOR])
+        self.assertEqual(len(self._active()), 2)
+        self._refresh([self._tx("2026-07-20", ref="RP", status="PDNG"),
+                       self._tx("2026-07-24", ref="RB"), self.ANCHOR])
+        rows = sorted((r["booking_date"], r["status"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-20", "PDNG", 1),
+                                ("2026-07-24", "BOOK", 1)])
+
+    def test_two_identical_unseen_bookings_are_both_flagged(self):
+        self._link([self.ANCHOR])
+        self._link([self._tx("2026-07-29", amount="1.00"), self.ANCHOR])
+        self._refresh([self._tx("2026-07-20"), self._tx("2026-07-20"),
+                       self.ANCHOR])
+        rows = [r["needs_review"] for r in self._active()
+                if r["booking_date"] == "2026-07-20"]
+        self.assertEqual(rows, [1, 1])
+
+    def test_a_flag_on_a_row_this_pass_supersedes_lands_on_its_booking(self):
+        self._link([self._tx("2026-07-20", ref="R", status="PDNG"), self.ANCHOR])
+        self._refresh([self._tx("2026-07-20", ref="R"),
+                       self._tx("2026-07-21", ref="R"), self.ANCHOR])
+        rows = [(r["booking_date"], r["status"], r["state"], r["needs_review"])
+                for r in self._rows() if r["amount_minor"] == 1234]
+        self.assertEqual(sorted(rows), [
+            ("2026-07-20", "BOOK", "active", 1),
+            ("2026-07-20", "PDNG", "superseded", 0),
+            ("2026-07-21", "BOOK", "active", 1)])
+
+    def test_copies_straddling_the_window_are_flagged(self):
+        self._link([self.ANCHOR])
+        self._refresh([self._tx("2026-07-26", ref="R1"),
+                       self._tx("2026-07-27", ref="R1"), self.ANCHOR])
+        rows = [r["needs_review"] for r in self._active()
+                if r["amount_minor"] == 1234]
+        self.assertEqual(rows, [1, 1])
+
+    def test_trusted_restatements_straddling_the_window_collapse(self):
+        observe(self.conn)
+        answer = [self._tx("2026-07-26", ref="R1", status="PDNG"),
+                  self._tx("2026-07-27", ref="R1"), self.ANCHOR]
+        self._link(answer)
+        before = self._rows()
+        self.assertEqual(len(before), 2)
+        for _ in range(2):
+            self._refresh(answer)
+            self.assertEqual(self._rows(), before)
+
+    def test_an_insert_is_compared_with_the_content_an_update_wrote(self):
+        observe(self.conn)
+        self._link([self._tx("2026-07-28", ref="R", remittance="oud"),
+                    self.ANCHOR])
+        self._refresh([self._tx("2026-07-27", ref="R", remittance="nieuw"),
+                       self._tx("2026-07-26", ref="R2", remittance="nieuw"),
+                       self.ANCHOR])
+        rows = sorted((r["booking_date"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-26", 1), ("2026-07-27", 1)])
+
+    def test_the_booking_at_the_end_of_an_old_chain_is_flagged(self):
+        observe(self.conn)
+        self._link([self._tx("2026-06-10", ref="R", status="PDNG"), self.ANCHOR])
+        self._link([self._tx("2026-06-08", ref="R"), self.ANCHOR])
+        self._link([self._tx("2026-06-06", ref="R"), self.ANCHOR])
+        self.assertEqual(
+            [(r["booking_date"], r["state"]) for r in self._rows()
+             if r["amount_minor"] == 1234],
+            [("2026-06-10", "superseded"), ("2026-06-06", "active")])
+        self._refresh([self._tx("2026-06-10", ref="R", status="PDNG"),
+                       self.ANCHOR])
+        rows = sorted((r["booking_date"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-06-06", 1), ("2026-06-10", 1)])
+
+
 class TestCompleteRenewal(unittest.TestCase):
     """Driven through the entry point `tools_auth` actually calls.
     Renewal must COMPLETE — the resident is asked, they tap, the system keeps
