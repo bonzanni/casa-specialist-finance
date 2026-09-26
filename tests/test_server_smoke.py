@@ -283,6 +283,9 @@ class TestPluginManifest(unittest.TestCase):
         self.assertIn("keep=rules, account settings;", purge)
         self.assertIn("erase=ALL notes/tags/rules/settings", purge)
         self.assertIn("(all: + balances)", purge)
+        # Coverage can prove a period had NO transactions; purging it loses
+        # that proof even when no row is deleted, so it is named (#65).
+        self.assertIn("notes/tags/coverage", purge)
         # "Backup first." read as an instruction; the tool backs up itself.
         for name in ("purge", "forget_local_account"):
             self.assertNotIn("Backup first", summary[name])
