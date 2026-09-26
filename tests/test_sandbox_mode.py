@@ -326,9 +326,10 @@ class TestProductionSetupGuard(SandboxBase):
         # Production mirror of the sandbox step-7 wording (issue #61).
         out = call("setup_bank_feed")
         step7 = out[out.index("7. Next"):]
-        self.assertIn("two approvals per bank (whitelist tap", step7)
+        self.assertIn("up to two approvals per bank (a whitelist tap unless "
+                      "already whitelisted", step7)
         self.assertNotIn("one approval per bank", step7)
-        self.assertIn("costs two operator approvals", step7)
+        self.assertIn("costs up to two operator approvals", step7)
 
     def test_health_rung_drift_is_a_hard_stop_in_production_too(self):
         # Between-GET drift: rung 4 verified via the admin view, but the

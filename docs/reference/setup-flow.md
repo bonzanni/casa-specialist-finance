@@ -50,8 +50,9 @@ server-side ladder is byte-identical with or without the delegation.
 would be false. The full install keeps: approving the callback consent DM, the
 credential copy/paste above, supplying the account email once (the sign-in email
 is recorded to the vault on first use, so it is asked for only when no
-`username` field is stored yet), **two approvals per bank** (whitelist tap, then
-bank SCA — production only: the sandbox world has no whitelist tap, see
+`username` field is stored yet), **up to two approvals per bank** (a whitelist
+tap unless the bank is already whitelisted, then bank SCA — the whitelist tap is
+production only: the sandbox world has none, see
 [`reference/sandbox-mode.md`](sandbox-mode.md)), labelling each discovered
 account once, and a bank re-approval at or
 before the consent's expiry, forever — the plugin requests 179 days, but what it

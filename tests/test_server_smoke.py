@@ -286,7 +286,7 @@ class TestPluginManifest(unittest.TestCase):
         for name in ("purge", "forget_local_account"):
             self.assertNotIn("Backup first", summary[name])
         wipe = summary["delete_all_data"]
-        self.assertIn("EVERY backup copy", wipe)
+        self.assertIn("every plugin backup (not HA backups)", wipe)
         self.assertIn("withdraw", wipe)
         self.assertIn("consent", wipe)
         restore = summary["restore_backup"]

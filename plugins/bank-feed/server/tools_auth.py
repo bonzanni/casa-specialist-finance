@@ -2078,9 +2078,10 @@ def _reconcile(args: dict) -> str:
         approvals = "one approval per bank (the bank's own SCA)"
         cost = "one operator approval, its own SCA taps"
     else:
-        approvals = ("two approvals per bank (whitelist tap, then the "
-                     "bank's own SCA)")
-        cost = "two operator approvals and its own SCA taps"
+        # link_bank skips the whitelist tap for a bank already whitelisted.
+        approvals = ("up to two approvals per bank (a whitelist tap unless "
+                     "already whitelisted, then the bank's own SCA)")
+        cost = "up to two operator approvals and its own SCA taps"
     lines.append(
         "7. Next: run list_banks, then link_bank — one bank at a time. "
         "What stays human, by design: %s, labelling each discovered account "
