@@ -280,8 +280,8 @@ class TestPluginManifest(unittest.TestCase):
         summary = {p["name"]: p["summary"]
                    for p in manifest["casa"]["protectedTools"]}
         purge = summary["purge"]
-        self.assertIn("keep rules, account settings;", purge)
-        self.assertIn("erase ALL notes/tags/rules/settings", purge)
+        self.assertIn("keep=rules, account settings;", purge)
+        self.assertIn("erase=ALL notes/tags/rules/settings", purge)
         self.assertIn("(all: + balances)", purge)
         # "Backup first." read as an instruction; the tool backs up itself.
         for name in ("purge", "forget_local_account"):

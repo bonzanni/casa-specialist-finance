@@ -10,7 +10,7 @@
                       "CASA_PLUGIN_BANKFEED_EB_APP_ID"],
     "protectedTools": [
       {"name": "unlink_bank", "summary": "Revokes the Enable Banking consent identified by {consent_ref}. Refresh stops for that bank's accounts until it is re-linked. Local history is not erased."},
-      {"name": "purge", "summary": "Deletes transactions before_date={before_date} + notes/tags (all: + balances). user_work={user_work}: keep rules, account settings; erase ALL notes/tags/rules/settings. May drop oldest erasure backup."},
+      {"name": "purge", "summary": "Deletes transactions before_date={before_date} + notes/tags (all: + balances). user_work={user_work}: keep=rules, account settings; erase=ALL notes/tags/rules/settings. May drop oldest erasure backup."},
       {"name": "forget_local_account", "summary": "Erases account {account_id} locally: its history, notes, tags, balances, coverage, sync, link-attempt records. Tagging rules stay. Revokes no bank consent. Backed up; may drop oldest erasure backup."},
       {"name": "delete_all_data", "summary": "Erases the ENTIRE local finance ledger and tries to erase every plugin backup (not HA backups); asks each bank to withdraw its consent (then re-approval is needed). Reports any failure. Irreversible."},
       {"name": "label_account", "summary": "Changes account {account_id}'s label, category or included status. Excluding it removes the account from every balance and transaction total shown until it is re-included."},
