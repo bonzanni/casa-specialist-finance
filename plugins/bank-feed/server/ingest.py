@@ -1355,23 +1355,25 @@ def _disclose(window_rows, below_rows, chain_ends, window_from, fresh,
     supersedes or rewrites, copies straddling the edge -- is an undisclosed
     duplicate.
 
-    A fresh insert x and a row y with different chain ends are twins when
+    A row x whose standing this plan changes -- a fresh insert, or a
+    supersession replacement or update that moves a row's content, booking
+    date or reference -- and a row y with different chain ends are twins when
     their booking dates are within AMOUNT_ONLY_MATCH_WINDOW_DAYS, they share
     content or a non-null provider reference, and at least one of them is
     dated before the window. The bound is the one that separates a correction
     from a recurrence everywhere else: a week would flag every weekly standing
     order posted a day late. Two rows inside the window are never compared,
     exactly as before. The reference is compared whatever the account's trust:
-    this decides a flag, never a match. A supersession's replacement is not a
-    fresh insert (it adds no payment), but it is a row others are compared
-    with. The pass discloses the duplicates THIS plan would create; it is not
-    an audit of the ledger.
+    this decides a flag, never a match. A replacement or update that moves
+    nothing is not compared from (the row sat beside the same neighbours
+    before), only compared with. The pass discloses the duplicates THIS plan
+    would create; it is not an audit of the ledger.
 
     A row already under review keeps the reason it has: apply's flag ASSIGNS
     review_reason, and the standing one may be about money. So does a row this
     plan already flags or updates under review.
     """
-    if not fresh:
+    if not inserts and not updates:
         return
     below_ids = {b["row_id"] for b in below_rows}
     by_id = {r["row_id"]: r for r in window_rows + below_rows}
@@ -1428,9 +1430,28 @@ def _disclose(window_rows, below_rows, chain_ends, window_from, fresh,
         if ref:
             by_ref.setdefault(ref, []).append(node)
 
+    # The rows whose standing THIS plan changes: every fresh insert, and every
+    # replacement or rewrite that moves a row's content, booking date or
+    # reference. A pending row booked unchanged beside an identical row it
+    # already sat beside is no new finding; one booked, or corrected, INTO
+    # such a neighbourhood is.
+    def _where(row):
+        return (row.get("booking_date"), row["identity_key"],
+                row.get("provider_ref"))
+
+    subjects = [("i", local) for local in fresh]
+    for rid, local in succ.items():
+        old, new = by_id.get(rid), ins.get(local)
+        if old is not None and new is not None and _where(old) != _where(new):
+            subjects.append(("i", local))
+    for rid in upd:
+        old = by_id.get(rid)
+        if (old is not None and ("s", rid) in nodes
+                and _where(old) != nodes[("s", rid)][:3]):
+            subjects.append(("s", rid))
+
     targets = set()
-    for local in fresh:
-        x = ("i", local)
+    for x in subjects:
         date, ident, ref, below = nodes[x]
         ex = end_of(x)
         for y in set(by_ident.get(ident, ())) | set(by_ref.get(ref, ()) if ref else ()):

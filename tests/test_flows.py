@@ -1382,6 +1382,40 @@ class TestHistoryOlderThanTheWindow(unittest.TestCase):
                       for r in self._active() if r["amount_minor"] == 1234)
         self.assertEqual(rows, [("2026-07-26", 1), ("2026-07-27", 1)])
 
+    def test_a_booking_that_changes_content_into_a_twin_is_flagged(self):
+        observe(self.conn)
+        self._link([self._tx("2026-07-26", ref="B", remittance="boodschappen"),
+                    self._tx("2026-07-28", ref="R", status="PDNG",
+                             remittance="voorlopig"), self.ANCHOR])
+        self._refresh([self._tx("2026-07-28", ref="R",
+                                remittance="boodschappen"), self.ANCHOR])
+        rows = sorted((r["booking_date"], r["status"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-26", "BOOK", 1),
+                                ("2026-07-28", "BOOK", 1)])
+
+    def test_a_pending_row_booked_unchanged_beside_its_neighbour_is_not_flagged(self):
+        observe(self.conn)
+        self._link([self._tx("2026-07-26", ref="B"),
+                    self._tx("2026-07-28", ref="R", status="PDNG"),
+                    self.ANCHOR])
+        self._refresh([self._tx("2026-07-28", ref="R"), self.ANCHOR])
+        rows = sorted((r["booking_date"], r["status"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-26", "BOOK", 0),
+                                ("2026-07-28", "BOOK", 0)])
+
+    def test_an_update_that_moves_a_row_next_to_a_twin_is_flagged(self):
+        # Trusted, reference-corroborated date correction inside the window
+        # that lands the row one day from an identical row before the window.
+        observe(self.conn)
+        self._link([self._tx("2026-07-25", ref="B"),
+                    self._tx("2026-07-30", ref="R"), self.ANCHOR])
+        self._refresh([self._tx("2026-07-27", ref="R"), self.ANCHOR])
+        rows = sorted((r["booking_date"], r["needs_review"])
+                      for r in self._active() if r["amount_minor"] == 1234)
+        self.assertEqual(rows, [("2026-07-25", 1), ("2026-07-27", 1)])
+
     def test_the_booking_at_the_end_of_an_old_chain_is_flagged(self):
         observe(self.conn)
         self._link([self._tx("2026-06-10", ref="R", status="PDNG"), self.ANCHOR])

@@ -190,10 +190,11 @@ that is the same booking, or it is inserted:
   are flagged `duplicate_of_stored_booking`. That is the shape the copies from #59 have.
   Nothing is deleted, and a booking the bank did not return at all is never flagged.
 
-Whether an insert duplicates something is decided once, over the ledger as the plan
-leaves it, by `_disclose`: an insert that shares content or a reference with another row
-within `AMOUNT_ONLY_MATCH_WINDOW_DAYS`, one of the two dated before the window, flags
-both, on the active end of each supersession chain. `backfill` loads those chain ends by
+Whether the plan creates a duplicate is decided once, over the ledger as the plan leaves
+it, by `_disclose`. A row the plan inserts, or books or rewrites into a new content, date
+or reference, that shares content or a reference with another row within
+`AMOUNT_ONLY_MATCH_WINDOW_DAYS`, one of the two dated before the window, flags both, on
+the active end of each supersession chain. `backfill` loads those chain ends by
 pointer as `chain_ends`, because a chain corrected below the window can end on a row
 older than `below` reaches. Two rows inside the window are never compared.
 
