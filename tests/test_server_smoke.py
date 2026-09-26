@@ -285,6 +285,10 @@ class TestPluginManifest(unittest.TestCase):
         # "Backup first." read as an instruction; the tool backs up itself.
         for name in ("purge", "forget_local_account"):
             self.assertNotIn("Backup first", summary[name])
+            # Issue #65: a committed erasure prunes its class to the newest
+            # ERASURE_KEEP copies, which can end an older copy's restore.
+            self.assertIn("may drop oldest erasure backup",
+                          summary[name].lower())
         wipe = summary["delete_all_data"]
         self.assertIn("every plugin backup (not HA backups)", wipe)
         self.assertIn("withdraw", wipe)
