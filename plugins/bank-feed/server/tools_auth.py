@@ -1227,8 +1227,8 @@ def authorization_priority(c, account_id: str):
 # --------------------------------------------------------------------------
 
 _ONE_BANK_AT_A_TIME = (
-    "8. Linking: ONE BANK AT A TIME — each bank costs two operator "
-    "approvals and its own SCA taps, and interleaving banks is how a tap "
+    "8. Linking: ONE BANK AT A TIME — each bank costs %s, and "
+    "interleaving banks is how a tap "
     "lands on the wrong one. The admin credential renews itself from the "
     "stored refresh token; only if this run fell back to a pasted "
     "control-panel token, expect to re-paste it between banks — it lasts "
@@ -2072,13 +2072,21 @@ def _reconcile(args: dict) -> str:
     else:
         lines.append("6. Application: healthy — %s, active. Nothing "
                      "to do." % ebmode.mode())
+    # Sandbox has no whitelist step (issue #10), so the count is per world:
+    # link_bank's own opening says "one tap" there (issue #61).
+    if ebmode.is_sandbox():
+        approvals = "one approval per bank (the bank's own SCA)"
+        cost = "one operator approval, its own SCA taps"
+    else:
+        approvals = ("two approvals per bank (whitelist tap, then the "
+                     "bank's own SCA)")
+        cost = "two operator approvals and its own SCA taps"
     lines.append(
         "7. Next: run list_banks, then link_bank — one bank at a time. "
-        "What stays human, by design: two approvals per bank (whitelist "
-        "tap, then the bank's own SCA), labelling each discovered account "
+        "What stays human, by design: %s, labelling each discovered account "
         "once, and a bank re-approval every 179 days. Note that HA "
-        "backups contain this plugin's transaction history.")
-    lines.append(_ONE_BANK_AT_A_TIME)
+        "backups contain this plugin's transaction history." % approvals)
+    lines.append(_ONE_BANK_AT_A_TIME % cost)
     return "\n".join(lines)
 
 

@@ -104,6 +104,17 @@ class TestSetupLadder(SandboxBase):
         # Verified once, against the path-bound admin view.
         self.assertEqual(self.admin.application_calls, ["app-1"])
 
+    def test_next_step_promises_one_approval_per_bank(self):
+        # Issue #61: sandbox has no whitelist step (link_bank says "one
+        # tap"), so step 7 must not tell the operator to expect two.
+        self.sandbox_world()
+        out = call("setup_bank_feed")
+        step7 = out[out.index("7. Next"):]
+        self.assertIn("one approval per bank", step7)
+        self.assertNotIn("two approvals", step7)
+        self.assertNotIn("whitelist tap", step7)
+        self.assertNotIn("two operator approvals", step7)   # step 8 too
+
     def test_health_rung_mismatch_is_a_hard_stop_in_sandbox(self):
         # Rung 6 fails CLOSED in the new mode: the wired app verified as
         # sandbox at rung 4, but the AIS view answers as another world —
@@ -310,6 +321,14 @@ class TestProductionSetupGuard(SandboxBase):
         self.assertIn("refusing to touch application", out)
         self.assertEqual(self.admin.redirect_calls, [])
         self.assertIsNone(tools_auth._meta_get(self.raw, "setup.app_id"))
+
+    def test_next_step_promises_two_approvals_per_bank(self):
+        # Production mirror of the sandbox step-7 wording (issue #61).
+        out = call("setup_bank_feed")
+        step7 = out[out.index("7. Next"):]
+        self.assertIn("two approvals per bank (whitelist tap", step7)
+        self.assertNotIn("one approval per bank", step7)
+        self.assertIn("costs two operator approvals", step7)
 
     def test_health_rung_drift_is_a_hard_stop_in_production_too(self):
         # Between-GET drift: rung 4 verified via the admin view, but the

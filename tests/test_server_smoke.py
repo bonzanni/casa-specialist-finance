@@ -248,6 +248,7 @@ class TestPluginManifest(unittest.TestCase):
             "forget_local_account": {"account_id"},
             "delete_all_data": set(),
             "label_account": {"account_id"},
+            "restore_backup": {"backup_id"},
         }
         placeholder_re = re.compile(r"\{([^{}]*)\}")
         for name, allowed in declared_args.items():
@@ -269,6 +270,29 @@ class TestPluginManifest(unittest.TestCase):
         # delete_all_data takes no arguments, so it must carry no placeholder
         # at all -- its static text is the only thing the operator reads.
         self.assertEqual(re.findall(r"\{[^{}]*\}", protected["delete_all_data"]["summary"]), [])
+
+    def test_approval_summaries_state_each_tool_s_largest_consequence(self):
+        """Issue #61: the summary is the one sentence the operator reads
+        before tapping Approve. The template cannot branch on an argument,
+        so purge must describe BOTH user_work modes, and each total action
+        must name what makes it irreversible beyond the local ledger."""
+        manifest = json.loads(PLUGIN_JSON.read_text())
+        summary = {p["name"]: p["summary"]
+                   for p in manifest["casa"]["protectedTools"]}
+        purge = summary["purge"]
+        self.assertIn("keep = rules, account settings stay", purge)
+        self.assertIn("erase = ", purge)
+        # "Backup first." read as an instruction; the tool backs up itself.
+        for name in ("purge", "forget_local_account"):
+            self.assertNotIn("Backup first", summary[name])
+        wipe = summary["delete_all_data"]
+        self.assertIn("EVERY backup copy", wipe)
+        self.assertIn("withdraw", wipe)
+        self.assertIn("consent", wipe)
+        restore = summary["restore_backup"]
+        self.assertIn("Changes since are lost", restore)
+        self.assertIn("no safety copy", restore)
+        self.assertIn("Bank links stay live", restore)
 
 
 class TestPython311Compatible(unittest.TestCase):
