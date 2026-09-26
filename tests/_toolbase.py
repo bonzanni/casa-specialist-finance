@@ -109,7 +109,8 @@ class Delivered(str):
     two apart with `assertIsInstance`."""
 
     def __new__(cls, result: dict):
-        obj = super().__new__(cls, result.get("text") or "")
+        obj = super().__new__(cls, result.get("text") or result.get("report")
+                              or "")
         obj.result = result
         return obj
 
@@ -134,7 +135,16 @@ def dispatch(name, data_dir=None, **args):
             "params": {"name": name, "arguments": args}})
     finally:
         os.environ.clear(); os.environ.update(saved)
-    return resp["result"]["content"][0]["text"]
+    text = resp["result"]["content"][0]["text"]
+    # `delete_all_data` answers casa with `{"erasure", "report"}`; the operator
+    # is relayed the report, so that is the reply these assertions read.
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(body, dict) and "erasure" in body and "report" in body:
+        return body["report"]
+    return text
 
 
 class FakeBroker:

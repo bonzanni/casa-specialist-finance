@@ -102,8 +102,12 @@ def handle(req: dict) -> dict | None:
         head = "\n".join(p for p in (SANDBOX_BANNER if sandbox else "",
                                      settled) if p)
         if isinstance(out, dict):
+            # An erasure result (`delete_all_data`, bank-feed's casa.eraseTool)
+            # carries its prose in `report`; the dispatcher's sentences belong
+            # to that account as they belong to a capability result's `text`.
+            key = "report" if "report" in out and "text" not in out else "text"
             if head:
-                out = dict(out, text=head + "\n" + str(out.get("text") or ""))
+                out = dict(out, **{key: head + "\n" + str(out.get(key) or "")})
             payload = {"content": [{"type": "text", "text": json.dumps(out)}]}
         else:
             text = head + "\n" + out if head else out

@@ -1631,6 +1631,19 @@ def delete_all_data(args: dict) -> str:
     if not handles_ok:
         notice.append(handles_note)
     notice.extend(sweep_lines)
-    notice.append(_reclaim(c)[1])
+    reclaimed, reclaim_line = _reclaim(c)
+    notice.append(reclaim_line)
     notice.append(GATE_NOTE)
-    return "\n".join(notice)
+    # THIS IS BANK-FEED'S `casa.eraseTool`: casa removes the plugin at uninstall
+    # only on "complete", and removing it destroys the one tool that can finish
+    # an erasure. So "complete" is claimed only when nothing this plugin holds
+    # remains and every withdrawal it attempted was confirmed: no consent kept
+    # or left unaccounted for, no session handle left behind, no backup copy the
+    # sweep could not settle, and the reclaim done — an unfinished VACUUM leaves
+    # erased rows, session ids included, readable in the free pages and the WAL.
+    # Every refusal before this point returns prose, which casa reads as not
+    # complete, so only this return needs the verdict.
+    complete = (halted is None and not kept and handles_ok
+                and backups_warning is None and reclaimed)
+    return {"erasure": "complete" if complete else "incomplete",
+            "report": "\n".join(notice)}
