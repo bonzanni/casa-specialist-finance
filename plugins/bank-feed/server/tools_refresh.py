@@ -1037,6 +1037,15 @@ def export_history(args: dict) -> str:
     fmt = str(args.get("format") or "csv").lower()
     if fmt not in ("csv", "jsonl"):
         return "format must be csv or jsonl."
+    # Every export names the ledger its rows came from (issue #69), read on
+    # the connection that reads them — minted first on a ledger whose opens
+    # were all too busy to. One that cannot be recorded writes no file: an
+    # unlabelled export is one a workflow cannot tie to its ledger.
+    ledger = store.reported_ledger_instance(c)
+    if ledger is None:
+        return ("The export was not written: the ledger could not record its "
+                "instance id (another process is writing, or the disk is "
+                "full). Try again.")
     columns = _export_columns(c)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rows = [dict(r) for r in c.execute(
@@ -1066,9 +1075,7 @@ def export_history(args: dict) -> str:
         "or copy it somewhere to keep it."
         % (len(rows), fmt, ", ".join(sorted(EXPORT_EXCLUDE)),
            casa_handoff.RETENTION_S // 86400),
-        # The id of the ledger these rows came from (issue #69), read on the
-        # connection that read them — the one file this process has open.
-        "Ledger instance: %s" % (store.ledger_instance(c) or "none"),
+        "Ledger instance: %s" % ledger,
         "Path: %s" % out["path"],
     ])
 

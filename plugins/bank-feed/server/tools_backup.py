@@ -11,8 +11,6 @@ the untrusted fence, for the same reason tags do not.
 """
 from __future__ import annotations
 
-import sqlite3
-
 import backups
 import store
 import tools_auth
@@ -146,10 +144,7 @@ def list_backups(args: dict) -> str:
             # from: mint the id if absent, in its own statement now that the
             # settlement transaction is gone. Only a ledger that cannot be
             # written at all prints "none" — and "none" matches no fence.
-            try:
-                ledger = store.ensure_ledger_instance(c)
-            except sqlite3.OperationalError:
-                ledger = store.ledger_instance(c)
+            ledger = store.reported_ledger_instance(c)
             # THE ONE CALL THAT CHANGES NOTHING (but a missing ledger id,
             # above) STILL ANSWERS. Refusing here
             # hid the residue behind a count: the operator was told copies
@@ -173,10 +168,13 @@ def list_backups(args: dict) -> str:
             # restore, and no restore can start one while that record stands.
             # What is left, what that blocks and how to finish it is the
             # dispatcher's lock-release sentence (state is said once, #48).
-            return ("A recorded erasure of the backup copies could not be "
+            # The id line stays FIRST on this exit too: it is the line a
+            # workflow binds from, on every listing.
+            first, rest = render_listing(exc.state, ledger).split("\n", 1)
+            return ("%s\nA recorded erasure of the backup copies could not be "
                     "finished. Every INDEXED copy is listed below — a copy in "
                     "flight never reached the index and has no row.\n%s"
-                    % render_listing(exc.state, ledger))
+                    % (first, rest))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is

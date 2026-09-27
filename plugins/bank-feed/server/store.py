@@ -986,6 +986,20 @@ def ensure_ledger_instance(conn: sqlite3.Connection) -> str:
     return ledger_instance(conn)
 
 
+def reported_ledger_instance(conn: sqlite3.Connection) -> str | None:
+    """THE ONE ANSWER for a reply that names the id: the stored id, or one
+    minted now (INSERT OR IGNORE, the connection's ordinary busy timeout).
+    None only when the ledger could not be written at all — and the caller
+    then refuses or says so, never prints an id that is not there."""
+    live = ledger_instance(conn)
+    if live is not None:
+        return live
+    try:
+        return ensure_ledger_instance(conn)
+    except sqlite3.OperationalError:
+        return None
+
+
 def local_secret(conn: sqlite3.Connection) -> bytes:
     """Per-database HMAC key, generated at first run."""
     row = conn.execute(

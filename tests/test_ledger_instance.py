@@ -222,8 +222,36 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
         out = call("list_backups")
         self.assertIn("A recorded erasure of the backup copies could not be finished", out)
         self.assertRegex(self.stored(), "^%s$" % HEX32)
-        self.assertIn("Ledger instance: %s" % self.stored(), out)
+        # First line on this exit too: it is where a workflow binds.
+        self.assertEqual(listed_id(out), self.stored())
         self.assertFalse(self.raw.in_transaction)
+
+    def test_export_history_mints_it_before_naming_it(self):
+        out = call("export_history", format="csv")
+        self.assertRegex(self.stored(), "^%s$" % HEX32)
+        self.assertIn("Ledger instance: %s" % self.stored(), out)
+
+    def test_an_export_that_cannot_record_the_id_writes_no_file(self):
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent("""
+                import sqlite3, sys
+                c = sqlite3.connect(sys.argv[1], isolation_level=None)
+                c.execute("BEGIN IMMEDIATE")
+                print("held", flush=True)
+                sys.stdin.readline()
+            """), str(self.root / "f.sqlite")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.stdin.close)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.raw.execute("PRAGMA busy_timeout=200")
+        out = call("export_history", format="csv")
+        self.assertIn("The export was not written", out)
+        self.assertNotIn("Ledger instance", out)
+        self.assertEqual(list(self.handoff.rglob("ledger-export-*")), [])
+        self.assertIsNone(self.stored())
 
     def test_ensure_never_replaces_an_id_another_process_minted(self):
         # The race: this process read "absent", another minted, this one
@@ -340,12 +368,44 @@ class TestTheFence(ToolBase):
         self.assertEqual(self.notes(), 0)
 
     def test_a_malformed_expected_ledger_refuses_before_the_ledger_is_read(self):
-        for bad in (self.id.upper(), self.id[:-1], self.id + "0", "", 7, True,
-                    ["x"], " " + self.id):
-            out = call("add_note", row_ids=[self.rid], note="a", author="agent",
-                       expected_ledger=bad)
-            self.assertIn("expected_ledger must be", out, repr(bad))
-            self.assertIn("This call's own operation changed nothing", out, repr(bad))
+        for name, extra in (("add_note", {"note": "a", "author": "agent"}),
+                            ("tag_transaction", {"tags": ["x"]}),
+                            ("untag_transaction", {"tags": ["x"]})):
+            for bad in (self.id.upper(), self.id[:-1], self.id + "0", "", 7, True,
+                        ["x"], " " + self.id):
+                out = call(name, row_ids=[self.rid], expected_ledger=bad, **extra)
+                self.assertIn("expected_ledger must be", out, (name, repr(bad)))
+                self.assertIn("This call's own operation changed nothing", out,
+                              (name, repr(bad)))
+        self.assertEqual(self.notes(), 0)
+        self.assertEqual(self.count("transaction_tags"), 0)
+
+    def test_the_ledger_check_precedes_settlement(self):
+        # A settlement that cannot finish refuses the write with its own
+        # text. On a different ledger nothing this call would do is wanted,
+        # settling included: the ledger refusal comes first.
+        call("backup", reason="manual")
+        doomed = sorted(p.name for p in self.paths.backups_dir.glob("*.sqlite"))[0]
+        with open(self.paths.index, "a") as f:
+            f.write("%s erase abcdefabcdefabcd pending\n" % backups.now_ts())
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def selective(p, *a, **k):
+            if p.name == doomed:
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = selective
+        out = call("add_note", row_ids=[self.rid], note="a", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0,
+                   expected_ledger=OTHER)
+        self.assertIn("this is a different ledger", out)
+        self.assertNotIn("erasure", out)
+        # ...and the same write on THIS ledger does meet the settlement.
+        out = call("add_note", row_ids=[self.rid], note="a", author="agent",
+                   workflow="acct@1.0.0", expected_generation=0,
+                   expected_ledger=self.id)
+        self.assertIn("erasure", out)
         self.assertEqual(self.notes(), 0)
 
     def test_a_write_after_delete_all_data_still_matches(self):

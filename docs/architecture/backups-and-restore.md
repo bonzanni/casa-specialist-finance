@@ -160,11 +160,12 @@ A fresh ledger with no restores and no registrations looks just like any other, 
 workflow binds to an id instead: `meta.ledger_instance`, 32 random hex characters
 (`store.LEDGER_INSTANCE_KEY`). `store.open_db()` mints it when it is absent, and does
 nothing when it is present, so a steady-state open never needs the write lock; a busy
-first open skips it, and `list_backups`, which prints it first, mints it under its own
-lock. It belongs to the database file: `meta` is kept live across a restore, and
+first open skips it. Every reply that names it mints it first if absent: `list_backups`
+prints it on its first line on every exit, `export_history` names it or writes no file,
+and `delete_all_data`, which says it remains, mints it inside its erasure transaction. It belongs to the database file: `meta` is kept live across a restore, and
 `delete_all_data` keeps it as a structural key, so a workflow can tell an emptied ledger
 from a different one. It changes only when the file is recreated, and sandbox and
-production are different files. `export_history` names it too. The three annotation
+production are different files. The three annotation
 writes accept `expected_ledger` independently of `workflow`; a mismatch, or no id,
 refuses the whole write. A restore below bank-feed, such as a Home Assistant backup of
 the data directory, brings the file back with its id; bank-feed cannot see that.
