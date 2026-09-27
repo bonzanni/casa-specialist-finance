@@ -100,6 +100,12 @@ class TestTheCleanSlate(CleanSlateBase):
             {"title": "EnableBanking Key", "found": True},
             {"title": "EnableBanking", "found": True}])
 
+    def test_the_vault_is_asked_once_per_unrecorded_title_in_this_mode(self):
+        self.erase()
+        self.assertEqual(self.vault.exists_calls,
+                         [("EnableBanking Key", "ExampleVault"),
+                          ("EnableBanking", "ExampleVault")])
+
     def test_an_unrecorded_title_the_vault_does_not_hold_is_not_named(self):
         self.vault.items = {"EnableBanking"}
         out, verdict = self.erase()
@@ -119,8 +125,10 @@ class TestTheCleanSlate(CleanSlateBase):
         # Three states: "could not check" must not read as "not there".
         self.vault.exists_error = self.vault.OpError("timed out")
         out, _ = self.erase()
-        self.assertIn("1Password could not be asked whether it holds them: "
-                      "any item titled 'EnableBanking Key' or "
+        self.assertEqual(len(self.vault.exists_calls), 2)
+        self.assertIn("whether 1Password holds them could not be checked "
+                      "('EnableBanking Key': timed out; 'EnableBanking': "
+                      "timed out): any item titled 'EnableBanking Key' or "
                       "'EnableBanking'", out)
         self.assertEqual(out.result["unrecorded_vault_items"], [
             {"title": "EnableBanking Key", "found": None},
@@ -129,8 +137,11 @@ class TestTheCleanSlate(CleanSlateBase):
     def test_an_unusable_vault_is_not_asked_and_not_read_as_empty(self):
         self.vault.usable = False
         out, _ = self.erase()
+        self.assertEqual(self.vault.exists_calls, [])
         self.assertEqual([u["found"] for u in
                           out.result["unrecorded_vault_items"]], [None, None])
+        self.assertIn("could not be checked ('EnableBanking Key': the `op` "
+                      "CLI is not installed on this host;", out)
 
     def test_deleting_the_key_names_the_application_it_strands(self):
         # Issue #80: the application stays registered with the key this call

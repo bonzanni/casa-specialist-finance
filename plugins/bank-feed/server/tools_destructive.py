@@ -1292,23 +1292,26 @@ def _remove_residue(paths, *, tool="delete_all_data", index=True):
 
 def _unrecorded_items(titles):
     """Which of bank-feed's item titles nothing records it creating are in
-    this mode's vault (issue #82). -> `[{"title", "found"}]`, `found` True for
-    an item the vault shows and None for one it could not be asked about; an
-    item the vault says is absent is left out. Three states, because "could
-    not check" must never read as "not there". Never raises."""
-    found = []
-    reason = tools_auth.OPVAULT.status()
+    this mode's vault (issue #82). -> `([{"title", "found"}], reasons)`:
+    `found` is True for an item the vault shows and None for one that could
+    not be checked, `reasons` says why for each of those; an item the vault
+    says is absent is left out. Three states, because "could not check" must
+    never read as "not there". An unusable vault is not asked. Never raises."""
+    found, reasons = [], []
+    unusable = tools_auth.OPVAULT.status()
     for title in titles:
-        state = None
-        if reason is None:
+        state, why = None, unusable
+        if unusable is None:
             try:
                 state = bool(tools_auth.OPVAULT.item_exists(
                     title, tools_auth.OPVAULT.VAULT))
-            except Exception:                # noqa: BLE001 — never raises
-                state = None
+            except Exception as exc:         # noqa: BLE001 — never raises
+                why = str(exc) or type(exc).__name__
         if state is not False:
             found.append({"title": title, "found": state})
-    return found
+            if state is None:
+                reasons.append("'%s': %s" % (_safe(title), _safe(why)))
+    return found, reasons
 
 
 def _clean_slate(c, paths):
@@ -1357,7 +1360,7 @@ def _clean_slate(c, paths):
                      "1Password's Recently Deleted, or until you resolve the "
                      "registration in the Enable Banking control panel."
                      % _safe(app_id))
-    unrecorded = _unrecorded_items(
+    unrecorded, reasons = _unrecorded_items(
         [t for t in (tools_auth.OPVAULT.KEY_ITEM, tools_auth.OPVAULT.CRED_ITEM)
          if t not in gone and t not in [k[0] for k in kept]])
     present = [u["title"] for u in unrecorded if u["found"]]
@@ -1370,11 +1373,12 @@ def _clean_slate(c, paths):
                      "you made yourself is never touched."
                      % ", ".join("'%s'" % _safe(t) for t in present))
     if unknown:
-        lines.append("Not deleted, and 1Password could not be asked whether "
-                     "it holds them: any item titled %s. Nothing here records "
-                     "bank-feed creating them; if it did, delete them by hand. "
-                     "An item you made yourself is never touched."
-                     % " or ".join("'%s'" % _safe(t) for t in unknown))
+        lines.append("Not deleted, and whether 1Password holds them could not "
+                     "be checked (%s): any item titled %s. Nothing here "
+                     "records bank-feed creating them; if it did, delete them "
+                     "by hand. An item you made yourself is never touched."
+                     % ("; ".join(reasons),
+                        " or ".join("'%s'" % _safe(t) for t in unknown)))
     failure = _reset_ledger(c)
     if failure:
         ok = False

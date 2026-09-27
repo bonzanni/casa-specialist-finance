@@ -79,6 +79,21 @@ class TestStepFourProvesTheKeyBeforeAdopting(Base):
                       "cannot authenticate", out)
         self.assertNotIn("restart the plugin", out)
 
+    def test_a_freshly_forged_key_is_probed_too(self):
+        # The run that forges is the one a key_source guard would skip.
+        os.environ.pop("CASA_BANKFEED_EB_PRIVATE_KEY")
+        del self.vault.values[self.vault.REF_PRIVATE_KEY]
+        self.keyed_error = refused(401)
+        out = call("setup_bank_feed")
+        self.assertIn("2. Key: FORGED", out)
+        self.assertEqual(len(self.vault.created), 1)
+        self.assertEqual(len(self.keyed_calls), 1)
+        self.assertIn("4. Application: the signing key in 1Password "
+                      "('EnableBanking Key') cannot authenticate", out)
+        self.assertIsNone(self.meta("setup.app_id"))
+        self.assertEqual(self.admin.create_calls, [])
+        self.assertEqual(self.admin.redirect_calls, [])
+
     def test_a_probe_that_cannot_run_adopts_nothing(self):
         for exc in (refused(503), refused(404), RuntimeError("timed out")):
             with self.subTest(exc=exc):

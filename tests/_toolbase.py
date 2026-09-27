@@ -488,6 +488,7 @@ class FakeVault:
         self.reads = []           # every ref read() was asked for, in order
         self.fail_reads = {}      # ref -> OpError to raise (transient fault)
         self.exists_error = None  # OpError item_exists should raise
+        self.exists_calls = []    # every (item, vault) item_exists was asked
         self.items = None         # None -> derived from values; else a set
         # ha-casa-app#1047: the sign-in drop-off. (value, created_epoch) when
         # one is waiting, or an OpError to raise; take_drop_off empties it.
@@ -514,6 +515,9 @@ class FakeVault:
         return self.values[ref]
 
     def item_exists(self, item, vault):
+        # Logged before any outcome, as `read` is: a check that raised still
+        # asked the vault.
+        self.exists_calls.append((item, vault))
         if self.exists_error is not None:
             raise self.exists_error
         if self.items is not None:
