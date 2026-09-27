@@ -16,9 +16,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import eb_ais  # noqa: E402
 import jwtsign  # noqa: E402
 import tools_auth  # noqa: E402
-from _toolbase import TEST_KEY_PEM, Base, call  # noqa: E402
+from _toolbase import OTHER_KEY_PEM, TEST_KEY_PEM, Base, call  # noqa: E402
 
 TEST_KEY = jwtsign.load_pkcs8(TEST_KEY_PEM)
+OTHER_KEY = jwtsign.load_pkcs8(OTHER_KEY_PEM)
 
 
 def refused(status):
@@ -81,13 +82,21 @@ class TestStepFourProvesTheKeyBeforeAdopting(Base):
 
     def test_a_freshly_forged_key_is_probed_too(self):
         # The run that forges is the one a key_source guard would skip.
+        # The forge yields a key the suite uses nowhere else, so the probe is
+        # proven to sign with the key this run forged and no other.
         os.environ.pop("CASA_BANKFEED_EB_PRIVATE_KEY")
         del self.vault.values[self.vault.REF_PRIVATE_KEY]
+
+        def forge(title, vault):
+            self.vault.created.append((title, vault))
+            self.vault.values[self.vault.REF_PRIVATE_KEY] = OTHER_KEY_PEM
+        self.vault.create_ssh_key = forge
         self.keyed_error = refused(401)
         out = call("setup_bank_feed")
         self.assertIn("2. Key: FORGED", out)
         self.assertEqual(len(self.vault.created), 1)
-        self.assertEqual(len(self.keyed_calls), 1)
+        self.assertEqual(self.keyed_calls,
+                         [("app-1", (OTHER_KEY.n, OTHER_KEY.e))])
         self.assertIn("4. Application: the signing key in 1Password "
                       "('EnableBanking Key') cannot authenticate", out)
         self.assertIsNone(self.meta("setup.app_id"))
