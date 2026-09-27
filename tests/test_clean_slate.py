@@ -94,6 +94,10 @@ class TestTheCleanSlate(CleanSlateBase):
         self.assertIn("Still in 1Password and NOT deleted, because nothing "
                       "here records bank-feed creating it: 'EnableBanking "
                       "Key', 'EnableBanking'.", out)
+        # The record began with bank-feed 0.17.0; the operator installs the
+        # component, so both numbers are named.
+        self.assertIn("before bank-feed 0.17.0, which shipped in the finance "
+                      "component 0.18.0", out)
         self.assertEqual(verdict, "complete")
         # Issue #82: casa gets the same fact as data, beside the verdict.
         self.assertEqual(out.result["unrecorded_vault_items"], [

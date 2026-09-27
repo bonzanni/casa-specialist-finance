@@ -1368,7 +1368,8 @@ def _clean_slate(c, paths):
     if present:
         lines.append("Still in 1Password and NOT deleted, because nothing here "
                      "records bank-feed creating it: %s. If bank-feed made it "
-                     "(an install set up before bank-feed 0.17.0, or one whose "
+                     "(an install set up before bank-feed 0.17.0, which "
+                     "shipped in the finance component 0.18.0, or one whose "
                      "creation record was lost), delete it by hand; an item "
                      "you made yourself is never touched."
                      % ", ".join("'%s'" % _safe(t) for t in present))
