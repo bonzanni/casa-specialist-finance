@@ -35,9 +35,25 @@ SANDBOX_BANNER = ("[SANDBOX] Disposable test world — sandbox application, "
 #: holds it exclusively for its whole call. Seconds a call waits before
 #: refusing as busy; read at call time so tests can lower it.
 LOCK_WAIT_S = 30.0
-EXCLUSIVE_TOOLS = frozenset({"delete_all_data"})
+EXCLUSIVE_TOOLS = frozenset({"delete_all_data", "delete_data_keep_signins"})
 BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
         "Try again when it has finished.")
+
+
+#: The calls the uninstall fence (`store.UNINSTALL_FENCE_KEY`, issue #73)
+#: still admits: both erasers, so an unfinished one can be run again; setup
+#: and its sign-in step, since setup is what lifts the fence; and the two
+#: calls that look at and withdraw a bank consent, which write no data. Every
+#: other call refuses, a read too: none of them is needed before the
+#: uninstall finishes, and a short list can be checked by eye.
+FENCE_EXEMPT = frozenset({"delete_data_keep_signins", "delete_all_data",
+                          "setup_bank_feed", "bank_feed_signin",
+                          "consent_status", "unlink_bank"})
+FENCED = ("Refused, nothing was done: bank-feed's data was erased at %s for "
+          "an uninstall that keeps the bank sign-ins, and nothing is fetched "
+          "or written until setup_bank_feed runs. Casa runs it when "
+          "bank-feed is installed again; if you are keeping bank-feed, run "
+          "setup_bank_feed now to carry on.")
 
 
 LOCK_UNAVAILABLE = ("Refused, nothing was done: the plugin data directory "
@@ -76,6 +92,23 @@ def _lifecycle_lock(name):
         except OSError as exc:
             os.close(fd)
             return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
+
+
+def _fenced(name):
+    """The uninstall fence's timestamp when it refuses `name`, else None.
+    Read under the call's lifecycle lock, which the eraser holds exclusively
+    while it commits the fence, so no call starts between the erasure and
+    the fence. Never creates a ledger: with none on disk there is nothing
+    to fence, and nothing is settled or migrated before the tool's own
+    argument check (`store.uninstall_fence_at`)."""
+    if name in FENCE_EXEMPT:
+        return None
+    import tools_read              # imports this module; resolved at call time
+    if tools_read.CONN is not None:
+        # The ledger this process's tools already use: the fence's own row.
+        return store.uninstall_fence(tools_read.CONN)
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
+    return store.uninstall_fence_at(data) if data else None
 
 
 def _result(id_, payload):
@@ -147,7 +180,9 @@ def handle(req: dict) -> dict | None:
                         else ()
                     store.check_mode_marker(
                         os.environ.get("CLAUDE_PLUGIN_DATA"))
-                    out = tool["fn"](params.get("arguments") or {})
+                    fenced = _fenced(params.get("name"))
+                    out = (FENCED % fenced if fenced else
+                           tool["fn"](params.get("arguments") or {}))
             except Exception as exc:                   # surfaced, never swallowed
                 # A capability tool's link exists as bytes on its own path,
                 # and a stdlib parser quotes the bytes it chokes on (a status

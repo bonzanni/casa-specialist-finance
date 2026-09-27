@@ -135,8 +135,8 @@
     INV-BACKUP-004: [tests/test_tools_refresh.py::test_no_rendered_string_in_either_module_names_a_destructive_tool]
 
 - doc: architecture/backups-erasure.md
-  summary: What delete_all_data removes beside the ledger, in what order, what is durable when, and what each failure may say.
-  when_changing: the erasure of the backup copies, the prune records it writes, what a stuck erasure reports, the clean slate or the lifecycle lock
+  summary: What the two uninstall erasers remove beside the ledger, in what order, what is durable when, and what each failure may say.
+  when_changing: the erasure of the backup copies, the prune records it writes, what a stuck erasure reports, the clean slate, the data-only erasure and its fence, or the lifecycle lock
   covers:
     - plugins/bank-feed/server/backups.py
     - plugins/bank-feed/server/tools_backup.py
@@ -148,6 +148,7 @@
     - tests/test_tools_backup.py
     - tests/test_tools_destructive.py
     - tests/test_clean_slate.py
+    - tests/test_data_only_erasure.py
     - tests/test_opvault.py
   related: [architecture/backups-and-restore.md, reference/tool-surface.md]
 

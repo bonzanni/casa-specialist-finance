@@ -130,6 +130,18 @@ def conn() -> sqlite3.Connection:
     return CONN
 
 
+def existing_conn() -> sqlite3.Connection | None:
+    """`conn()`, but only when there is a ledger to open: None when no
+    ledger file exists yet, so a caller that must not create one (the
+    uninstall fence, issue #73) never does. The file name is `conn()`'s own."""
+    if CONN is not None:
+        return CONN
+    data = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if not data or not os.path.exists(os.path.join(data, store.db_filename())):
+        return None
+    return conn()
+
+
 def ledger_path(c: sqlite3.Connection) -> str:
     """The open ledger's own file path, as SQLite itself reports it — the ONE
     spelling `backups.paths_for` is built from (issue #39)."""

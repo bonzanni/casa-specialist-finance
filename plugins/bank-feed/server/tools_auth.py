@@ -97,8 +97,9 @@ from tools_read import register
 # a backup id -- a model-supplied `backup_id` is inference alone, exactly like
 # every other member here, so casa's operator grant is what authorizes it.
 PROTECTED = frozenset({"unlink_bank", "purge", "forget_local_account",
-                       "delete_all_data", "label_account",
-                       "accept_app_reregistration", "restore_backup"})
+                       "delete_all_data", "delete_data_keep_signins",
+                       "label_account", "accept_app_reregistration",
+                       "restore_backup"})
 
 def _app_name() -> str:
     """The ONE application this plugin owns — in the mode's world.
@@ -2165,7 +2166,17 @@ def setup_bank_feed(args: dict) -> str:
     forwarded: an argument that arrives here arrived by invention, and
     honouring it would let a model choose an email address or replay a
     sign-in link on the one path where no operator is in the loop. The
-    operator's own credential step is `bank_feed_signin`."""
+    operator's own credential step is `bank_feed_signin`.
+
+    It also lifts the uninstall fence (issue #73, `store.UNINSTALL_FENCE_KEY`):
+    casa runs this tool after every install, a reinstall included, so it is
+    the transition from "erased for an uninstall" back to a working plugin.
+    Lifted first, whatever the reconcile then says: the fence guards the
+    window before casa removes the plugin, and a setup running means that
+    window is over."""
+    c = tools_read.existing_conn()
+    if c is not None:
+        c.execute("DELETE FROM meta WHERE key=?", (store.UNINSTALL_FENCE_KEY,))
     return _reconcile({})
 
 

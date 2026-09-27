@@ -38,6 +38,12 @@ them, and nothing about casa.
 v0.329.0 is the first that reads that key and offers to erase the data at uninstall.
 An older one ignores it, so the floor below is unchanged by it.
 
+It also declares `delete_data_keep_signins` as its data-only eraser
+(`casa.eraseDataOnlyTool`). casa v0.331.0 is the first that reads that key and offers
+"Erase data, keep sign-ins" at uninstall (ha-casa-app#1067). An older one reads the
+`casa` keys it knows one by one and ignores this one. The tool is then an ordinary
+protected tool, and the floor below is unchanged.
+
 `bank-feed` declares a sign-in drop-off (`casa.dropOffs: ["signin_link"]`);
 casa v0.330.0 is the first that reads that key and gives the assistant
 `vault_drop_off`, which stores a sign-in link there instead of in a delegation

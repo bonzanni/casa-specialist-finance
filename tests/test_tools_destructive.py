@@ -45,7 +45,7 @@ from _toolbase import (Base, dispatch, LINKED_IBAN, OTHER_IBAN, PLUGIN_ROOT,  # 
 SERVER_DIR = PLUGIN_ROOT / "server"
 
 DESTRUCTIVE = ("unlink_bank", "purge", "forget_local_account",
-               "delete_all_data")
+               "delete_all_data", "delete_data_keep_signins")
 
 # A provider-written value that tries to escape line-oriented output: an
 # embedded newline forges a whole line the operator reads as ours, and a

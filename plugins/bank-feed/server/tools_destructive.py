@@ -45,7 +45,7 @@ from tools_read import register
 #: against `tools_auth.PROTECTED` — which is spelled ONCE, there — instead of
 #: this module re-declaring that set and the two drifting apart.
 DESTRUCTIVE_TOOLS = ("unlink_bank", "purge", "forget_local_account",
-                     "delete_all_data")
+                     "delete_all_data", "delete_data_keep_signins")
 
 #: The ONLY `meta` keys that survive `delete_all_data`. All three are
 #: structural, not data: `schema_version` is what `store.open_db` migrates
@@ -1237,16 +1237,20 @@ def _reset_ledger(c):
     return None
 
 
-def _remove_residue(paths):
+def _remove_residue(paths, *, tool="delete_all_data", index=True):
     """Remove the backup subsystem's files and the other mode's orphans.
     -> `(count removed, [failures])`. The ledger file itself is never
     touched: another process may hold it open, and SQLite deletes a WAL by
     NAME when such a connection closes, which would take the next ledger's
-    WAL with it. Under the lifecycle lock nothing holds these files."""
+    WAL with it. Under the lifecycle lock nothing holds these files.
+
+    `index=False` keeps the backup index and its directory: an eraser that
+    keeps `meta`'s structural keys, the restore marker among them, keeps the
+    append-only record that marker is settled against."""
     removed, failures = 0, []
     data = paths.db.parent
     other = store._other_db_filename()
-    targets = [paths.backups_dir, paths.index]
+    targets = [paths.backups_dir, paths.index] if index else []
     try:
         names = sorted(os.listdir(str(data)))
     except OSError as exc:
@@ -1256,7 +1260,7 @@ def _remove_residue(paths):
         # A whole ledger of the other mode: it can hold consents, and it is
         # that mode's `delete_all_data` that may withdraw them.
         failures.append("the other mode's ledger (%s) exists; run "
-                        "delete_all_data in that mode" % other)
+                        "%s in that mode" % (other, tool))
     else:
         targets += [data / n for n in names if n.startswith(other)]
     for t in targets:
@@ -1351,58 +1355,28 @@ def _clean_slate(c, paths):
     return ok, lines
 
 
-@register("delete_all_data",
-          "Erase the entire local ledger. Protected: casa demands an operator "
-          "grant bound to this exact call.",
-          {"type": "object", "properties": {}})
-def delete_all_data(args: dict) -> str:
-    refusal = _require_declared("delete_all_data")
-    if refusal:
-        return refusal
-    c = _conn()
-    # Counted BEFORE the deletion, deliberately: this tool has to name what
-    # re-linking would and would not restore, and a count read afterwards would
-    # name three zeroes. Consents are counted `closed_at IS NULL` — the same
-    # set `consent_status` shows and the same set this tool tries to withdraw.
-    # Counting closed ones inflates the stated cost of the call in the one
-    # sentence that has to be accurate.
-    counts = {"sessions": c.execute("SELECT COUNT(*) FROM sessions WHERE"
-                                    " closed_at IS NULL").fetchone()[0]}
-    for table in ("transactions", "accounts"):
-        counts[table] = c.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
-    # Read here, BEFORE the transaction, for the same reason as `counts`
-    # above: the "Done." message has to say whether the backup crash-recovery
-    # marker was actually there to keep. Reading it after the erasure would
-    # always say "kept" whenever it is present at all — STRUCTURAL_META_KEYS
-    # keeps it unconditionally — which cannot distinguish the common case (no
-    # unsettled restore, so no marker) from the rare one this whitelist entry
-    # exists for.
-    marker_was_present = c.execute(
-        "SELECT 1 FROM meta WHERE key=?", (backups.MARKER_KEY,)).fetchone() is not None
+def _erase_rows_and_copies(c, paths, erase, precheck=None):
+    """The row phase both uninstall erasers share: settle the backup index,
+    run `erase(c)` inside one write transaction, mint a new ledger instance
+    id, record the erasure of the copies as `pending` and COMMIT, then sweep
+    every backup copy and snapshot under the still-held index handle.
 
-    # THE REVERSIBLE HALF GOES FIRST, AND IT IS DURABLE BEFORE THE FIRST BANK
-    # IS ASKED. Withdrawing the consents first makes the IRREVERSIBLE half the
-    # first half: an erasure that then fails and rolls back leaves the ledger
-    # whole, the operator's bank access gone at every bank at once, and a
-    # message saying only that the erasure failed — which reads as "nothing
-    # happened". The truth would be that the half that cannot be undone had
-    # happened and the half that can had not.
-    #
-    # `sessions` is NOT in this transaction. A session row is the only handle
-    # this plugin has on a live PSD2 grant, so it is destroyed only after the
-    # provider has proved the grant gone. Everything else about a consent
-    # goes here, before anything is irreversible.
-    #
-    # The provider calls stay OUTSIDE any transaction: network work inside a
-    # write transaction holds the ledger locked for as long as the bank
-    # takes.
+    `precheck(c)`, run first inside the transaction, may return a refusal;
+    nothing is then settled or erased. -> `(refusal or None, the sweep's
+    Erasure or None, a warning or None)`. A refusal is prose and means the
+    ledger was not erased; past the COMMIT this never raises.
+    """
     c.execute("BEGIN IMMEDIATE")
+    if precheck is not None:
+        refusal = precheck(c)
+        if refusal:
+            c.execute("ROLLBACK")
+            return refusal, None, None
     # Settle the backup index under both locks BEFORE erasing the
     # registrations: a mint committed by a process that died before its
     # terminal record would otherwise settle `orphan` once its
     # registration is gone. A settlement refusal leaves the erasure
     # unapplied.
-    paths = backups.paths_for(tools_read.ledger_path(c))
     try:
         backup_state, handle = backups.settle(c, paths)
     except backups.BackupError as exc:
@@ -1431,14 +1405,14 @@ def delete_all_data(args: dict) -> str:
                     % (paths.backups_dir.name,
                        " and the %s* files beside the ledger"
                        % paths.snapshot_prefix
-                       if backups.snapshots_at_risk(exc.erasure) else ""))
+                       if backups.snapshots_at_risk(exc.erasure) else "")), None, None
         if isinstance(exc, backups.ErasureRecordUnwritten):
             # Settlement COMPLETED an earlier erasure's sweep and only the
             # record confirming it failed; the dispatcher's sentence says
             # so. "Nothing was erased" would read as a denial of that.
             return ("%s. This call's own erasure did not run: the ledger "
-                    "was not erased." % exc)
-        return "%s. %s" % (exc, backups.unchanged("erased"))
+                    "was not erased." % exc), None, None
+        return "%s. %s" % (exc, backups.unchanged("erased")), None, None
     except Exception:
         # Anything that is NOT a BackupError — a bug, an OOM, a
         # KeyboardInterrupt — would otherwise leave the module-singleton
@@ -1452,24 +1426,13 @@ def delete_all_data(args: dict) -> str:
         raise
     erased_backups, backups_warning, erase_op = None, None, None
     try:
-        for table in _DATA_TABLES:
-            c.execute("DELETE FROM %s" % table)
-        # `meta` is where the renewal handoff lives, under a key that EMBEDS
-        # THE RAW SESSION ID (`renewal_handoff|<session_id>`), alongside the
-        # single-flight claims and the provenance fingerprint. Excluding `meta`
-        # would contradict the full-erasure claim and retain bearer-equivalent
-        # identifiers. Everything non-structural goes; the structural keys are
-        # named explicitly, so a key added later is deleted by default rather
-        # than surviving because nobody remembered it.
-        kept = STRUCTURAL_META_KEYS + WITHDRAWAL_META_KEYS
-        c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
-                  % ", ".join("?" * len(kept)), kept)
+        erase(c)
         # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69; operator,
-        # 2026-09-27). This is the erasure an uninstall runs, and an erased
+        # 2026-09-27). Both erasers are ones an uninstall runs, and an erased
         # ledger is not the same ledger emptied: a workflow bound to the old
-        # id must see a different one. The DELETE above removed it
-        # (`ledger_instance` is not structural); a new one is minted here, in
-        # the same transaction, so the ledger is never without an id. The
+        # id must see a different one. `erase` removed it (`ledger_instance`
+        # is in neither eraser's `meta` whitelist); a new one is minted here,
+        # in the same transaction, so the ledger is never without an id. The
         # in-use reset is `purge`, which keeps it.
         store.ensure_ledger_instance(c)
         # THE ERASURE OF THE COPIES IS RECORDED BEFORE IT HAPPENS, through the
@@ -1511,8 +1474,8 @@ def delete_all_data(args: dict) -> str:
                     "completed by the next settlement (any backup, restore, "
                     "listing or workflow write), which removes the backup "
                     "copies." % backups.record_event("pending", exc.written,
-                                                     exc))
-        return "%s. %s" % (exc, backups.unchanged("erased"))
+                                                     exc)), None, None
+        return "%s. %s" % (exc, backups.unchanged("erased")), None, None
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -1528,7 +1491,7 @@ def delete_all_data(args: dict) -> str:
                     "ledger is intact. The record of the backup erasure was "
                     "already written, so a settlement completes it and "
                     "removes the backup copies."
-                    % type(exc).__name__)
+                    % type(exc).__name__), None, None
         raise
     else:
         # THE BACKUP FILES ARE PART OF "THE ENTIRE LOCAL LEDGER". Each
@@ -1624,6 +1587,74 @@ def delete_all_data(args: dict) -> str:
                     "call's own sweep ran, %s." % left)
     finally:
         handle.close()
+    return None, erased_backups, backups_warning
+
+
+@register("delete_all_data",
+          "Erase the entire local ledger. Protected: casa demands an operator "
+          "grant bound to this exact call.",
+          {"type": "object", "properties": {}})
+def delete_all_data(args: dict) -> str:
+    refusal = _require_declared("delete_all_data")
+    if refusal:
+        return refusal
+    c = _conn()
+    # Counted BEFORE the deletion, deliberately: this tool has to name what
+    # re-linking would and would not restore, and a count read afterwards would
+    # name three zeroes. Consents are counted `closed_at IS NULL` — the same
+    # set `consent_status` shows and the same set this tool tries to withdraw.
+    # Counting closed ones inflates the stated cost of the call in the one
+    # sentence that has to be accurate.
+    counts = {"sessions": c.execute("SELECT COUNT(*) FROM sessions WHERE"
+                                    " closed_at IS NULL").fetchone()[0]}
+    for table in ("transactions", "accounts"):
+        counts[table] = c.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+    # Read here, BEFORE the transaction, for the same reason as `counts`
+    # above: the "Done." message has to say whether the backup crash-recovery
+    # marker was actually there to keep. Reading it after the erasure would
+    # always say "kept" whenever it is present at all — STRUCTURAL_META_KEYS
+    # keeps it unconditionally — which cannot distinguish the common case (no
+    # unsettled restore, so no marker) from the rare one this whitelist entry
+    # exists for.
+    marker_was_present = c.execute(
+        "SELECT 1 FROM meta WHERE key=?", (backups.MARKER_KEY,)).fetchone() is not None
+
+    # THE REVERSIBLE HALF GOES FIRST, AND IT IS DURABLE BEFORE THE FIRST BANK
+    # IS ASKED. Withdrawing the consents first makes the IRREVERSIBLE half the
+    # first half: an erasure that then fails and rolls back leaves the ledger
+    # whole, the operator's bank access gone at every bank at once, and a
+    # message saying only that the erasure failed — which reads as "nothing
+    # happened". The truth would be that the half that cannot be undone had
+    # happened and the half that can had not.
+    #
+    # `sessions` is NOT in this transaction. A session row is the only handle
+    # this plugin has on a live PSD2 grant, so it is destroyed only after the
+    # provider has proved the grant gone. Everything else about a consent
+    # goes here, before anything is irreversible.
+    #
+    # The provider calls stay OUTSIDE any transaction: network work inside a
+    # write transaction holds the ledger locked for as long as the bank
+    # takes.
+    paths = backups.paths_for(tools_read.ledger_path(c))
+
+    def erase(c):
+        for table in _DATA_TABLES:
+            c.execute("DELETE FROM %s" % table)
+        # `meta` is where the renewal handoff lives, under a key that EMBEDS
+        # THE RAW SESSION ID (`renewal_handoff|<session_id>`), alongside the
+        # single-flight claims and the provenance fingerprint. Excluding `meta`
+        # would contradict the full-erasure claim and retain bearer-equivalent
+        # identifiers. Everything non-structural goes; the structural keys are
+        # named explicitly, so a key added later is deleted by default rather
+        # than surviving because nobody remembered it.
+        kept = STRUCTURAL_META_KEYS + WITHDRAWAL_META_KEYS
+        c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
+                  % ", ".join("?" * len(kept)), kept)
+
+    refusal, erased_backups, backups_warning = _erase_rows_and_copies(
+        c, paths, erase)
+    if refusal is not None:
+        return refusal
     # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" TWO OF
     # THEM. `backup_restore_op` (`backups.MARKER_KEY`) is in
     # STRUCTURAL_META_KEYS beside `schema_version` and `account_secret`, so a
@@ -1884,3 +1915,187 @@ def delete_all_data(args: dict) -> str:
                 and slate_ok is True)
     return {"erasure": "complete" if complete else "incomplete",
             "report": "\n".join(notice)}
+
+
+#: Kept by `delete_data_keep_signins` (issue #73), because a reinstall needs
+#: them to carry on without re-authenticating. `accounts` holds the
+#: account-to-session bindings `sync` iterates; only its user work (label,
+#: category, include flag) is reset. `sync_state` keeps the provider's
+#: Retry-After holds and is reset the way a whole-ledger `purge` resets it.
+#: `attempts` keeps every attempt that exchanged a code (see
+#: `_EXCHANGED_PHASES`). `sessions` is not in `_DATA_TABLES` at all. Every
+#: other data table is erased, so a table added to `_DATA_TABLES` later is
+#: erased here by default.
+SIGNIN_TABLES = ("accounts", "sync_state", "attempts")
+_DATA_ONLY_TABLES = tuple(t for t in _DATA_TABLES if t not in SIGNIN_TABLES)
+
+#: The attempts `delete_data_keep_signins` keeps: those that exchanged their
+#: code. A settled one is authorization history that `consent_status` reads
+#: to warn about a consent quarantined at a bank, and an `exchange_started`
+#: one is what a later collection pass quarantines, which is the only way a
+#: consent the bank created during a crashed exchange ever becomes visible.
+#: Neither can bind an account or fetch a transaction again. An attempt in
+#: any other phase has not exchanged its code, and its callback, arriving
+#: after the erasure, would bind a session and backfill the erased ledger:
+#: it is deleted, so that callback is refused before any code is exchanged.
+_EXCHANGED_PHASES = tuple(sorted(callbacks.SETTLED_PHASES
+                                 | {"exchange_started"}))
+
+#: `meta` keys `delete_data_keep_signins` keeps beside the structural ones:
+#: the setup state (the application id first of all, which every bank call
+#: needs) and the renewal handoff of each kept consent. Everything else goes,
+#: including the renewal-mismatch diagnostics, which quote account labels.
+SIGNIN_META_PREFIXES = ("setup.", "renewal_handoff|")
+
+#: `sync_state.last_error` of every account after a data-only erasure: what
+#: the reads and `sync` print about the gap, as `PURGED_NOTE` is for a purge.
+ERASED_NOTE = ("history erased at uninstall (delete_data_keep_signins) on "
+               "%s; a fresh bank approval refetches what lies inside the "
+               "plugin's request window and the bank's own retention")
+
+#: Why the data-only eraser refuses while an authorization may be completing.
+_AUTHORIZING = (
+    "Nothing was erased: a bank authorization is in progress (a link or "
+    "renewal is completing). Erasing now would either cancel an exchange "
+    "whose consent may already exist at the bank, with nothing left here to "
+    "see or revoke it, or let it refill the erased ledger. Try again in a "
+    "few minutes.")
+
+
+@register("delete_data_keep_signins",
+          "Erase every transaction, note, tag, rule, balance, measurement, "
+          "backup and export, but KEEP the bank sessions and the accounts "
+          "bound to them, so a reinstall carries on syncing without "
+          "re-approving any bank. Then nothing is fetched or written until "
+          "setup_bank_feed runs. Protected: casa demands an operator grant "
+          "bound to this exact call.",
+          {"type": "object", "properties": {}})
+def delete_data_keep_signins(args: dict) -> str:
+    """Bank-feed's `casa.eraseDataOnlyTool` (issue #73): uninstall's "Erase
+    data, keep sign-ins". It shares `delete_all_data`'s row phase, so the
+    backup copies go under the same crash protocol, and it calls no provider:
+    nothing here is irreversible beyond the local files."""
+    refusal = _require_declared("delete_data_keep_signins")
+    if refusal:
+        return refusal
+    c = _conn()
+    counts = {"sessions": c.execute("SELECT COUNT(*) FROM sessions WHERE"
+                                    " closed_at IS NULL").fetchone()[0]}
+    for table in ("transactions", "accounts"):
+        counts[table] = c.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+    paths = backups.paths_for(tools_read.ledger_path(c))
+    today = _dt.date.today().isoformat()
+    cancelled = []
+
+    def precheck(c):
+        return _AUTHORIZING if tools_auth.authorization_in_progress(c) else None
+
+    def erase(c):
+        for table in _DATA_ONLY_TABLES:
+            c.execute("DELETE FROM %s" % table)
+        marks = ", ".join("?" * len(_EXCHANGED_PHASES))
+        cancelled.extend(_safe(r[0]) or "an unnamed bank" for r in c.execute(
+            "SELECT aspsp_name FROM attempts WHERE phase NOT IN (%s)"
+            " ORDER BY created_at" % marks, _EXCHANGED_PHASES))
+        c.execute("DELETE FROM attempts WHERE phase NOT IN (%s)" % marks,
+                  _EXCHANGED_PHASES)
+        # User work goes; the binding stays. The incarnation is the life
+        # fence `purge` and `restore_backup` rotate: a run that read before
+        # this erasure cannot record coverage or sync state after it.
+        c.execute("UPDATE accounts SET label=NULL, category=NULL, included=1,"
+                  " incarnation=lower(hex(randomblob(8)))")
+        # A whole-ledger purge's reset, for the same reason: no later
+        # routine refresh may record the erased history as complete.
+        c.execute(
+            "INSERT INTO sync_state(account_id, resource, completeness,"
+            " last_error) SELECT account_id, 'transactions', 'partial', ?"
+            " FROM accounts WHERE 1 ON CONFLICT(account_id, resource) DO"
+            " UPDATE SET completeness='partial',"
+            " last_error=excluded.last_error, last_success_session=NULL,"
+            " oldest_fetched=NULL", (ERASED_NOTE % today,))
+        c.execute("UPDATE sync_state SET last_success_at=NULL"
+                  " WHERE resource='balances'")
+        kept = STRUCTURAL_META_KEYS
+        c.execute("DELETE FROM meta WHERE key NOT IN (%s)%s"
+                  % (", ".join("?" * len(kept)),
+                     "".join(" AND key NOT LIKE ? ESCAPE '\\'"
+                             for _ in SIGNIN_META_PREFIXES)),
+                  kept + tuple(p.replace("_", "\\_") + "%"
+                               for p in SIGNIN_META_PREFIXES))
+        # The AUTOINCREMENT counters of the erased tables are allocation
+        # history of the erased data.
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                     " AND name='sqlite_sequence'").fetchone():
+            c.execute("DELETE FROM sqlite_sequence WHERE name IN (%s)"
+                      % ", ".join("?" * len(_DATA_ONLY_TABLES)),
+                      _DATA_ONLY_TABLES)
+        c.execute("INSERT INTO meta(key, value) VALUES (?, ?)",
+                  (store.UNINSTALL_FENCE_KEY, tools_auth._utcnow_iso()))
+
+    refusal, erased, backups_warning = _erase_rows_and_copies(
+        c, paths, erase, precheck)
+    if refusal is not None:
+        return refusal
+
+    lines = [
+        "Erased the local finance data: %d transaction(s) across %d "
+        "account(s), with every note, tag, auto-tagging rule, balance, "
+        "coverage interval and reference measurement, and every account "
+        "label, category and include flag." % (counts["transactions"],
+                                               counts["accounts"]),
+        "KEPT, so a reinstall carries on without re-approving any bank: the "
+        "%d bank consent(s) held open here, the %d account(s) bound to them, "
+        "the Enable Banking application id and the 1Password items. The "
+        "local account_id secret was kept too: every account id is derived "
+        "from it, and a new one would split each account in two at its "
+        "next renewal." % (counts["sessions"], counts["accounts"]),
+    ]
+    if cancelled:
+        lines.append(
+            "Cancelled %d authorization(s) that had not been completed (%s): "
+            "run link_bank again for any bank you still want to link."
+            % (len(cancelled), ", ".join(cancelled)))
+    if erased is not None:
+        if erased.removed_any():
+            lines.append("%s were erased too — each is a copy, or part of a "
+                         "copy, of this ledger." % erased.went())
+        if erased.index_warning:
+            lines.append("Every backup copy was erased; %s."
+                         % backups.record_event("completion", True,
+                                                erased.index_warning))
+    if backups_warning:
+        lines.append(backups_warning)
+    exports_ok = True
+    exported, failure = _erase_exports()
+    if exported:
+        lines.append("%d export file(s) published to casa's handoff folder "
+                     "were removed." % exported)
+    if failure:
+        exports_ok = False
+        lines.append("WARNING — the removal of the published exports did not "
+                     "finish (%s); they are in casa's handoff folder under "
+                     "%s/ until casa's %d-day sweep. Run "
+                     "delete_data_keep_signins again to finish."
+                     % (failure, EXPORT_PRODUCER,
+                        casa_handoff.RETENTION_S // 86400))
+    removed, failures = _remove_residue(
+        paths, tool="delete_data_keep_signins", index=False)
+    if failures:
+        lines.append("WARNING — %d leftover file(s) could not be removed "
+                     "beside the ledger (%s). Run delete_data_keep_signins "
+                     "again to finish." % (len(failures), "; ".join(failures)))
+    lines.append("The ledger instance id was replaced by a new one, so a "
+                 "workflow bound to the old one now sees a different ledger.")
+    lines.append("Until setup_bank_feed runs, nothing is fetched or written: "
+                 "every other call refuses, so the erased data cannot come "
+                 "back before the uninstall finishes. Casa runs "
+                 "setup_bank_feed when bank-feed is installed again; if you "
+                 "are keeping bank-feed, run it now to carry on.")
+    lines.extend(_reapproval_lines(c))
+    reclaimed, reclaim_line = _reclaim(c)
+    lines.append(reclaim_line)
+    lines.append(GATE_NOTE)
+    complete = (backups_warning is None and exports_ok and not failures
+                and reclaimed)
+    return {"erasure": "complete" if complete else "incomplete",
+            "report": "\n".join(lines)}

@@ -174,7 +174,7 @@ class TestPluginManifest(unittest.TestCase):
             "casa.resultContract.tools must be exactly the live tools/list "
             "minus the setup tool: a served tool missing here is refused by "
             "casa before it runs, a declared tool nothing serves is a lie")
-        self.assertEqual(len(contract["tools"]), 34)
+        self.assertEqual(len(contract["tools"]), 35)
         for name, entry in contract["tools"].items():
             if name == "link_bank":
                 continue
@@ -195,12 +195,12 @@ class TestPluginManifest(unittest.TestCase):
         proc.stdin.flush()
         return json.loads(proc.stdout.readline())
 
-    def test_protected_tools_are_exactly_the_seven_protected_tools(self):
+    def test_protected_tools_are_exactly_the_eight_protected_tools(self):
         manifest = json.loads(PLUGIN_JSON.read_text())
         protected = manifest["casa"]["protectedTools"]
         names = {p if isinstance(p, str) else p["name"] for p in protected}
-        # unlink_bank/purge/forget_local_account/delete_all_data are
-        # destructive and gated by casa's fail-closed PreToolUse hook.
+        # unlink_bank/purge/forget_local_account/delete_all_data/
+        # delete_data_keep_signins are destructive and gated by casa's fail-closed PreToolUse hook.
         # label_account is NOT destructive but is still protected: it can set
         # included=false, an inference-only path for attacker-controlled bank
         # text to remove an account from every balance and total shown to the
@@ -216,7 +216,8 @@ class TestPluginManifest(unittest.TestCase):
         # protecting it would deadlock every link. setup_bank_feed is also
         # excluded.
         self.assertEqual(names, {"unlink_bank", "purge", "forget_local_account",
-                                 "delete_all_data", "label_account",
+                                 "delete_all_data", "delete_data_keep_signins",
+                                 "label_account",
                                  "accept_app_reregistration", "restore_backup"})
         self.assertNotIn("collect_authorization", names)
         self.assertNotIn("setup_bank_feed", names)
@@ -247,6 +248,7 @@ class TestPluginManifest(unittest.TestCase):
             "purge": {"before_date", "user_work"},
             "forget_local_account": {"account_id"},
             "delete_all_data": set(),
+            "delete_data_keep_signins": set(),
             "label_account": {"account_id"},
             "restore_backup": {"backup_id"},
         }
@@ -267,9 +269,10 @@ class TestPluginManifest(unittest.TestCase):
                              f"{sorted(allowed)} or the template silently voids")
             self.assertTrue(summary.isascii())
             self.assertLessEqual(len(summary), 200)
-        # delete_all_data takes no arguments, so it must carry no placeholder
-        # at all -- its static text is the only thing the operator reads.
-        self.assertEqual(re.findall(r"\{[^{}]*\}", protected["delete_all_data"]["summary"]), [])
+        # The erasers take no arguments, so they must carry no placeholder
+        # at all -- their static text is the only thing the operator reads.
+        for name in ("delete_all_data", "delete_data_keep_signins"):
+            self.assertEqual(re.findall(r"\{[^{}]*\}", protected[name]["summary"]), [])
 
     def test_approval_summaries_state_each_tool_s_largest_consequence(self):
         """Issue #61: the summary is the one sentence the operator reads
@@ -297,6 +300,11 @@ class TestPluginManifest(unittest.TestCase):
         self.assertIn("every plugin backup (not HA backups)", wipe)
         self.assertIn("withdraw", wipe)
         self.assertIn("consent", wipe)
+        # Issue #73: the data-only eraser's consequence is what it keeps.
+        keep = summary["delete_data_keep_signins"]
+        self.assertIn("every plugin backup (not HA backups)", keep)
+        self.assertIn("KEEPS bank consents + account links", keep)
+        self.assertIn("Irreversible", keep)
         restore = summary["restore_backup"]
         self.assertIn("Changes since are lost", restore)
         self.assertIn("no safety copy", restore)
