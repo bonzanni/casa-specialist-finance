@@ -163,11 +163,15 @@ nothing when it is present, so a steady-state open never needs the write lock; a
 first open skips it. Every reply that names it mints it first if absent: `list_backups`
 prints it on a `Ledger instance:` line in every listing it answers with (a refusal is not
 a listing and names none; read the line by its label, not its position, since the
-dispatcher prepends settlement sentences), `export_history` names it or writes no file,
-and `delete_all_data`, which says it remains, mints it inside its erasure transaction. It belongs to the database file: `meta` is kept live across a restore, and
-`delete_all_data` keeps it as a structural key, so a workflow can tell an emptied ledger
-from a different one. It changes only when the file is recreated, and sandbox and
-production are different files. The three annotation
+dispatcher prepends settlement sentences), and `export_history` names it or writes no file.
+
+It survives what keeps the ledger's story going and nothing else. A restore keeps it
+(`meta` is kept live), and so does `purge`, even of the whole ledger: that is the reset of
+a ledger still in use, so a workflow sees the same ledger, emptied. `delete_all_data` does
+not: it is the eraser an uninstall runs, and it replaces the id with a new one inside its
+erasure transaction, so a workflow bound to the old id sees a different ledger. Otherwise
+it changes only when the file is recreated, and sandbox and production are different
+files. The three annotation
 writes accept `expected_ledger` independently of `workflow`; a mismatch, or no id,
 refuses the whole write. A restore below bank-feed, such as a Home Assistant backup of
 the data directory, brings the file back with its id; bank-feed cannot see that.

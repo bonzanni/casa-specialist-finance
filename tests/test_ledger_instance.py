@@ -202,9 +202,9 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
     def stored(self):
         return store.ledger_instance(self.raw)
 
-    def test_delete_all_data_mints_the_id_it_says_remains(self):
+    def test_delete_all_data_leaves_a_new_id_even_from_none(self):
         out = call("delete_all_data")
-        self.assertIn("the ledger instance id remain", out)
+        self.assertIn("The ledger instance id was replaced by a new one", out)
         self.assertRegex(self.stored(), "^%s$" % HEX32)
         self.assertEqual(listed_id(call("list_backups")), self.stored())
 
@@ -330,10 +330,25 @@ class TestReporting(ToolBase):
 
 
 class TestLifetime(ToolBase):
-    def test_delete_all_data_keeps_the_id(self):
+    def test_delete_all_data_replaces_the_id(self):
+        # The uninstall eraser: an erased ledger is not the same ledger
+        # emptied, so a workflow bound to the old id must see a different one.
         out = call("delete_all_data")
-        self.assertIn("the ledger instance id", out)
+        self.assertIn("The ledger instance id was replaced by a new one, so a "
+                      "workflow bound to the old one now sees a different "
+                      "ledger.", out)
         self.assertEqual(self.count("transactions"), 0)
+        new = store.ledger_instance(self.raw)
+        self.assertRegex(new, "^%s$" % HEX32)
+        self.assertNotEqual(new, self.id)
+        self.assertEqual(listed_id(call("list_backups")), new)
+        self.assertEqual(self.raw.execute("SELECT count(*) FROM meta WHERE key=?",
+                                          (store.LEDGER_INSTANCE_KEY,)).fetchone()[0], 1)
+
+    def test_a_whole_ledger_purge_keeps_the_id(self):
+        # The in-use reset: same ledger, started fresh.
+        out = call("purge", before_date="all", user_work="erase")
+        self.assertEqual(self.count("transactions"), 0, out)
         self.assertEqual(store.ledger_instance(self.raw), self.id)
         self.assertEqual(listed_id(call("list_backups")), self.id)
 
@@ -477,7 +492,7 @@ class TestTheFence(ToolBase):
         self.assertIn("erasure", out)
         self.assertEqual(self.notes(), 0)
 
-    def test_a_write_after_delete_all_data_still_matches(self):
+    def test_after_delete_all_data_the_old_id_is_refused_and_the_new_one_writes(self):
         call("delete_all_data")
         self.raw.execute(
             "INSERT INTO accounts(account_id, uid, iban_masked, name, currency,"
@@ -490,6 +505,10 @@ class TestTheFence(ToolBase):
             " 'BOOK','active','reference')").lastrowid
         out = call("add_note", row_ids=[rid], note="a", author="agent",
                    expected_ledger=self.id)
+        self.assertIn("this is a different ledger", out)
+        self.assertEqual(self.notes(), 0)
+        out = call("add_note", row_ids=[rid], note="a", author="agent",
+                   expected_ledger=listed_id(call("list_backups")))
         self.assertIn("Note added", out)
 
     def test_every_annotation_write_declares_the_argument(self):

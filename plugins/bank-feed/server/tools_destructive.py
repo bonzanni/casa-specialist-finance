@@ -42,14 +42,11 @@ from tools_read import register
 DESTRUCTIVE_TOOLS = ("unlink_bank", "purge", "forget_local_account",
                      "delete_all_data")
 
-#: The ONLY `meta` keys that survive `delete_all_data`. All four are
+#: The ONLY `meta` keys that survive `delete_all_data`. All three are
 #: structural, not data: `schema_version` is what `store.open_db` migrates
 #: against; `account_secret` is the local HMAC key `store.account_id` derives
 #: every account id from — regenerating it would silently re-key the whole
-#: ledger on the next link; `ledger_instance` (`store.LEDGER_INSTANCE_KEY`,
-#: cross-checked by test) is the id a workflow binds to (issue #69) — keeping
-#: it is what lets that workflow tell this emptied ledger from a different
-#: one; and `backup_restore_op` (`backups.MARKER_KEY` —
+#: ledger on the next link; and `backup_restore_op` (`backups.MARKER_KEY` —
 #: the same spelling, cross-checked by test) belongs to the backup crash
 #: protocol, not to this ledger's own data: it is the id `backups.settle`
 #: reads to decide whether a still-pending restore record terminates
@@ -58,8 +55,7 @@ DESTRUCTIVE_TOOLS = ("unlink_bank", "purge", "forget_local_account",
 #: erasable data, and the renewal-handoff keys in particular EMBED a raw
 #: session identifier, which is bearer-equivalent. The list is a whitelist on
 #: purpose: a key added by a later feature is deleted by default.
-STRUCTURAL_META_KEYS = ("schema_version", "account_secret", "ledger_instance",
-                        "backup_restore_op")
+STRUCTURAL_META_KEYS = ("schema_version", "account_secret", "backup_restore_op")
 
 #: Every table `delete_all_data` empties unconditionally. `occurrence_alloc` is
 #: on the list because it is per-account data — an unsalted sha256 over amount,
@@ -1274,9 +1270,13 @@ def delete_all_data(args: dict) -> str:
         c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
                   % ", ".join("?" * len(STRUCTURAL_META_KEYS)),
                   tuple(STRUCTURAL_META_KEYS))
-        # The reply below says the ledger instance id remains. A busy first
-        # open can have skipped minting it, so it is minted here, in this
-        # transaction, if absent — the claim is then true by construction.
+        # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69; operator,
+        # 2026-09-27). This is the erasure an uninstall runs, and an erased
+        # ledger is not the same ledger emptied: a workflow bound to the old
+        # id must see a different one. The DELETE above removed it
+        # (`ledger_instance` is not structural); a new one is minted here, in
+        # the same transaction, so the ledger is never without an id. The
+        # in-use reset is `purge`, which keeps it.
         store.ensure_ledger_instance(c)
         # THE ERASURE OF THE COPIES IS RECORDED BEFORE IT HAPPENS, through the
         # same index protocol a mint and a restore already use. Without this
@@ -1430,22 +1430,20 @@ def delete_all_data(args: dict) -> str:
                     "call's own sweep ran, %s." % left)
     finally:
         handle.close()
-    # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" SOME OF
+    # THE SURVIVOR LIST NAMES EXACTLY WHAT SURVIVES, NEVER "ONLY" TWO OF
     # THEM. `backup_restore_op` (`backups.MARKER_KEY`) is in
-    # STRUCTURAL_META_KEYS beside `schema_version`, `account_secret` and
-    # `ledger_instance`, so a restore that left it behind means one more row
-    # remains — a list without it was then false of the row sitting right
-    # there in `meta`. `ledger_instance` is named unconditionally: the
-    # erasure transaction above minted it if an open had not. The marker only ever exists
+    # STRUCTURAL_META_KEYS beside `schema_version` and `account_secret`, so a
+    # restore that left it behind means a THIRD row remains — "only the
+    # schema version and the local account_id secret remain" was then false
+    # of the row sitting right there in `meta`. The marker only ever exists
     # at all when an unsettled restore needed it, so it is named here only
     # when `marker_was_present` — read BEFORE the erasure, for the same
     # reason as `counts` above.
-    survivors = ("the schema version, the local account_id secret, the "
-                "ledger instance id and the backup subsystem's crash-recovery "
-                "marker remain (none of them carries bank data)"
-                if marker_was_present else
-                "the schema version, the local account_id secret and the "
-                "ledger instance id remain (none of them carries bank data)")
+    survivors = ("the schema version, the local account_id secret and the "
+                "backup subsystem's crash-recovery marker remain (none of "
+                "them carries bank data)" if marker_was_present else
+                "the schema version and the local account_id secret remain "
+                "(neither carries bank data)")
     # "The restore fingerprint" here is `provenance.py`'s environment
     # fingerprint (`provenance_fp`), which this DELETE always erases -- it is
     # NOT in STRUCTURAL_META_KEYS and is a different key from the backup
@@ -1455,7 +1453,9 @@ def delete_all_data(args: dict) -> str:
             "session identifier; %s, so the database is immediately usable "
             "again. The restore fingerprint is gone too: the next run "
             "records a fresh one, which is correct — this ledger has no "
-            "past to be restored from any more." % survivors)
+            "past to be restored from any more. The ledger instance id was "
+            "replaced by a new one, so a workflow bound to the old one now "
+            "sees a different ledger." % survivors)
     if marker_was_present:
         # The marker's own survival is already named in `survivors` above —
         # saying it was "kept" a second time here would restate the same
