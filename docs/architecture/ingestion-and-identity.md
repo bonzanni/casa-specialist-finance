@@ -239,7 +239,9 @@ a file one of them misread. `store.open_ledger()`, the open behind the tools, al
 checks the install marker and the other mode's ledger file and commits the marker
 under the same lock, so two first opens in different modes cannot each create a
 ledger. The wait is bounded; a timeout, or a lock SQLite reports while switching to WAL
-or running the integrity check, is refused as busy, never as corruption.
+or running the integrity check, is refused as busy, never as corruption. The open-time
+settlement pass runs after the lock is released: it can wait out another process's
+writer, and under the lock that wait would queue every other open behind it.
 
 | Table | Holds |
 |---|---|

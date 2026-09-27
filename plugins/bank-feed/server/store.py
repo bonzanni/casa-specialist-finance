@@ -962,7 +962,9 @@ def open_db(path=None) -> sqlite3.Connection:
     db = _resolve(path)
     _prepare_dir(db.parent)
     with _open_lock(db.parent):
-        return _open_locked(db)
+        conn = _open_locked(db)
+    _settle_best_effort(conn, db)
+    return conn
 
 
 def open_ledger(data: str) -> sqlite3.Connection:
@@ -983,11 +985,17 @@ def open_ledger(data: str) -> sqlite3.Connection:
         except BaseException:
             conn.close()
             raise
-        return conn
+    _settle_best_effort(conn, db)
+    return conn
 
 
 def _open_locked(db: Path) -> sqlite3.Connection:
-    """open_db's body; the caller holds the open lock."""
+    """open_db's body; the caller holds the open lock. The open-time
+    settlement pass is NOT part of it: it may wait out another process's
+    writer for the whole busy timeout, and doing that under the open lock
+    would queue every other process's healthy open behind that writer. It
+    decides nothing the lock protects, so the callers run it after the
+    release."""
     _create_nofollow(db)
     for suffix in _SIDECARS:
         _guard_nofollow(db.parent / (db.name + suffix))
@@ -1053,8 +1061,6 @@ def _open_locked(db: Path) -> sqlite3.Connection:
             pass
         finally:
             conn.execute("PRAGMA busy_timeout=%d" % _SETTLE_BUSY_MS)
-
-    _settle_best_effort(conn, db)
 
     _harden(db)
     for suffix in _SIDECARS:

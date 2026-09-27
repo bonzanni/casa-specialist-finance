@@ -175,6 +175,53 @@ class TestTheOpenLockWaitIsBounded(InProcess):
             os.close(fd)
 
 
+class TestAWriterDoesNotQueueHealthyOpens(InProcess):
+    def test_concurrent_opens_wait_for_the_writer_side_by_side(self):
+        # The open-time settlement pass waits out another process's writer
+        # for the busy timeout. Under the open lock those waits would queue
+        # one behind another until the open lock's own wait refused the
+        # later opens; outside it they overlap. flock conflicts between open
+        # file descriptions, so threads contend exactly as processes do.
+        import threading
+        db = self.root / "bank_feed.sqlite"
+        store.open_db(db).close()
+        backups.paths_for(db).index.touch()      # settlement is attempted
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent("""
+                import sqlite3, sys
+                c = sqlite3.connect(sys.argv[1], isolation_level=None)
+                c.execute("BEGIN IMMEDIATE")
+                print("held", flush=True)
+                sys.stdin.readline()
+            """), str(db)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.stdin.close)
+        self.addCleanup(holder.stdout.close)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.addCleanup(setattr, store, "_SETTLE_BUSY_MS",
+                        store._SETTLE_BUSY_MS)
+        self.addCleanup(setattr, store, "OPEN_LOCK_WAIT_S",
+                        store.OPEN_LOCK_WAIT_S)
+        store._SETTLE_BUSY_MS = 400
+        store.OPEN_LOCK_WAIT_S = 1.0             # < four serialized waits
+        outcomes = []
+
+        def one_open():
+            try:
+                store.open_db(db).close()
+                outcomes.append("OK")
+            except store.StoreError as exc:
+                outcomes.append(str(exc))
+
+        threads = [threading.Thread(target=one_open) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(outcomes, ["OK"] * 4)
+
+
 class TestOpenLedgerChecksUnderTheLock(InProcess):
     def test_the_other_modes_ledger_refuses_before_creating_this_ones(self):
         # The dispatch-time check passed before the other mode's ledger
