@@ -235,13 +235,14 @@ LEDGER_RE = re.compile(r"[0-9a-f]{32}")
 
 
 def _ledger_arg(args):
-    """-> (expected_ledger|None, refusal|None). Absent is None; anything
-    present must be an id in exactly the minted spelling — a near miss
-    (upper case, padding) is refused, not normalized, so it can never match
-    by accident."""
-    el = args.get("expected_ledger")
-    if el is None:
+    """-> (expected_ledger|None, refusal|None). An ABSENT key is None;
+    anything present — JSON null included — must be an id in exactly the
+    minted spelling. A fence the caller sent is never silently dropped, and
+    a near miss (upper case, padding) is refused, not normalized, so it can
+    never match by accident."""
+    if "expected_ledger" not in args:
         return None, None
+    el = args["expected_ledger"]
     if not isinstance(el, str) or not LEDGER_RE.fullmatch(el):
         return None, ("expected_ledger must be the 32-character lowercase hex "
                       "ledger instance id list_backups reports. "

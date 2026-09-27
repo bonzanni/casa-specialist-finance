@@ -257,6 +257,26 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
         self.assertEqual(list(self.handoff.rglob("ledger-export-*")), [])
         self.assertIsNone(self.stored())
 
+    def test_a_steady_state_export_does_not_need_the_write_lock(self):
+        call("list_backups")                     # the id exists from here on
+        holder = subprocess.Popen(
+            [sys.executable, "-c", textwrap.dedent("""
+                import sqlite3, sys
+                c = sqlite3.connect(sys.argv[1], isolation_level=None)
+                c.execute("BEGIN IMMEDIATE")
+                print("held", flush=True)
+                sys.stdin.readline()
+            """), str(self.root / "f.sqlite")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.stdin.close)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.raw.execute("PRAGMA busy_timeout=200")
+        out = call("export_history", format="csv")
+        self.assertIn("Ledger instance: %s" % self.stored(), out)
+
     def test_ensure_never_replaces_an_id_another_process_minted(self):
         # The race: this process read "absent", another minted, this one
         # writes. INSERT OR IGNORE keeps the first; a check-then-replace would
@@ -412,14 +432,22 @@ class TestTheFence(ToolBase):
         for name, extra in (("add_note", {"note": "a", "author": "agent"}),
                             ("tag_transaction", {"tags": ["x"]}),
                             ("untag_transaction", {"tags": ["x"]})):
-            for bad in (self.id.upper(), self.id[:-1], self.id + "0", "", 7, True,
-                        ["x"], " " + self.id):
+            for bad in (None, self.id.upper(), self.id[:-1], self.id + "0", "", 7,
+                        True, ["x"], " " + self.id):
                 out = call(name, row_ids=[self.rid], expected_ledger=bad, **extra)
                 self.assertIn("expected_ledger must be", out, (name, repr(bad)))
                 self.assertIn("This call's own operation changed nothing", out,
                               (name, repr(bad)))
         self.assertEqual(self.notes(), 0)
         self.assertEqual(self.count("transaction_tags"), 0)
+
+    def test_a_malformed_expected_ledger_never_reaches_the_ledger(self):
+        from unittest import mock
+        with mock.patch.object(tools_read, "conn",
+                               side_effect=AssertionError("ledger opened")):
+            out = call("add_note", row_ids=[self.rid], note="a", author="agent",
+                       expected_ledger="nope")
+        self.assertIn("expected_ledger must be", out)
 
     def test_the_ledger_check_precedes_settlement(self):
         # A settlement that cannot finish refuses the write with its own
