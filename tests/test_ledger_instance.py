@@ -23,7 +23,7 @@ import tools_annotate  # noqa: E402,F401  (registers the annotation writes)
 import tools_backup  # noqa: E402,F401  (registers backup/list_backups/restore_backup)
 import tools_destructive  # noqa: E402,F401  (registers delete_all_data)
 import tools_read  # noqa: E402
-import tools_refresh  # noqa: E402,F401  (registers export_history)
+import tools_refresh  # noqa: E402  (registers export_history)
 from _toolbase import Base, call, dispatch  # noqa: E402
 
 HEX32 = r"[0-9a-f]{32}"
@@ -298,19 +298,24 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
 
 
 class _AtStatement:
-    """The connection the tools use, with one interleaving: just before the
-    first statement matching `when`, `then()` runs on a SECOND, real
-    connection to the same file — another process's erasure landing at the
-    worst moment."""
+    """The connection the tools use, with one interleaving: just before (or,
+    with `after`, just after) the first statement matching `when`, `then()`
+    runs on a SECOND, real connection to the same file — another process's
+    erasure landing at the worst moment."""
 
-    def __init__(self, conn, when, then):
-        self._conn, self._when, self._then = conn, when, then
+    def __init__(self, conn, when, then, after=False):
+        self._conn, self._when, self._then, self._after = conn, when, then, after
 
     def execute(self, sql, *a, **k):
-        if self._then is not None and self._when(sql):
-            then, self._then = self._then, None
+        if self._then is None or not self._when(sql):
+            return self._conn.execute(sql, *a, **k)
+        then, self._then = self._then, None
+        if not self._after:
             then()
-        return self._conn.execute(sql, *a, **k)
+            return self._conn.execute(sql, *a, **k)
+        cur = self._conn.execute(sql, *a, **k)
+        then()
+        return cur
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -337,9 +342,9 @@ class TestAnErasureInAnotherProcess(ToolBase):
                 other.close()
         return run
 
-    def interleave(self, when, then):
+    def interleave(self, when, then, after=False):
         self.addCleanup(setattr, tools_read, "CONN", tools_read.CONN)
-        tools_read.CONN = _AtStatement(tools_read.CONN, when, then)
+        tools_read.CONN = _AtStatement(tools_read.CONN, when, then, after)
 
     def test_the_fence_reads_the_id_under_its_own_lock(self):
         # The id read and the write are one atomic step only if the read is
@@ -363,6 +368,53 @@ class TestAnErasureInAnotherProcess(ToolBase):
                                          (self.NEW, ["after", "t1"]),
                                          (self.NEW, ["t1", "after"])])
         self.assertFalse(self.raw.in_transaction)
+
+    def test_an_incomplete_erasure_listing_labels_the_state_it_shows(self):
+        # The listing's state is captured in its settlement transaction; an
+        # erasure elsewhere right after that transaction rolls back must not
+        # pair the new id with the old registrations.
+        call("add_note", row_ids=[self.rid], note="a", author="agent",
+             workflow="acct@1.0.0", expected_generation=0)
+        doomed = sorted(p.name for p in self.paths.backups_dir.glob("*.sqlite"))[0]
+        with open(self.paths.index, "a") as f:
+            f.write("%s erase abcdefabcdefabcd pending\n" % backups.now_ts())
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def selective(p, *a, **k):
+            if p.name == doomed:
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = selective
+        self.interleave(lambda sql: sql.strip() == "ROLLBACK", self.erase_elsewhere(),
+                        after=True)
+        out = call("list_backups")
+        self.assertIn("A recorded erasure of the backup copies could not be finished", out)
+        self.assertIn("acct@1.0.0 -> ", out)          # the captured, pre-erasure state
+        self.assertEqual(listed_id(out), self.id)      # ...and ITS id
+        self.assertEqual(store.ledger_instance(self.raw), self.NEW)
+
+    def test_an_export_whose_id_vanished_before_the_snapshot_writes_no_file(self):
+        def drop_id():
+            other = sqlite3.connect(str(self.root / "f.sqlite"), isolation_level=None)
+            try:
+                other.execute("DELETE FROM meta WHERE key=?", (store.LEDGER_INSTANCE_KEY,))
+            finally:
+                other.close()
+        self.interleave(lambda sql: sql.strip() == "BEGIN", drop_id)
+        out = call("export_history", format="csv")
+        self.assertIn("The export was not written", out)
+        self.assertEqual(list(self.handoff.rglob("ledger-export-*")), [])
+        self.assertFalse(self.raw.in_transaction)
+
+    def test_an_export_that_fails_mid_snapshot_leaves_no_transaction_open(self):
+        from unittest import mock
+        with mock.patch.object(tools_refresh, "_export_columns",
+                               side_effect=sqlite3.OperationalError("disk I/O error")):
+            with self.assertRaises(sqlite3.OperationalError):
+                call("export_history", format="csv")
+        self.assertFalse(self.raw.in_transaction)
+        self.assertIn("Ledger instance: %s" % self.id, call("export_history", format="csv"))
 
     def test_an_export_labels_exactly_the_rows_it_wrote(self):
         # Rows and id are one snapshot: an erasure (new id, new row)

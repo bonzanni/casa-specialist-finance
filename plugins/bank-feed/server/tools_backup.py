@@ -127,13 +127,24 @@ def backup(args: dict) -> str:
 def list_backups(args: dict) -> str:
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
+    # This listing is where a workflow binds: an id an open was too busy to
+    # mint is minted now, in its own statement, BEFORE the snapshot below.
+    store.reported_ledger_instance(c)
     c.execute("BEGIN IMMEDIATE")
     handle = None
+    ledger = None
     try:
+        # THE ID IS READ IN THE TRANSACTION WHOSE STATE IT LABELS, on both
+        # exits. `delete_all_data` in another process replaces it; an id read
+        # after this transaction ends could pair a new ledger's id with the
+        # old ledger's registrations — a state that never existed.
+        ledger = store.ledger_instance(c)
         state, handle = backups.settle(c, paths)
-        # Minted here if an open found the ledger busy and could not: this
-        # listing is where a workflow binds.
-        text = render_listing(state, store.ensure_ledger_instance(c))  # under both locks
+        if ledger is None:
+            # The mint above could not write; this transaction holds the
+            # write lock, and its COMMIT keeps what it prints.
+            ledger = store.ensure_ledger_instance(c)
+        text = render_listing(state, ledger)  # under both locks
         c.execute("COMMIT")
     except backups.BackupError as exc:
         # Guarded like every sibling: SQLite auto-rolls-back on SQLITE_FULL and
@@ -143,13 +154,13 @@ def list_backups(args: dict) -> str:
         if c.in_transaction:
             c.execute("ROLLBACK")
         if isinstance(exc, backups.ErasureIncomplete) and exc.state is not None:
-            # This exit still answers, and it is a listing a workflow binds
-            # from: mint the id if absent, in its own statement now that the
-            # settlement transaction is gone. Only a ledger that cannot be
-            # written at all prints "none" — and "none" matches no fence.
-            ledger = store.reported_ledger_instance(c)
+            # `ledger` was read in the transaction that captured
+            # `exc.state`, so the two describe one ledger. It is "none" only
+            # when the ledger could not be written at all — and "none"
+            # matches no fence.
+            #
             # THE ONE CALL THAT CHANGES NOTHING (but a missing ledger id,
-            # above) STILL ANSWERS. Refusing here
+            # minted before the snapshot) STILL ANSWERS. Refusing here
             # hid the residue behind a count: the operator was told copies
             # could not be removed and then denied the only in-tool view of
             # which copies those are. Settlement attached the state it had
