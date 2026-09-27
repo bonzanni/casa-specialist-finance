@@ -91,9 +91,71 @@ class TestTheCleanSlate(CleanSlateBase):
         # `incomplete`: nothing can tell it from one the operator made, and
         # failing on it would keep an uninstall from ever finishing.
         out, verdict = self.erase()
-        self.assertIn("any 1Password item titled 'EnableBanking Key' or "
-                      "'EnableBanking'", out)
+        self.assertIn("Still in 1Password and NOT deleted, because nothing "
+                      "here records bank-feed creating it: 'EnableBanking "
+                      "Key', 'EnableBanking'.", out)
         self.assertEqual(verdict, "complete")
+        # Issue #82: casa gets the same fact as data, beside the verdict.
+        self.assertEqual(out.result["unrecorded_vault_items"], [
+            {"title": "EnableBanking Key", "found": True},
+            {"title": "EnableBanking", "found": True}])
+
+    def test_an_unrecorded_title_the_vault_does_not_hold_is_not_named(self):
+        self.vault.items = {"EnableBanking"}
+        out, verdict = self.erase()
+        self.assertNotIn("'EnableBanking Key'", out)
+        self.assertEqual(out.result["unrecorded_vault_items"],
+                         [{"title": "EnableBanking", "found": True}])
+        self.assertEqual(verdict, "complete")
+
+    def test_no_unrecorded_item_left_means_no_field_and_no_line(self):
+        self.vault.items = set()
+        out, verdict = self.erase()
+        self.assertNotIn("unrecorded_vault_items", out.result)
+        self.assertNotIn("nothing here records bank-feed creating", out)
+        self.assertEqual(verdict, "complete")
+
+    def test_a_vault_that_cannot_answer_is_never_read_as_empty(self):
+        # Three states: "could not check" must not read as "not there".
+        self.vault.exists_error = self.vault.OpError("timed out")
+        out, _ = self.erase()
+        self.assertIn("1Password could not be asked whether it holds them: "
+                      "any item titled 'EnableBanking Key' or "
+                      "'EnableBanking'", out)
+        self.assertEqual(out.result["unrecorded_vault_items"], [
+            {"title": "EnableBanking Key", "found": None},
+            {"title": "EnableBanking", "found": None}])
+
+    def test_an_unusable_vault_is_not_asked_and_not_read_as_empty(self):
+        self.vault.usable = False
+        out, _ = self.erase()
+        self.assertEqual([u["found"] for u in
+                          out.result["unrecorded_vault_items"]], [None, None])
+
+    def test_deleting_the_key_names_the_application_it_strands(self):
+        # Issue #80: the application stays registered with the key this call
+        # deleted, and the next setup cannot authenticate to it.
+        self.vault.erase_gone = ["EnableBanking Key"]
+        out, verdict = self.erase()
+        self.assertIn("If the Enable Banking application app-1 is still "
+                      "registered with the signing key this call deleted, a "
+                      "later setup_bank_feed with any other key cannot "
+                      "authenticate to it", out)
+        self.assertEqual(verdict, "complete")
+
+    def test_no_stranded_application_line_when_the_key_was_not_deleted(self):
+        for gone, kept in ((["EnableBanking"], []),
+                           ([], [("EnableBanking Key", "no permission")])):
+            with self.subTest(gone=gone, kept=kept):
+                self.vault.erase_gone, self.vault.erase_kept = gone, kept
+                out, _ = self.erase()
+                self.assertNotIn("registered with the signing key this call", out)
+
+    def test_no_stranded_application_line_without_an_application(self):
+        del os.environ["CASA_BANKFEED_EB_APP_ID"]
+        self.vault.erase_gone = ["EnableBanking Key"]
+        out, _ = self.erase()
+        self.assertNotIn("registered with the signing key this call", out)
 
     def test_no_autoincrement_counter_survives(self):
         # VACUUM keeps `sqlite_sequence`, so without the reset the next rule

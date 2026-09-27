@@ -134,7 +134,12 @@ Phase 0 is what makes setup idempotent: a second run is a no-op.
 
 1. `GET /api/applications` with a fresh ID token.
 2. **Does our production app exist?** (match by name, `casa-finance`)
-   - Yes → read `kid` → that is the app id.
+   - Yes → read `kid`, then prove the signing key authenticates to it: an app-JWT
+     `GET /application` signed with that key as `kid`. Only then is it the app id. A
+     401 or 403 means it was registered with another key (for example one
+     `delete_all_data` erased): setup records nothing, creates nothing, and names the
+     recoveries — restore that key, or let the operator decide whether to remove
+     the application. Step 6 reports the same mismatch for a recorded or wired id.
    - No → **create it**: `POST /api/applications` with `{certificate: <bare
      SPKI public-key PEM>, environment, name, redirect_urls}` → the response
      carries the app id. Three assumptions this step is built on, each with what

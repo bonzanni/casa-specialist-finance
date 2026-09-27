@@ -224,10 +224,16 @@ The phase, in order:
    line's nonce as a tag, so the erasure deletes only items whose tags contain that exact
    tag (archived items included), and it drops a line only once a listing shows no item
    carrying it. An item nothing records, such as one made by hand or by a version older
-   than the record, is never deleted: the reply names the mode's two titles for deletion
-   by hand, and that does not make the answer `incomplete`: nothing can tell such an item
-   from one the operator made, and failing on it would keep an uninstall from ever finishing.
-   A deleted item stays in 1Password's Recently Deleted for 30 days.
+   than the record, is never deleted, and it does not make the answer `incomplete`:
+   nothing can tell such an item from one the operator made, and failing on it would keep
+   an uninstall from ever finishing. The phase asks the vault whether each of the mode's
+   two titles is still there, in three states: an item it finds is named in the reply for
+   deletion by hand, a title it could not ask about is named as unchecked, and an absent
+   one is not mentioned. Casa gets the same list as data, `unrecorded_vault_items`.
+   A deleted item stays in 1Password's Recently Deleted for 30 days. When the signing key
+   item was deleted and an application id was known, the reply also says that the
+   application, if it is still registered with that key, blocks a later setup until the
+   key is restored or the registration resolved (issue #80).
 3. **The ledger, reset in place.** `meta` is cleared to `schema_version`, with a fresh
    local `account_secret` and a fresh ledger instance id, and the AUTOINCREMENT counters
    in `sqlite_sequence` are cleared. The reclaim then clears the freed pages and the WAL.
@@ -239,7 +245,7 @@ The phase, in order:
    removed. The other mode's ledger file itself is never removed: it can hold consents
    only that mode can withdraw, so its presence makes the answer `incomplete`.
 
-The reply always names what no tool here can erase: the Enable Banking application
+The reply always names what no tool here erases: the Enable Banking application
 registration and its account whitelist.
 
 **The lifecycle lock keeps every other call out.** An export published after step 1, or a

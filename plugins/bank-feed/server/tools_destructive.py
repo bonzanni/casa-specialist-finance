@@ -1177,7 +1177,7 @@ EXPORT_PRODUCER = "bank-feed"
 #: Always said by a clean slate (issue #72): what no tool here can erase.
 _NOT_ERASABLE = (
     "Not erasable by any tool here: the Enable Banking application "
-    "registration and its account whitelist (their API offers no deletion; "
+    "registration and its account whitelist (no tool here deletes them; "
     "remove them in the Enable Banking control panel), and the deleted "
     "1Password items, which 1Password keeps in Recently Deleted for 30 days "
     "(restore or purge them in the 1Password apps).")
@@ -1290,11 +1290,36 @@ def _remove_residue(paths, *, tool="delete_all_data", index=True):
     return removed, failures
 
 
+def _unrecorded_items(titles):
+    """Which of bank-feed's item titles nothing records it creating are in
+    this mode's vault (issue #82). -> `[{"title", "found"}]`, `found` True for
+    an item the vault shows and None for one it could not be asked about; an
+    item the vault says is absent is left out. Three states, because "could
+    not check" must never read as "not there". Never raises."""
+    found = []
+    reason = tools_auth.OPVAULT.status()
+    for title in titles:
+        state = None
+        if reason is None:
+            try:
+                state = bool(tools_auth.OPVAULT.item_exists(
+                    title, tools_auth.OPVAULT.VAULT))
+            except Exception:                # noqa: BLE001 — never raises
+                state = None
+        if state is not False:
+            found.append({"title": title, "found": state})
+    return found
+
+
 def _clean_slate(c, paths):
-    """Phase 3 (issue #72): the exports, the vault items bank-feed created,
-    and the ledger's links to its past. Runs only when no consent is left to
-    withdraw. -> `(ok, [report lines])`; never raises."""
+    """Phase 3 (issue #72): the exports, the vault items bank-feed recorded
+    creating, and the ledger's links to its past. Runs only when no consent
+    is left to withdraw. -> `(ok, [report lines], unrecorded)`, `unrecorded`
+    as `_unrecorded_items` returns it; never raises."""
     lines, ok = [], True
+    # Read before the reset below clears it: the application the deleted key
+    # was registered with (issue #80).
+    app_id = tools_auth._resolved_app_id(c)
     exported, failure = _erase_exports()
     if exported:
         lines.append("%d export file(s) published to casa's handoff folder "
@@ -1320,15 +1345,36 @@ def _clean_slate(c, paths):
                      "delete_all_data again when 1Password answers, or delete "
                      "them by hand." % (len(kept), "; ".join(
                          "%s (%s)" % (_safe(t), _safe(r)) for t, r in kept)))
-    unproven = [t for t in (tools_auth.OPVAULT.KEY_ITEM,
-                            tools_auth.OPVAULT.CRED_ITEM)
-                if t not in gone and t not in [k[0] for k in kept]]
-    if unproven:
-        lines.append("Not deleted, because nothing here records bank-feed "
-                     "creating them: any 1Password item titled %s. If an "
-                     "earlier version of bank-feed created them, delete them by "
-                     "hand; an item you made yourself is never touched."
-                     % " or ".join("'%s'" % t for t in unproven))
+    if tools_auth.OPVAULT.KEY_ITEM in gone and app_id:
+        # Conditional twice over: nothing here knows whether the operator
+        # already removed the application, nor whether the deleted item holds
+        # the key it was registered with (a restored, unrecorded key may).
+        lines.append("If the Enable Banking application %s is still "
+                     "registered with the signing key this call deleted, a "
+                     "later setup_bank_feed with any other key cannot "
+                     "authenticate to it: setup stops at the "
+                     "application step until that key is restored from "
+                     "1Password's Recently Deleted, or until you resolve the "
+                     "registration in the Enable Banking control panel."
+                     % _safe(app_id))
+    unrecorded = _unrecorded_items(
+        [t for t in (tools_auth.OPVAULT.KEY_ITEM, tools_auth.OPVAULT.CRED_ITEM)
+         if t not in gone and t not in [k[0] for k in kept]])
+    present = [u["title"] for u in unrecorded if u["found"]]
+    unknown = [u["title"] for u in unrecorded if u["found"] is None]
+    if present:
+        lines.append("Still in 1Password and NOT deleted, because nothing here "
+                     "records bank-feed creating it: %s. If bank-feed made it "
+                     "(an install set up before bank-feed 0.17.0, or one whose "
+                     "creation record was lost), delete it by hand; an item "
+                     "you made yourself is never touched."
+                     % ", ".join("'%s'" % _safe(t) for t in present))
+    if unknown:
+        lines.append("Not deleted, and 1Password could not be asked whether "
+                     "it holds them: any item titled %s. Nothing here records "
+                     "bank-feed creating them; if it did, delete them by hand. "
+                     "An item you made yourself is never touched."
+                     % " or ".join("'%s'" % _safe(t) for t in unknown))
     failure = _reset_ledger(c)
     if failure:
         ok = False
@@ -1352,7 +1398,7 @@ def _clean_slate(c, paths):
         lines.append("The backup index and every leftover backup file beside "
                      "the ledger were removed (%d)." % removed)
     lines.append(_NOT_ERASABLE)
-    return ok, lines
+    return ok, lines, unrecorded
 
 
 def _erase_rows_and_copies(c, paths, erase, precheck=None):
@@ -1742,10 +1788,10 @@ def delete_all_data(args: dict) -> str:
     # Its vault half deletes the private key every withdrawal needs, and its
     # ledger half the application id, so a consent still held here keeps
     # both; the reply is then `incomplete` and a retry finishes from here.
-    slate_ok, slate_lines = None, []
+    slate_ok, slate_lines, unrecorded = None, [], []
     if (halted is None and not kept and handles_ok and copies_ok
             and backups_warning is None):
-        slate_ok, slate_lines = _clean_slate(c, paths)
+        slate_ok, slate_lines, unrecorded = _clean_slate(c, paths)
 
     # THE ITEM THAT COSTS MONEY LEADS. What became of the banks'
     # own permissions is the only part of this call that can still cost the
@@ -1908,13 +1954,21 @@ def delete_all_data(args: dict) -> str:
     # Every refusal before this point returns prose, which casa reads as not
     # complete, so only this return needs the verdict.
     # And, since issue #72, only when the clean slate ran and finished: the
-    # exports, the vault items bank-feed created and the ledger's links to
-    # its past are part of "nothing this plugin holds".
+    # exports, the vault items bank-feed RECORDED creating and the ledger's
+    # links to its past are part of "nothing this plugin holds". An item under
+    # bank-feed's titles that nothing records it creating is not: nothing can
+    # tell it from one the operator made, so it is never deleted, and it
+    # never blocks `complete`, which would keep an uninstall from ever
+    # finishing. It is named in the report and, for casa, in
+    # `unrecorded_vault_items` (issue #82).
     complete = (halted is None and not kept and handles_ok and copies_ok
                 and backups_warning is None and reclaimed
                 and slate_ok is True)
-    return {"erasure": "complete" if complete else "incomplete",
-            "report": "\n".join(notice)}
+    result = {"erasure": "complete" if complete else "incomplete",
+              "report": "\n".join(notice)}
+    if unrecorded:
+        result["unrecorded_vault_items"] = unrecorded
+    return result
 
 
 #: Kept by `delete_data_keep_signins` (issue #73), because a reinstall needs

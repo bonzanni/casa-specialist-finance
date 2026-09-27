@@ -23,7 +23,10 @@ class TestErasureStatus(DestructiveBase):
     def erase(self):
         out = tools_destructive.delete_all_data({})
         self.assertIsInstance(out, dict)
-        self.assertEqual(set(out), {"erasure", "report"})
+        # `unrecorded_vault_items` is the one optional key (issue #82);
+        # casa's parse_erase_result reads the other two and ignores it.
+        self.assertEqual(set(out) - {"unrecorded_vault_items"},
+                         {"erasure", "report"})
         self.assertIsInstance(out["report"], str)
         return out
 
@@ -106,7 +109,8 @@ class TestErasureStatus(DestructiveBase):
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "delete_all_data", "arguments": {}}})
         body = json.loads(resp["result"]["content"][0]["text"])
-        self.assertEqual(set(body), {"erasure", "report"})
+        self.assertEqual(set(body) - {"unrecorded_vault_items"},
+                         {"erasure", "report"})
         self.assertTrue(body["report"].startswith("SETTLEMENT SENTENCE\n"))
         self.assertNotIn("isError", resp["result"])
         self.assertIsNone(backups._LOG.get())

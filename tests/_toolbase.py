@@ -756,6 +756,17 @@ class FakeCB:
 
 
 class Base(unittest.TestCase):
+    def keyed_ais(self, app_id, key):
+        test = self
+
+        class Keyed:
+            def application(self):
+                test.keyed_calls.append((app_id, (key.n, key.e)))
+                if test.keyed_error is not None:
+                    raise test.keyed_error
+                return {"kid": app_id}
+        return Keyed()
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -766,6 +777,12 @@ class Base(unittest.TestCase):
         self.addCleanup(setattr, tools_read, "CONN", None)
         self.ais = FakeAIS()
         self.admin = FakeAdmin()
+        # Setup's probe of an application found by name (issue #80): every
+        # (app id, public half of the signing key) it was asked with, and
+        # what `application()` then raises — None answers, as a key the
+        # application was registered with does.
+        self.keyed_calls = []
+        self.keyed_error = None
         self.cb = FakeCB(str(self.root))
         self.state_hash = STATE_HASH
 
@@ -789,6 +806,7 @@ class Base(unittest.TestCase):
         for module, attr, value in (
                 (tools_auth, "CB", self.cb),
                 (tools_auth, "AIS_FACTORY", lambda: self.ais),
+                (tools_auth, "KEYED_AIS_FACTORY", self.keyed_ais),
                 (tools_auth, "ADMIN_FACTORY", lambda: self.admin),
                 (tools_auth, "_now_s", lambda: FROZEN_NOW),
                 (tools_auth, "_PROTECTED_CACHE", tools_auth._PROTECTED_CACHE),

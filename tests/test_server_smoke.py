@@ -300,6 +300,12 @@ class TestPluginManifest(unittest.TestCase):
         self.assertIn("every plugin backup (not HA backups)", wipe)
         self.assertIn("withdraw", wipe)
         self.assertIn("consent", wipe)
+        # Issue #81: since #72 the call also deletes the vault items it
+        # created and the published exports; the summary has to say so. Each
+        # of those can fail and is then reported, so none is promised.
+        self.assertIn("tries to erase every plugin backup (not HA backups), "
+                      "exports, and the 1Password key + sign-in", wipe)
+        self.assertIn("Irreversible", wipe)
         # Issue #73: the data-only eraser's consequence is what it keeps.
         keep = summary["delete_data_keep_signins"]
         self.assertIn("every plugin backup (not HA backups)", keep)
