@@ -1428,9 +1428,12 @@ class TestDeleteAll(DestructiveBase):
         # rather than present-and-empty. assertEqual against the full
         # whitelist would wrongly demand a key nothing wrote; the subset
         # check plus the two keys `store.open_db` always populates is the
-        # accurate claim.
-        self.assertLessEqual(keys, set(tools_destructive.STRUCTURAL_META_KEYS))
-        self.assertEqual(keys, {"schema_version", "account_secret"})
+        # accurate claim. The ledger instance id is not structural: the
+        # erasure replaces it with a new one (issue #69).
+        self.assertLessEqual(keys - {store.LEDGER_INSTANCE_KEY},
+                             set(tools_destructive.STRUCTURAL_META_KEYS))
+        self.assertEqual(keys, {"schema_version", "account_secret",
+                                store.LEDGER_INSTANCE_KEY})
         # The two survivors are structural for a reason: regenerating the
         # secret would silently re-key every account id on the next link.
         self.assertEqual(store.local_secret(self.raw), secret_before)
@@ -1535,6 +1538,9 @@ class TestDeleteAll(DestructiveBase):
         # spelling against the other so the two cannot silently drift apart
         # on a future rename.
         self.assertIn(backups.MARKER_KEY, tools_destructive.STRUCTURAL_META_KEYS)
+        # ...and the ledger instance id is deliberately NOT structural: the
+        # uninstall eraser replaces it (issue #69).
+        self.assertNotIn(store.LEDGER_INSTANCE_KEY, tools_destructive.STRUCTURAL_META_KEYS)
         self.assertIn(backups.REGISTRATIONS_TABLE, tools_destructive._DATA_TABLES)
 
 
@@ -1705,7 +1711,8 @@ class TestDeleteAllAndTheBanksOwnPermissions(DestructiveBase):
                       "occurrence_alloc"):
             self.assertEqual(self.count(table), 0, table)
         keys = {r[0] for r in self.raw.execute("SELECT key FROM meta")}
-        self.assertLessEqual(keys, set(tools_destructive.STRUCTURAL_META_KEYS))
+        self.assertLessEqual(keys - {store.LEDGER_INSTANCE_KEY},
+                             set(tools_destructive.STRUCTURAL_META_KEYS))
         self.assertNotIn("some_future_key", keys)
         self.assertEqual(self.count("sessions"), 1)
 

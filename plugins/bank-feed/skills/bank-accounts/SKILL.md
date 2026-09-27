@@ -278,7 +278,11 @@ handle is how the annotation tools address a transaction.
   (the restore generation `list_backups` showed at the start of the pass) on
   `tag_transaction`, `untag_transaction` and `add_note`. The first write of a
   new workflow string mints its restore point automatically; a refusal
-  saying the ledger was restored means stop the pass and re-read.
+  saying the ledger was restored means stop the pass and re-read. A
+  workflow that bound itself to one ledger also passes `expected_ledger`
+  (the `Ledger instance` line of `list_backups`); a refusal saying this
+  is a different ledger means stop and tell the operator — never retry
+  with the new id.
 - **Vocabulary tools act everywhere at once**: `rename_tag` renames a tag
   across the whole ledger (renaming onto an existing tag merges them and
   requires `merge: true` — irreversible, say so before you do it);

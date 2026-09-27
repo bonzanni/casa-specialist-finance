@@ -47,6 +47,7 @@ import flows
 import httpx
 import money
 import rules
+import store
 import tools_auth
 import tools_read
 from tools_auth import GATE_NOTE, RateControlDeferred, _conn, _require_declared
@@ -1023,6 +1024,11 @@ def _export_columns(c) -> list:
     return [name for name in columns if name not in EXPORT_EXCLUDE]
 
 
+_EXPORT_UNLABELLED = ("The export was not written: the ledger could not "
+                      "record its instance id (another process is writing, "
+                      "or the disk is full). Try again.")
+
+
 @register("export_history",
           "Write the full local ledger as CSV or JSONL into Casa's handoff "
           "folder and return the path. Another plugin can take the file from "
@@ -1036,11 +1042,32 @@ def export_history(args: dict) -> str:
     fmt = str(args.get("format") or "csv").lower()
     if fmt not in ("csv", "jsonl"):
         return "format must be csv or jsonl."
-    columns = _export_columns(c)
+    # Every export names the ledger its rows came from (issue #69) — minted
+    # first on a ledger whose opens were all too busy to. One that cannot be
+    # recorded writes no file: an unlabelled export is one a workflow cannot
+    # tie to its ledger.
+    if store.reported_ledger_instance(c) is None:
+        return _EXPORT_UNLABELLED
+    # THE ID AND THE ROWS ARE ONE SNAPSHOT. `delete_all_data` in another
+    # process replaces the id; read as two statements, an export could carry
+    # post-erasure rows under the pre-erasure id. A deferred read transaction
+    # takes no write lock, so a steady-state export still runs beside a
+    # writer.
+    c.execute("BEGIN")
+    try:
+        ledger = store.ledger_instance(c)
+        columns = _export_columns(c)
+        rows = [dict(r) for r in c.execute(
+            "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
+            % ", ".join(columns))]
+        c.execute("COMMIT")
+    except BaseException:
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+    if ledger is None:
+        return _EXPORT_UNLABELLED
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    rows = [dict(r) for r in c.execute(
-        "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
-        % ", ".join(columns))]
     buf = io.StringIO(newline="")
     if fmt == "csv":
         writer = csv.DictWriter(buf, fieldnames=columns)
@@ -1065,6 +1092,7 @@ def export_history(args: dict) -> str:
         "or copy it somewhere to keep it."
         % (len(rows), fmt, ", ".join(sorted(EXPORT_EXCLUDE)),
            casa_handoff.RETENTION_S // 86400),
+        "Ledger instance: %s" % ledger,
         "Path: %s" % out["path"],
     ])
 

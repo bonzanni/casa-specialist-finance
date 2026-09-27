@@ -121,7 +121,8 @@ Every workflow-bearing write to `tag_transaction`, `untag_transaction` or `add_n
 goes through `tools_annotate.py`'s `_fenced_write()`, which fixes the order for all
 three:
 
-1. `BEGIN IMMEDIATE`
+1. `BEGIN IMMEDIATE`, then, if `expected_ledger` was passed, compare it with this file's
+   ledger instance id — before settlement, so the refusal takes no index lock
 2. settle, under both locks
 3. compare `expected_generation` against the **settled** generation — a mismatch rolls
    the whole transaction back and mints nothing: "the ledger was restored since this
@@ -152,6 +153,28 @@ a namespaced tag is another workflow's vocabulary, and writing it unattributed w
 in without the restore point its owner is promised. `_workflow_args()` enforces the companion
 rule — `workflow` and `expected_generation` arrive together or not at all, and a `bool` is
 not an integer here any more than anywhere else in this tree.
+
+### The ledger instance
+
+A fresh ledger with no restores and no registrations looks just like any other, so a
+workflow binds to an id instead: `meta.ledger_instance`, 32 random hex characters
+(`store.LEDGER_INSTANCE_KEY`). `store.open_db()` mints it when it is absent, and does
+nothing when it is present, so a steady-state open never needs the write lock; a busy
+first open skips it. Every reply that names it mints it first if absent: `list_backups`
+prints it on a `Ledger instance:` line in every listing it answers with (a refusal is not
+a listing and names none; read the line by its label, not its position, since the
+dispatcher prepends settlement sentences), and `export_history` names it or writes no file.
+
+It survives what keeps the ledger's story going and nothing else. A restore keeps it
+(`meta` is kept live), and so does `purge`, even of the whole ledger: that is the reset of
+a ledger still in use, so a workflow sees the same ledger, emptied. `delete_all_data` does
+not: it is the eraser an uninstall runs, and it replaces the id with a new one inside its
+erasure transaction, so a workflow bound to the old id sees a different ledger. Otherwise
+it changes only when the file is recreated, and sandbox and production are different
+files. The three annotation
+writes accept `expected_ledger` independently of `workflow`; a mismatch, or no id,
+refuses the whole write. A restore below bank-feed, such as a Home Assistant backup of
+the data directory, brings the file back with its id; bank-feed cannot see that.
 
 A mint that is rolled back — the write it preceded refused, or failed for any other
 reason — leaves the copy on disk as an `orphan`, not `aborted`: the file is still a
@@ -355,6 +378,7 @@ subsystem is never a *dangerous* one.
 - `tests/test_backups.py`
 - `tests/test_tools_backup.py`
 - `tests/test_tools_annotate.py`
+- `tests/test_ledger_instance.py`
 
 **Related**
 - [`architecture/annotations-and-rules.md`](../architecture/annotations-and-rules.md)

@@ -114,7 +114,7 @@
 
 - doc: architecture/backups-and-restore.md
   summary: Backups, the event index beside the ledger, settlement, the minted restore point, and the in-place restore.
-  when_changing: backups, restore, workflow registrations, the restore generation, or what a refresh reports across a restore
+  when_changing: backups, restore, workflow registrations, the restore generation, the ledger instance id, or what a refresh reports across a restore
   covers:
     - plugins/bank-feed/server/backups.py
     - plugins/bank-feed/server/tools_backup.py
@@ -123,6 +123,7 @@
     - tests/test_backups.py
     - tests/test_tools_backup.py
     - tests/test_tools_annotate.py
+    - tests/test_ledger_instance.py
   related: [architecture/annotations-and-rules.md, architecture/backups-erasure.md, architecture/backups-settlement.md, architecture/ingestion-and-identity.md, reference/tool-surface.md]
   defines_invariants: [INV-BACKUP-001, INV-BACKUP-002, INV-BACKUP-003, INV-BACKUP-004]
   invariant_tests:

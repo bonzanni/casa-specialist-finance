@@ -29,6 +29,7 @@ import re
 import apply
 import backups
 import callbacks
+import store
 import tools_auth
 import tools_read
 from tools_auth import (GATE_NOTE, _conn, _require_declared,
@@ -1269,6 +1270,14 @@ def delete_all_data(args: dict) -> str:
         c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
                   % ", ".join("?" * len(STRUCTURAL_META_KEYS)),
                   tuple(STRUCTURAL_META_KEYS))
+        # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69; operator,
+        # 2026-09-27). This is the erasure an uninstall runs, and an erased
+        # ledger is not the same ledger emptied: a workflow bound to the old
+        # id must see a different one. The DELETE above removed it
+        # (`ledger_instance` is not structural); a new one is minted here, in
+        # the same transaction, so the ledger is never without an id. The
+        # in-use reset is `purge`, which keeps it.
+        store.ensure_ledger_instance(c)
         # THE ERASURE OF THE COPIES IS RECORDED BEFORE IT HAPPENS, through the
         # same index protocol a mint and a restore already use. Without this
         # record a crash between the COMMIT below and `erase_backups` left an
@@ -1444,7 +1453,9 @@ def delete_all_data(args: dict) -> str:
             "session identifier; %s, so the database is immediately usable "
             "again. The restore fingerprint is gone too: the next run "
             "records a fresh one, which is correct — this ledger has no "
-            "past to be restored from any more." % survivors)
+            "past to be restored from any more. The ledger instance id was "
+            "replaced by a new one, so a workflow bound to the old one now "
+            "sees a different ledger." % survivors)
     if marker_was_present:
         # The marker's own survival is already named in `survivors` above —
         # saying it was "kept" a second time here would restate the same

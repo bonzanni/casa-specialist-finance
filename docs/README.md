@@ -17,7 +17,7 @@ Start with the row that matches what you are about to change.
 | adding, removing, renaming or protecting a tool, or changing the role allow-list | [`reference/tool-surface.md`](reference/tool-surface.md) |
 | an environment variable, the config schema, the mcp manifest, or the vault contract | [`reference/configuration.md`](reference/configuration.md) |
 | anything published — documents, comments, commit messages, or the gates that enforce them | [`doctrine/publishing.md`](doctrine/publishing.md) |
-| backups, restore, workflow registrations, the restore generation, or what a refresh reports across a restore | [`architecture/backups-and-restore.md`](architecture/backups-and-restore.md) |
+| backups, restore, workflow registrations, the restore generation, the ledger instance id, or what a refresh reports across a restore | [`architecture/backups-and-restore.md`](architecture/backups-and-restore.md) |
 | keys, tokens, the vault seam, signing, or mode selection | [`architecture/credentials.md`](architecture/credentials.md) |
 | linking, authorization, renewal, the callback contract, or rate control | [`architecture/bank-linking.md`](architecture/bank-linking.md) |
 | matching, occurrence allocation, coverage, the ledger schema, or a migration | [`architecture/ingestion-and-identity.md`](architecture/ingestion-and-identity.md) |

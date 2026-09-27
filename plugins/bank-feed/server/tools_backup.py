@@ -21,8 +21,14 @@ from tools_read import register
 STALE_LINE = "Refresh reports produced while this restore ran may be stale; run sync."
 
 
-def render_listing(state: backups.LedgerState) -> str:
-    lines = ["Restore generation: %d" % state.generation]
+def render_listing(state: backups.LedgerState, ledger) -> str:
+    # The ledger instance id (issue #69): the generation and the
+    # registrations below are matched by any fresh ledger, the id is not. A
+    # caller finds it by its label, as it finds "Restore generation:" — never
+    # by position: the dispatcher prepends settlement sentences and the
+    # sandbox banner to whatever this returns.
+    lines = ["Ledger instance: %s" % (ledger or "none"),
+             "Restore generation: %d" % state.generation]
     rows = sorted(state.backups.items(), key=lambda kv: kv[1]["seq"], reverse=True)
     lines.append("Backups (newest first): %s" % ("none" if not rows else ""))
     # EVERY indexed backup is listed, including one whose file is gone: a
@@ -113,18 +119,32 @@ def backup(args: dict) -> str:
 
 
 @register("list_backups",
-          "Every backup (id, time, size, reason, state), the registered "
+          "The ledger instance id (a workflow's `expected_ledger`), every "
+          "backup (id, time, size, reason, state), the registered "
           "workflow strings and the backup each one minted, the restore "
           "events, and the restore generation. Settles pending operations "
           "first.", {"type": "object", "properties": {}})
 def list_backups(args: dict) -> str:
     c = tools_read.conn()
     paths = backups.paths_for(tools_read.ledger_path(c))
+    # This listing is where a workflow binds: an id an open was too busy to
+    # mint is minted now, in its own statement, BEFORE the snapshot below.
+    store.reported_ledger_instance(c)
     c.execute("BEGIN IMMEDIATE")
     handle = None
+    ledger = None
     try:
+        # THE ID IS READ IN THE TRANSACTION WHOSE STATE IT LABELS, on both
+        # exits. `delete_all_data` in another process replaces it; an id read
+        # after this transaction ends could pair a new ledger's id with the
+        # old ledger's registrations — a state that never existed.
+        ledger = store.ledger_instance(c)
         state, handle = backups.settle(c, paths)
-        text = render_listing(state)          # captured under both locks
+        if ledger is None:
+            # The mint above could not write; this transaction holds the
+            # write lock, and its COMMIT keeps what it prints.
+            ledger = store.ensure_ledger_instance(c)
+        text = render_listing(state, ledger)  # under both locks
         c.execute("COMMIT")
     except backups.BackupError as exc:
         # Guarded like every sibling: SQLite auto-rolls-back on SQLITE_FULL and
@@ -134,7 +154,13 @@ def list_backups(args: dict) -> str:
         if c.in_transaction:
             c.execute("ROLLBACK")
         if isinstance(exc, backups.ErasureIncomplete) and exc.state is not None:
-            # THE ONE CALL THAT CHANGES NOTHING STILL ANSWERS. Refusing here
+            # `ledger` was read in the transaction that captured
+            # `exc.state`, so the two describe one ledger. It is "none" only
+            # when the ledger could not be written at all — and "none"
+            # matches no fence.
+            #
+            # THE ONE CALL THAT CHANGES NOTHING (but a missing ledger id,
+            # minted before the snapshot) STILL ANSWERS. Refusing here
             # hid the residue behind a count: the operator was told copies
             # could not be removed and then denied the only in-tool view of
             # which copies those are. Settlement attached the state it had
@@ -159,7 +185,7 @@ def list_backups(args: dict) -> str:
             return ("A recorded erasure of the backup copies could not be "
                     "finished. Every INDEXED copy is listed below — a copy in "
                     "flight never reached the index and has no row.\n%s"
-                    % render_listing(exc.state))
+                    % render_listing(exc.state, ledger))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is

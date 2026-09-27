@@ -25,6 +25,9 @@ import ebmode
 
 SCHEMA_VERSION = 9
 
+#: The `meta` key holding the ledger instance id (issue #69); see `open_db`.
+LEDGER_INSTANCE_KEY = "ledger_instance"
+
 #: Read at call time by `_settle_best_effort`, not captured at import — tests
 #: lower it to bound the wait on a lock another process holds.
 _SETTLE_BUSY_MS = 10000
@@ -935,12 +938,68 @@ def open_db(path=None) -> sqlite3.Connection:
         snapshot_before_migration(db)     # before any schema change
         _migrate(conn, current)
 
+    # The ledger instance id (issue #69), minted once per database FILE: at
+    # creation, or at the first open of a ledger that predates it. Only when
+    # ABSENT — a steady-state open must not need the write lock — and never
+    # failing the open for the same reason `_settle_best_effort` does not:
+    # every reply that names the id mints it first if absent
+    # (`reported_ledger_instance`: `list_backups`, where a workflow binds,
+    # and `export_history`).
+    # No schema bump: that would make every existing backup unrestorable.
+    # The attempt waits for no one: swallowing "database is locked" only
+    # after the busy timeout would turn "another process is writing" into a
+    # ten-second open.
+    if ledger_instance(conn) is None:
+        conn.execute("PRAGMA busy_timeout=0")
+        try:
+            ensure_ledger_instance(conn)
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.execute("PRAGMA busy_timeout=%d" % _SETTLE_BUSY_MS)
+
     _settle_best_effort(conn, db)
 
     _harden(db)
     for suffix in _SIDECARS:
         _harden(db.parent / (db.name + suffix))
     return conn
+
+
+def ledger_instance(conn: sqlite3.Connection) -> str | None:
+    """The id minted for this database file, or None when the row is absent
+    (an open that found the ledger busy could not mint it). Reads only: the
+    fence and the export report what is there, and an absent id matches
+    nothing."""
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (LEDGER_INSTANCE_KEY,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def ensure_ledger_instance(conn: sqlite3.Connection) -> str:
+    """The id, minted first if absent. INSERT OR IGNORE: a present id is
+    never replaced, so two racing minters agree on whichever landed first.
+    Never taken from a backup (`meta` stays live across a restore) and kept
+    by `purge`; `delete_all_data`, the eraser an uninstall runs, removes it
+    and mints a new one through this function in its erasure transaction.
+    Otherwise it changes only when the file is recreated."""
+    conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
+                 (LEDGER_INSTANCE_KEY, secrets.token_hex(16)))
+    return ledger_instance(conn)
+
+
+def reported_ledger_instance(conn: sqlite3.Connection) -> str | None:
+    """THE ONE ANSWER for a reply that names the id: the stored id, or one
+    minted now (INSERT OR IGNORE, the connection's ordinary busy timeout).
+    None only when the ledger could not be written at all — and the caller
+    then refuses or says so, never prints an id that is not there."""
+    live = ledger_instance(conn)
+    if live is not None:
+        return live
+    try:
+        return ensure_ledger_instance(conn)
+    except sqlite3.OperationalError:
+        return None
 
 
 def local_secret(conn: sqlite3.Connection) -> bytes:
