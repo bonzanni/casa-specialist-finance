@@ -34,6 +34,10 @@ compared against the real symbol. Without a checkout, the suite checks only that
 the copies and this table agree with each other — which catches drift between
 them, and nothing about casa.
 
+`bank-feed` declares `delete_all_data` as its eraser (`casa.eraseTool`); casa
+v0.329.0 is the first that reads that key and offers to erase the data at uninstall.
+An older one ignores it, so the floor below is unchanged by it.
+
 `tx-classifier` declares its classification workflow as a background job
 (`casa.jobs`); casa v0.321.0 is the first that reads that key, and an older one
 ignores it, so the declaration raises nothing and the floor below is unchanged.

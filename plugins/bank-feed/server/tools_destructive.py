@@ -1028,7 +1028,7 @@ def _destroy_proven_handles(c, paths):
             handle.close()
         # Settlement succeeded when `state` is set, so the failure is the
         # sweep's own `pending` append.
-        return False, _handles_kept_note(due, exc, state is not None), []
+        return False, _handles_kept_note(due, exc, state is not None), [], True
     except Exception as exc:                 # noqa: BLE001 — class name only
         if c.in_transaction:
             c.execute("ROLLBACK")
@@ -1042,7 +1042,7 @@ def _destroy_proven_handles(c, paths):
                 "session rows could not run (%s) and this call could not read "
                 "how many were due, so it cannot tell you whether an inert row "
                 "was left behind. Run consent_status to see what is still "
-                "listed, and delete_all_data again to finish." % failure), extra
+                "listed, and delete_all_data again to finish." % failure), extra, True
         if not due:
             # Not a WARNING: there is no residue and nothing to do about it.
             # Still said out loud, because a write that failed is never
@@ -1052,7 +1052,7 @@ def _destroy_proven_handles(c, paths):
                 "Note — the sweep of session rows could not run (%s), but "
                 "NOTHING WAS DUE for removal: no consent is recorded here as "
                 "proven gone, so this call destroyed no handle and left none "
-                "behind. There is nothing to clear." % failure), extra
+                "behind. There is nothing to clear." % failure), extra, True
         # EVERY CLAIM HERE IS SCOPED TO THE ROWS IT COUNTS. This warning can
         # stand beside the halted-pass warning, which is about the DISJOINT
         # set of consents nobody could prove dead — so an unscoped "there is
@@ -1065,14 +1065,17 @@ def _destroy_proven_handles(c, paths):
             "(%s). Those rows are inert: the provider confirmed those consents "
             "gone, so consent_status does not list them and there is nothing "
             "left to revoke at those banks. Run delete_all_data again to clear "
-            "the residue." % (due, failure)), extra
+            "the residue." % (due, failure)), extra, True
     lines = []
     try:
         if erase_op is not None:
-            swept = _second_sweep(paths, handle, state, erase_op)
+            swept_ok, swept = _second_sweep(paths, handle, state, erase_op)
             if swept:
                 lines.append(swept)
-        return True, None, lines
+            # A copy the second sweep could not settle holds the rows just
+            # destroyed: the rows went, but the erasure is not complete.
+            return True, None, lines, swept_ok
+        return True, None, lines, True
     finally:
         handle.close()
 
@@ -1107,9 +1110,10 @@ def _handles_kept_note(due, exc, appending: bool) -> str:
 
 
 def _second_sweep(paths, handle, state, erase_op):
-    """Sweep the copies after the session rows went; -> a reply line or None.
-    Never raises: the rows are already destroyed and the banks already asked,
-    so a failure is reported after the erasure, with its count."""
+    """Sweep the copies after the session rows went; -> `(ok, reply line or
+    None)`, `ok` False when a copy or its record may remain. Never raises: the
+    rows are already destroyed and the banks already asked, so a failure is
+    reported after the erasure, with its count."""
     er = backups.Erasure()
     try:
         er = backups.erase_backups(paths, handle, state, erase_op, out=er)
@@ -1117,7 +1121,7 @@ def _second_sweep(paths, handle, state, erase_op):
         er = exc.erasure or backups.Erasure()
         # The sweep's terminal append, as the event it was: "not written"
         # or "failed part way" (`written` None) — never hard-coded.
-        return ("Every backup copy found after the banks were asked (%s) "
+        return False, ("Every backup copy found after the banks were asked (%s) "
                 "was erased with the session rows destroyed here, but %s; "
                 "the next settlement (any backup, restore, listing or "
                 "workflow write) writes the record."
@@ -1126,7 +1130,7 @@ def _second_sweep(paths, handle, state, erase_op):
     except backups.ErasureIncomplete as exc:
         # The sweep's own event; what is left afterwards, what it blocks and
         # how to finish it is the dispatcher's lock-release sentence (#48).
-        return ("WARNING — the session rows of consents proven gone were "
+        return False, ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
                 "banks were asked did not finish: %s went, and %s."
                 % (exc.erasure.went(), exc.residue()))
@@ -1134,7 +1138,7 @@ def _second_sweep(paths, handle, state, erase_op):
         # The sweep's own event, with what it removed before stopping;
         # whether its erasure is still pending is the dispatcher's
         # lock-release sentence.
-        return ("WARNING — the session rows of consents proven gone were "
+        return False, ("WARNING — the session rows of consents proven gone were "
                 "destroyed, but the sweep of the backup copies found after the "
                 "banks were asked stopped part way (%s)%s."
                 % (exc, ", after removing %s" % er.went()
@@ -1149,7 +1153,7 @@ def _second_sweep(paths, handle, state, erase_op):
         line = ((line + " ") if line else "") + (
             "Of that sweep, %s." % backups.record_event(
                 "completion", True, er.index_warning))
-    return line
+    return True, line
 
 
 @register("delete_all_data",
@@ -1492,7 +1496,8 @@ def delete_all_data(args: dict) -> str:
         # nobody proved dead survives and stays revocable.
         gone, kept, halted = [], [], type(exc).__name__
 
-    handles_ok, handles_note, sweep_lines = _destroy_proven_handles(c, paths)
+    handles_ok, handles_note, sweep_lines, copies_ok = _destroy_proven_handles(
+        c, paths)
 
     # THE ITEM THAT COSTS MONEY LEADS. What became of the banks'
     # own permissions is the only part of this call that can still cost the
@@ -1631,6 +1636,19 @@ def delete_all_data(args: dict) -> str:
     if not handles_ok:
         notice.append(handles_note)
     notice.extend(sweep_lines)
-    notice.append(_reclaim(c)[1])
+    reclaimed, reclaim_line = _reclaim(c)
+    notice.append(reclaim_line)
     notice.append(GATE_NOTE)
-    return "\n".join(notice)
+    # THIS IS BANK-FEED'S `casa.eraseTool`: casa removes the plugin at uninstall
+    # only on "complete", and removing it destroys the one tool that can finish
+    # an erasure. So "complete" is claimed only when nothing this plugin holds
+    # remains and every withdrawal it attempted was confirmed: no consent kept
+    # or left unaccounted for, no session handle left behind, no backup copy the
+    # sweep could not settle, and the reclaim done — an unfinished VACUUM leaves
+    # erased rows, session ids included, readable in the free pages and the WAL.
+    # Every refusal before this point returns prose, which casa reads as not
+    # complete, so only this return needs the verdict.
+    complete = (halted is None and not kept and handles_ok and copies_ok
+                and backups_warning is None and reclaimed)
+    return {"erasure": "complete" if complete else "incomplete",
+            "report": "\n".join(notice)}
