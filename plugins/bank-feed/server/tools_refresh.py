@@ -47,6 +47,7 @@ import flows
 import httpx
 import money
 import rules
+import store
 import tools_auth
 import tools_read
 from tools_auth import GATE_NOTE, RateControlDeferred, _conn, _require_declared
@@ -1065,6 +1066,9 @@ def export_history(args: dict) -> str:
         "or copy it somewhere to keep it."
         % (len(rows), fmt, ", ".join(sorted(EXPORT_EXCLUDE)),
            casa_handoff.RETENTION_S // 86400),
+        # The id of the ledger these rows came from (issue #69), read on the
+        # connection that read them — the one file this process has open.
+        "Ledger instance: %s" % (store.ledger_instance(c) or "none"),
         "Path: %s" % out["path"],
     ])
 

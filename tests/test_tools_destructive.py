@@ -1417,20 +1417,21 @@ class TestDeleteAll(DestructiveBase):
         secret_before = store.local_secret(self.raw)
         out = call("delete_all_data")
         # No `backup_restore_op` was ever written here, so the reply must not
-        # name the backup subsystem's marker as a survivor -- only the two
+        # name the backup subsystem's marker as a survivor -- only the three
         # rows that actually remain.
-        self.assertIn("the schema version and the local account_id secret "
-                      "remain", out)
+        self.assertIn("the schema version, the local account_id secret and "
+                      "the ledger instance id remain", out)
         self.assertNotIn("crash-recovery marker", out)
         keys = {r[0] for r in self.raw.execute("SELECT key FROM meta")}
         # `backup_restore_op` is structural too, but it is only ever WRITTEN
         # by a restore — nothing here ran one, so it is correctly absent
         # rather than present-and-empty. assertEqual against the full
         # whitelist would wrongly demand a key nothing wrote; the subset
-        # check plus the two keys `store.open_db` always populates is the
+        # check plus the three keys `store.open_db` always populates is the
         # accurate claim.
         self.assertLessEqual(keys, set(tools_destructive.STRUCTURAL_META_KEYS))
-        self.assertEqual(keys, {"schema_version", "account_secret"})
+        self.assertEqual(keys, {"schema_version", "account_secret",
+                                store.LEDGER_INSTANCE_KEY})
         # The two survivors are structural for a reason: regenerating the
         # secret would silently re-key every account id on the next link.
         self.assertEqual(store.local_secret(self.raw), secret_before)
@@ -1511,12 +1512,12 @@ class TestDeleteAll(DestructiveBase):
             "INSERT INTO meta(key, value) VALUES ('backup_restore_op',"
             "'bbbbbbbbbbbbbbbb')")
         out = call("delete_all_data")
-        # The marker WAS kept, so "only the schema version and the local
-        # account_id secret remain" is false of this call's own database --
-        # a third structural row is sitting right there in `meta` -- and the
-        # reply must name it rather than silently drop it from the count.
+        # The marker WAS kept, so a survivor list without it is false of this
+        # call's own database -- one more structural row is sitting right
+        # there in `meta` -- and the reply must name it rather than silently
+        # drop it from the count.
         self.assertNotIn(
-            "only the schema version and the local account_id secret remain",
+            "the local account_id secret and the ledger instance id remain",
             out)
         self.assertIn("crash-recovery marker", out)
         self.assertEqual(
@@ -1535,6 +1536,7 @@ class TestDeleteAll(DestructiveBase):
         # spelling against the other so the two cannot silently drift apart
         # on a future rename.
         self.assertIn(backups.MARKER_KEY, tools_destructive.STRUCTURAL_META_KEYS)
+        self.assertIn(store.LEDGER_INSTANCE_KEY, tools_destructive.STRUCTURAL_META_KEYS)
         self.assertIn(backups.REGISTRATIONS_TABLE, tools_destructive._DATA_TABLES)
 
 

@@ -21,8 +21,11 @@ from tools_read import register
 STALE_LINE = "Refresh reports produced while this restore ran may be stale; run sync."
 
 
-def render_listing(state: backups.LedgerState) -> str:
-    lines = ["Restore generation: %d" % state.generation]
+def render_listing(state: backups.LedgerState, ledger) -> str:
+    # The ledger instance id comes first (issue #69): the generation and the
+    # registrations below are matched by any fresh ledger, the id is not.
+    lines = ["Ledger instance: %s" % (ledger or "none"),
+             "Restore generation: %d" % state.generation]
     rows = sorted(state.backups.items(), key=lambda kv: kv[1]["seq"], reverse=True)
     lines.append("Backups (newest first): %s" % ("none" if not rows else ""))
     # EVERY indexed backup is listed, including one whose file is gone: a
@@ -113,7 +116,8 @@ def backup(args: dict) -> str:
 
 
 @register("list_backups",
-          "Every backup (id, time, size, reason, state), the registered "
+          "The ledger instance id (a workflow's `expected_ledger`), every "
+          "backup (id, time, size, reason, state), the registered "
           "workflow strings and the backup each one minted, the restore "
           "events, and the restore generation. Settles pending operations "
           "first.", {"type": "object", "properties": {}})
@@ -124,7 +128,9 @@ def list_backups(args: dict) -> str:
     handle = None
     try:
         state, handle = backups.settle(c, paths)
-        text = render_listing(state)          # captured under both locks
+        # Minted here if an open found the ledger busy and could not: this
+        # listing is where a workflow binds, so it never reports "none".
+        text = render_listing(state, store.ensure_ledger_instance(c))  # under both locks
         c.execute("COMMIT")
     except backups.BackupError as exc:
         # Guarded like every sibling: SQLite auto-rolls-back on SQLITE_FULL and
@@ -159,7 +165,7 @@ def list_backups(args: dict) -> str:
             return ("A recorded erasure of the backup copies could not be "
                     "finished. Every INDEXED copy is listed below — a copy in "
                     "flight never reached the index and has no row.\n%s"
-                    % render_listing(exc.state))
+                    % render_listing(exc.state, store.ledger_instance(c)))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is

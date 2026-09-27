@@ -1,6 +1,7 @@
 # tests/test_tools_annotate.py
 """Annotation write tools: normalization, bounds, state rules, journal."""
 import pathlib
+import re
 import sqlite3
 import sys
 import tempfile
@@ -759,7 +760,10 @@ class TestWorkflowArguments(Base):
         self.paths = backups.paths_for(pathlib.Path(self.dir.name) / "f.sqlite")
 
     def gen(self):
-        return int(call("list_backups").splitlines()[0].split(":")[1])
+        # By label, as a consumer reads it, not by line position: the
+        # listing opens with the ledger instance id (issue #69).
+        return int(re.search(r"^Restore generation: (\d+)$",
+                             call("list_backups"), re.M).group(1))
 
     def test_a_namespaced_tag_write_without_workflow_is_refused(self):
         for tool in ("tag_transaction", "untag_transaction"):

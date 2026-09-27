@@ -36,7 +36,9 @@ migrated.
 arguments, `workflow` and `expected_generation`, for a caller that is itself a workflow
 rather than the resident: the first write of a new `workflow` string mints a restore
 point before the write lands, and every later write on that string is refused if the
-ledger's restore generation has moved since the pass began. `owner::name` tags — another
+ledger's restore generation has moved since the pass began. A third, `expected_ledger`,
+independent of the other two, refuses the write on any ledger but the one whose instance
+id `list_backups` reported. `owner::name` tags — another
 workflow's own vocabulary — may only be written this way. `architecture/backups-and-restore.md`
 is where the mint, the fence and the restore itself are described.
 

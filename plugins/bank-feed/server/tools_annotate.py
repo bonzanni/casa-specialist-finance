@@ -29,6 +29,12 @@ guards against writing atop a ledger this pass has not re-read since a
 restore; `_namespaced_without_workflow` refuses an `owner::` tag with no
 workflow, since it is not this module's classification vocabulary to write
 unattributed.
+
+The same three writes accept an optional `expected_ledger` (issue #69): the
+ledger instance id `list_backups` reports. A write carrying it is refused,
+whole, when the ledger it would land on has another id — checked first thing
+inside the write transaction, before settlement, so the check and the write
+are one atomic step. It is independent of `workflow`: either, both or neither.
 """
 from __future__ import annotations
 
@@ -37,6 +43,7 @@ import re
 
 import backups
 import rules
+import store
 import tools_read
 from tools_read import register
 
@@ -223,6 +230,25 @@ def _workflow_args(args):
     return wf, eg, None
 
 
+#: A ledger instance id as `store.open_db` mints it: `secrets.token_hex(16)`.
+LEDGER_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def _ledger_arg(args):
+    """-> (expected_ledger|None, refusal|None). Absent is None; anything
+    present must be an id in exactly the minted spelling — a near miss
+    (upper case, padding) is refused, not normalized, so it can never match
+    by accident."""
+    el = args.get("expected_ledger")
+    if el is None:
+        return None, None
+    if not isinstance(el, str) or not LEDGER_RE.fullmatch(el):
+        return None, ("expected_ledger must be the 32-character lowercase hex "
+                      "ledger instance id list_backups reports. "
+                      + backups.unchanged())
+    return el, None
+
+
 def _namespaced_without_workflow(tags, workflow):
     """A tag written `owner::name` is not this module's classification
     vocabulary — it belongs to whichever workflow owns that namespace, and
@@ -261,8 +287,9 @@ def _orphan_quietly(paths, handle, minted):
         pass
 
 
-def _fenced_write(c, workflow, expected, validate, write):
-    """The fixed order: BEGIN IMMEDIATE -> settle -> compare
+def _fenced_write(c, workflow, expected, validate, write, ledger=None):
+    """The fixed order: BEGIN IMMEDIATE -> compare `ledger` (expected_ledger)
+    with this file's instance id -> settle -> compare
     expected_generation with the SETTLED generation -> validate (reads; a
     refusal mints nothing) -> mint if the string is new OR its registered
     copy is gone -> write -> COMMIT -> terminal index record.
@@ -281,6 +308,20 @@ def _fenced_write(c, workflow, expected, validate, write):
     # this process would refuse as busy for ever.
     try:
         try:
+            if ledger is not None:
+                # FIRST, before settlement: on a different ledger nothing
+                # this call would do is wanted, and this refusal takes no
+                # index lock. Its text is `unchanged()`, never "Nothing was
+                # changed" — `open_db`'s cold-start settlement may already
+                # have written the index before this tool ran, and that is
+                # the dispatcher's sentence.
+                live = store.ledger_instance(c)
+                if live != ledger:
+                    c.execute("ROLLBACK")
+                    return ("this is a different ledger (instance %s, the "
+                            "pass expected %s) — re-read it before writing. "
+                            "%s" % (live or "none", ledger,
+                                    backups.unchanged()))
             if workflow is not None:
                 paths = backups.paths_for(tools_read.ledger_path(c))
                 state, handle = backups.settle(c, paths)
@@ -376,17 +417,23 @@ def _fenced_write(c, workflow, expected, validate, write):
           "Idempotent per row. Writes for another workflow (owner::name "
           "tags, or notes a workflow makes) carry `workflow` (e.g. "
           "acct@1.2.0) and `expected_generation` from list_backups; the "
-          "first write of a new workflow string mints its restore point.",
+          "first write of a new workflow string mints its restore point. "
+          "`expected_ledger` (the ledger instance list_backups reports) "
+          "refuses the write on any other ledger.",
           {"type": "object", "properties": {
               "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA,
               "workflow": {"type": "string"},
-              "expected_generation": {"type": "integer", "minimum": 0}},
+              "expected_generation": {"type": "integer", "minimum": 0},
+              "expected_ledger": {"type": "string"}},
            "required": ["row_ids", "tags"]})
 def tag_transaction(args: dict) -> str:
     tags, refusal = _normalize_tags(args.get("tags"))
     if refusal:
         return refusal
     workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
+    ledger, refusal = _ledger_arg(args)
     if refusal:
         return refusal
     refusal = _namespaced_without_workflow(tags, workflow)
@@ -437,7 +484,7 @@ def tag_transaction(args: dict) -> str:
         lines += echo
         return "\n".join(lines)
 
-    return _fenced_write(c, workflow, expected, validate, write)
+    return _fenced_write(c, workflow, expected, validate, write, ledger)
 
 
 @register("untag_transaction",
@@ -449,17 +496,23 @@ def tag_transaction(args: dict) -> str:
           "for another workflow (owner::name tags, or notes a workflow "
           "makes) carry `workflow` (e.g. acct@1.2.0) and "
           "`expected_generation` from list_backups; the first write of a "
-          "new workflow string mints its restore point.",
+          "new workflow string mints its restore point. "
+          "`expected_ledger` (the ledger instance list_backups reports) "
+          "refuses the write on any other ledger.",
           {"type": "object", "properties": {
               "row_ids": _ROW_IDS_SCHEMA, "tags": _TAGS_SCHEMA,
               "workflow": {"type": "string"},
-              "expected_generation": {"type": "integer", "minimum": 0}},
+              "expected_generation": {"type": "integer", "minimum": 0},
+              "expected_ledger": {"type": "string"}},
            "required": ["row_ids", "tags"]})
 def untag_transaction(args: dict) -> str:
     tags, refusal = _normalize_tags(args.get("tags"))
     if refusal:
         return refusal
     workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
+    ledger, refusal = _ledger_arg(args)
     if refusal:
         return refusal
     refusal = _namespaced_without_workflow(tags, workflow)
@@ -495,7 +548,7 @@ def untag_transaction(args: dict) -> str:
         lines += echo
         return "\n".join(lines)
 
-    return _fenced_write(c, workflow, expected, validate, write)
+    return _fenced_write(c, workflow, expected, validate, write, ledger)
 
 
 @register("add_note",
@@ -507,13 +560,16 @@ def untag_transaction(args: dict) -> str:
           "another workflow (owner::name tags, or notes a workflow makes) "
           "carry `workflow` (e.g. acct@1.2.0) and `expected_generation` "
           "from list_backups; the first write of a new workflow string "
-          "mints its restore point.",
+          "mints its restore point. "
+          "`expected_ledger` (the ledger instance list_backups reports) "
+          "refuses the write on any other ledger.",
           {"type": "object", "properties": {
               "row_ids": _ROW_IDS_SCHEMA,
               "note": {"type": "string"},
               "author": {"type": "string", "enum": list(AUTHORS)},
               "workflow": {"type": "string"},
-              "expected_generation": {"type": "integer", "minimum": 0}},
+              "expected_generation": {"type": "integer", "minimum": 0},
+              "expected_ledger": {"type": "string"}},
            "required": ["row_ids", "note", "author"]})
 def add_note(args: dict) -> str:
     author = args.get("author")
@@ -531,6 +587,9 @@ def add_note(args: dict) -> str:
         return ("notes are capped at %d characters (this one is %d). "
                 "%s" % (NOTE_MAX, len(note), backups.unchanged()))
     workflow, expected, refusal = _workflow_args(args)
+    if refusal:
+        return refusal
+    ledger, refusal = _ledger_arg(args)
     if refusal:
         return refusal
     row_ids, refusal = _normalize_row_ids(args.get("row_ids"))
@@ -558,7 +617,7 @@ def add_note(args: dict) -> str:
         lines += echo
         return "\n".join(lines)
 
-    return _fenced_write(c, workflow, expected, validate, write)
+    return _fenced_write(c, workflow, expected, validate, write, ledger)
 
 
 def _one_tag(value):
