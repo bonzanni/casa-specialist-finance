@@ -300,7 +300,9 @@ class RecordError(OpError):
 
 
 def record_path():
-    data = (os.environ.get("CLAUDE_PLUGIN_DATA") or "").strip()
+    # The RAW variable, as the dispatcher's lock and `tools_read.conn()` read
+    # it: a normalised spelling could name another directory.
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
     if not data:
         raise RecordError("CLAUDE_PLUGIN_DATA is not set, so a vault item "
                           "created now could not be recorded for the erasure "
@@ -408,17 +410,26 @@ def _tagged(vault: str, tag: str) -> list:
     tagged `<tag>/<sub>`, and excludes archived items unless asked."""
     out = _op(["item", "list", "--vault", vault, "--tags", tag,
                "--include-archive", "--format", "json"])
+    # ANY SHAPE BUT THE EXPECTED ONE IS A FAILURE, never an empty answer: an
+    # empty listing is what drops a record line, so reading one into silence
+    # (no output, an item without tags) would lose the proof that an item
+    # still standing is ours. And membership is tested on a list of strings
+    # only: `in` on a string is a substring test, which a nested tag passes.
     try:
-        items = json.loads(out or "[]")
-    except ValueError:
+        items = json.loads(out)
+    except (TypeError, ValueError):
         raise OpError("op item list did not answer with JSON") from None
     if not isinstance(items, list):
         raise OpError("op item list did not answer with a list")
     ids = []
     for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            raise OpError("op item list answered an item without an id")
-        if tag in (item.get("tags") or ()):
+        tags = item.get("tags") if isinstance(item, dict) else None
+        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not item["id"] or not isinstance(tags, list)
+                or not all(isinstance(t, str) for t in tags)):
+            raise OpError("op item list answered an item of an unexpected "
+                          "shape")
+        if tag in tags:
             ids.append(item["id"])
     return ids
 

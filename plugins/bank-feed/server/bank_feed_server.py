@@ -40,17 +40,26 @@ BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
         "Try again when it has finished.")
 
 
+LOCK_UNAVAILABLE = ("Refused, nothing was done: the plugin data directory "
+                    "could not be locked (%s).")
+
+
 def _lifecycle_lock(name):
-    """-> `(fd or None, refusal or None)`. No data directory (or none yet)
-    means no lock: the tool's own open reports that, and a directory that
-    does not exist holds nothing to erase."""
-    data = (os.environ.get("CLAUDE_PLUGIN_DATA") or "").strip()
+    """-> `(fd or None, refusal or None)`. The path is the RAW variable,
+    exactly as `tools_read.conn()` and `opvault.record_path()` read it: a
+    normalised spelling could name a different directory, and a lock on
+    that one excludes nothing. An unset variable means no lock (every tool
+    that touches data refuses on it anyway). A directory that does not
+    exist yet is created first, so even the call that creates the ledger
+    runs under the lock; any failure refuses rather than running unlocked."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
     if not data:
         return None, None
     try:
+        os.makedirs(data, mode=0o700, exist_ok=True)
         fd = os.open(data, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError:
-        return None, None
+    except OSError as exc:
+        return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
     exclusive = name in EXCLUSIVE_TOOLS
     op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
     deadline = time.monotonic() + LOCK_WAIT_S
@@ -64,9 +73,9 @@ def _lifecycle_lock(name):
                 return None, BUSY % ("" if exclusive else
                                      ", an erasure of all data")
             time.sleep(0.05)
-        except OSError:
+        except OSError as exc:
             os.close(fd)
-            return None, None
+            return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
 
 
 def _result(id_, payload):

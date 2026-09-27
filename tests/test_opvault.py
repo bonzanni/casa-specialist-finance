@@ -618,6 +618,27 @@ class TestEraseRecorded(Base):
         self.assertEqual([k[0] for k in kept], ["EnableBanking Key"])
         self.assertEqual(len(self.record()), 1)
 
+    def test_an_unexpected_listing_shape_keeps_the_line(self):
+        # Each of these once read as "no item carries the tag", which drops
+        # the line — or, for a string, as a substring match that deletes.
+        a = "bank-feed-" + self.nonces[0]
+        import json
+        for body in ("", "null", json.dumps([{"id": "i1"}]),
+                     json.dumps([{"id": "i1", "tags": None}]),
+                     json.dumps([{"id": "i1", "tags": a + "/sub"}])):
+            with self.subTest(body=body):
+                r = self.runner(Proc(stdout="v"), Proc(stdout=body),
+                                self.listing())
+                gone, kept = opvault.erase_recorded()
+                self.assertEqual(gone, [])
+                self.assertEqual([k[0] for k in kept], ["EnableBanking Key"])
+                self.assertFalse(any(c[0][1:3] == ["item", "delete"]
+                                     for c in r.calls))
+                # The other line's listing was a valid empty one, so only
+                # that line goes.
+                self.assertEqual([x["nonce"] for x in self.record()],
+                                 self.nonces[:1])
+
     def test_op_unusable_keeps_every_line(self):
         import os
         os.environ.pop("OP_SERVICE_ACCOUNT_TOKEN")

@@ -209,6 +209,30 @@ class TestTheLifecycleLock(CleanSlateBase):
         self.assertIn("an erasure of all data", out)
         self.assertEqual(self.exports(), [])
 
+    def test_a_data_directory_not_there_yet_is_created_and_locked(self):
+        # The first call ever creates the ledger: it must hold the lock too,
+        # or an erasure could run beside it.
+        fresh = self.root / "fresh"
+        seen = {}
+        tool = bank_feed_server.TOOLS["consent_status"]
+        original = tool["fn"]
+        tool["fn"] = lambda args: seen.setdefault("fds", opvault.INHERIT_FDS) and "ok"
+        self.addCleanup(tool.__setitem__, "fn", original)
+        dispatch("consent_status", data_dir=fresh)
+        self.assertTrue(fresh.is_dir())
+        self.assertEqual(len(seen["fds"]), 1)
+
+    def test_the_raw_path_is_the_one_locked(self):
+        # A directory whose name ends in a space is a real directory; a lock
+        # on the stripped spelling would lock nothing the ledger uses.
+        spaced = self.root / "data "
+        spaced.mkdir()
+        fd = os.open(str(spaced), os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        self.assertIn("Refused, nothing was done",
+                      dispatch("consent_status", data_dir=spaced))
+
     def test_ordinary_calls_share_it(self):
         self.hold(fcntl.LOCK_SH)
         self.assertNotIn("Refused", dispatch("consent_status"))
