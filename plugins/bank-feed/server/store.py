@@ -942,8 +942,9 @@ def open_db(path=None) -> sqlite3.Connection:
     # creation, or at the first open of a ledger that predates it. Only when
     # ABSENT — a steady-state open must not need the write lock — and never
     # failing the open for the same reason `_settle_best_effort` does not:
-    # every site that reports the id while holding the write lock
-    # (`list_backups`, where a workflow binds; `delete_all_data`) mints it.
+    # every reply that names the id mints it first if absent
+    # (`reported_ledger_instance`: `list_backups`, where a workflow binds,
+    # and `export_history`).
     # No schema bump: that would make every existing backup unrestorable.
     # The attempt waits for no one: swallowing "database is locked" only
     # after the busy timeout would turn "another process is writing" into a
@@ -978,9 +979,10 @@ def ledger_instance(conn: sqlite3.Connection) -> str | None:
 def ensure_ledger_instance(conn: sqlite3.Connection) -> str:
     """The id, minted first if absent. INSERT OR IGNORE: a present id is
     never replaced, so two racing minters agree on whichever landed first.
-    Never taken from a backup (`meta` stays live across a restore), never
-    erased by `delete_all_data` (STRUCTURAL_META_KEYS): it changes only when
-    the file is recreated."""
+    Never taken from a backup (`meta` stays live across a restore) and kept
+    by `purge`; `delete_all_data`, the eraser an uninstall runs, removes it
+    and mints a new one through this function in its erasure transaction.
+    Otherwise it changes only when the file is recreated."""
     conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
                  (LEDGER_INSTANCE_KEY, secrets.token_hex(16)))
     return ledger_instance(conn)

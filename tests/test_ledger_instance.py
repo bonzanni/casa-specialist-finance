@@ -2,7 +2,8 @@
 
 A workflow that keeps its own records about bank-feed rows binds to the id
 `list_backups` reports, and fences its annotation writes with it. The id is
-bound to the database FILE: a restore and `delete_all_data` keep it, a
+bound to the ledger's story: a restore and `purge` keep it,
+`delete_all_data` (the uninstall eraser) replaces it, and a
 recreated file has a new one.
 """
 import pathlib
@@ -294,6 +295,85 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
             store.ensure_ledger_instance(self.raw)
         self.assertEqual(self.stored(), OTHER)
         self.assertEqual(store.ensure_ledger_instance(self.raw), OTHER)
+
+
+class _AtStatement:
+    """The connection the tools use, with one interleaving: just before the
+    first statement matching `when`, `then()` runs on a SECOND, real
+    connection to the same file — another process's erasure landing at the
+    worst moment."""
+
+    def __init__(self, conn, when, then):
+        self._conn, self._when, self._then = conn, when, then
+
+    def execute(self, sql, *a, **k):
+        if self._then is not None and self._when(sql):
+            then, self._then = self._then, None
+            then()
+        return self._conn.execute(sql, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class TestAnErasureInAnotherProcess(ToolBase):
+    NEW = "e" * 32
+
+    def erase_elsewhere(self, insert_row=False):
+        def run():
+            other = sqlite3.connect(str(self.root / "f.sqlite"), isolation_level=None)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("UPDATE meta SET value=? WHERE key=?",
+                              (self.NEW, store.LEDGER_INSTANCE_KEY))
+                if insert_row:
+                    other.execute(
+                        "INSERT INTO transactions(account_id, identity_key, occurrence,"
+                        " booking_date, amount_minor, currency, direction, status,"
+                        " state, match_method) VALUES ('acc1','after',0,'2026-03-01',"
+                        " 5,'EUR','DBIT','BOOK','active','reference')")
+                other.execute("COMMIT")
+            finally:
+                other.close()
+        return run
+
+    def interleave(self, when, then):
+        self.addCleanup(setattr, tools_read, "CONN", tools_read.CONN)
+        tools_read.CONN = _AtStatement(tools_read.CONN, when, then)
+
+    def test_the_fence_reads_the_id_under_its_own_lock(self):
+        # The id read and the write are one atomic step only if the read is
+        # INSIDE the write transaction: a new id committed just before
+        # BEGIN IMMEDIATE must refuse a write fenced with the old one.
+        self.interleave(lambda sql: sql.strip().startswith("BEGIN IMMEDIATE"),
+                        self.erase_elsewhere())
+        out = call("add_note", row_ids=[self.rid], note="a", author="agent",
+                   expected_ledger=self.id)
+        self.assertIn("this is a different ledger (instance %s" % self.NEW, out)
+        self.assertEqual(self.count("transaction_notes"), 0)
+
+    def export_under(self, when):
+        self.interleave(when, self.erase_elsewhere(insert_row=True))
+        out = call("export_history", format="jsonl")
+        path = pathlib.Path(out.strip().splitlines()[-1].split(": ", 1)[1])
+        keys = [__import__("json").loads(l)["identity_key"]
+                for l in path.read_text("utf-8").splitlines()]
+        labelled = re.search(r"^Ledger instance: (\S+)$", out, re.M).group(1)
+        self.assertIn((labelled, keys), [(self.id, ["t1"]),
+                                         (self.NEW, ["after", "t1"]),
+                                         (self.NEW, ["t1", "after"])])
+        self.assertFalse(self.raw.in_transaction)
+
+    def test_an_export_labels_exactly_the_rows_it_wrote(self):
+        # Rows and id are one snapshot: an erasure (new id, new row)
+        # committed while the export runs must never produce post-erasure
+        # rows under the pre-erasure id — at the rows query...
+        self.export_under(lambda sql: "FROM transactions ORDER BY" in sql)
+
+    def test_an_erasure_just_before_the_snapshot_is_labelled_too(self):
+        # ...or just before the snapshot opens, which catches an id read
+        # outside it.
+        self.export_under(lambda sql: sql.strip() == "BEGIN")
 
 
 class TestReporting(ToolBase):
