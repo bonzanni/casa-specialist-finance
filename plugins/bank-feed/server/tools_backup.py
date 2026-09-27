@@ -22,8 +22,11 @@ STALE_LINE = "Refresh reports produced while this restore ran may be stale; run 
 
 
 def render_listing(state: backups.LedgerState, ledger) -> str:
-    # The ledger instance id comes first (issue #69): the generation and the
-    # registrations below are matched by any fresh ledger, the id is not.
+    # The ledger instance id (issue #69): the generation and the
+    # registrations below are matched by any fresh ledger, the id is not. A
+    # caller finds it by its label, as it finds "Restore generation:" — never
+    # by position: the dispatcher prepends settlement sentences and the
+    # sandbox banner to whatever this returns.
     lines = ["Ledger instance: %s" % (ledger or "none"),
              "Restore generation: %d" % state.generation]
     rows = sorted(state.backups.items(), key=lambda kv: kv[1]["seq"], reverse=True)
@@ -168,13 +171,10 @@ def list_backups(args: dict) -> str:
             # restore, and no restore can start one while that record stands.
             # What is left, what that blocks and how to finish it is the
             # dispatcher's lock-release sentence (state is said once, #48).
-            # The id line stays FIRST on this exit too: it is the line a
-            # workflow binds from, on every listing.
-            first, rest = render_listing(exc.state, ledger).split("\n", 1)
-            return ("%s\nA recorded erasure of the backup copies could not be "
+            return ("A recorded erasure of the backup copies could not be "
                     "finished. Every INDEXED copy is listed below — a copy in "
                     "flight never reached the index and has no row.\n%s"
-                    % (first, rest))
+                    % render_listing(exc.state, ledger))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is

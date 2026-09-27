@@ -760,8 +760,7 @@ class TestWorkflowArguments(Base):
         self.paths = backups.paths_for(pathlib.Path(self.dir.name) / "f.sqlite")
 
     def gen(self):
-        # By label, as a consumer reads it, not by line position: the
-        # listing opens with the ledger instance id (issue #69).
+        # By label, as a consumer reads it, not by line position.
         return int(re.search(r"^Restore generation: (\d+)$",
                              call("list_backups"), re.M).group(1))
 

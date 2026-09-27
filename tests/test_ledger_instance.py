@@ -6,6 +6,7 @@ bound to the database FILE: a restore and `delete_all_data` keep it, a
 recreated file has a new one.
 """
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -22,16 +23,18 @@ import tools_backup  # noqa: E402,F401  (registers backup/list_backups/restore_b
 import tools_destructive  # noqa: E402,F401  (registers delete_all_data)
 import tools_read  # noqa: E402
 import tools_refresh  # noqa: E402,F401  (registers export_history)
-from _toolbase import Base, call  # noqa: E402
+from _toolbase import Base, call, dispatch  # noqa: E402
 
 HEX32 = r"[0-9a-f]{32}"
 OTHER = "f" * 32
 
 
 def listed_id(listing: str) -> str:
-    first = listing.splitlines()[0]
-    assert first.startswith("Ledger instance: "), first
-    return first.split(": ", 1)[1]
+    """By label, as a consumer reads it — never by position: the dispatcher
+    prepends settlement sentences and the sandbox banner. Exactly one line."""
+    found = re.findall(r"^Ledger instance: (\S+)$", listing, re.M)
+    assert len(found) == 1, listing
+    return found[0]
 
 
 class TestTheId(unittest.TestCase):
@@ -222,8 +225,9 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
         out = call("list_backups")
         self.assertIn("A recorded erasure of the backup copies could not be finished", out)
         self.assertRegex(self.stored(), "^%s$" % HEX32)
-        # First line on this exit too: it is where a workflow binds.
         self.assertEqual(listed_id(out), self.stored())
+        # ...and through the dispatcher, which prepends what settlement did.
+        self.assertEqual(listed_id(dispatch("list_backups")), self.stored())
         self.assertFalse(self.raw.in_transaction)
 
     def test_export_history_mints_it_before_naming_it(self):
@@ -273,8 +277,31 @@ class TestEverySiteThatNamesTheIdHasOne(ToolBase):
 
 
 class TestReporting(ToolBase):
-    def test_list_backups_names_the_instance_first(self):
+    def test_list_backups_names_the_instance(self):
         self.assertEqual(listed_id(call("list_backups")), self.id)
+
+    def test_the_dispatched_listing_names_it_under_a_settlement_sentence(self):
+        # A pending erase record settles at the next listing, and the
+        # dispatcher prepends what that settlement did: the id line is found
+        # by its label under it.
+        call("backup", reason="manual")
+        with open(self.paths.index, "a") as f:
+            f.write("%s erase abcdefabcdefabcd pending\n" % backups.now_ts())
+        out = dispatch("list_backups")
+        self.assertFalse(out.startswith("Ledger instance"), out)   # something was prepended
+        self.assertEqual(listed_id(out), self.id)
+
+    def test_the_sandbox_listing_names_it_under_the_banner(self):
+        import os
+        import bank_feed_server
+        import ebmode
+        self.addCleanup(os.environ.pop, ebmode.ENV_MODE_VAR, None)
+        self.addCleanup(ebmode._reset)
+        os.environ[ebmode.ENV_MODE_VAR] = "SANDBOX"
+        ebmode._reset()
+        out = dispatch("list_backups")
+        self.assertTrue(out.startswith(bank_feed_server.SANDBOX_BANNER), out)
+        self.assertEqual(listed_id(out), self.id)
 
     def test_export_history_names_the_instance_and_keeps_the_path_last(self):
         out = call("export_history", format="csv")
@@ -334,6 +361,20 @@ class TestTheFence(ToolBase):
         self.assertEqual(self.notes(), 0)
         self.assertEqual(self.count("transaction_tags"), 1)
         self.assertFalse(self.raw.in_transaction)
+
+    def test_a_different_ledger_refuses_workflow_bearing_writes_too(self):
+        self.raw.execute("INSERT INTO transaction_tags(row_id, tag, added_at)"
+                         " VALUES (?, 'acct::held', 't')", (self.rid,))
+        for name, extra in (("add_note", {"note": "a", "author": "agent"}),
+                            ("tag_transaction", {"tags": ["acct::new"]}),
+                            ("untag_transaction", {"tags": ["acct::held"]})):
+            out = call(name, row_ids=[self.rid], workflow="acct@1.0.0",
+                       expected_generation=0, expected_ledger=OTHER, **extra)
+            self.assertIn("this is a different ledger", out, name)
+        self.assertEqual(self.notes(), 0)
+        self.assertEqual([r[0] for r in self.raw.execute(
+            "SELECT tag FROM transaction_tags")], ["acct::held"])
+        self.assertEqual(self.count("workflow_registrations"), 0)
 
     def test_a_different_ledger_with_a_workflow_mints_nothing_and_registers_nothing(self):
         out = call("add_note", row_ids=[self.rid], note="a", author="agent",

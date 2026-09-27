@@ -99,7 +99,7 @@ own `workflow` string and the `expected_generation` `list_backups` last showed, 
 `tag_transaction`, `untag_transaction` and `add_note`. The first write of a new
 `workflow` string mints that workflow's own restore point before the write lands; see
 `architecture/backups-and-restore.md`. Any of the three writes may also carry
-`expected_ledger`, the ledger instance id `list_backups` prints first (and
+`expected_ledger`, the ledger instance id on the `Ledger instance:` line of a `list_backups` listing (and
 `export_history` names), and is then refused on any other ledger.
 
 ## Setup and authorization

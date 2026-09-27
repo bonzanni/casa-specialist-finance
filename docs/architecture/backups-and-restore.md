@@ -161,7 +161,9 @@ workflow binds to an id instead: `meta.ledger_instance`, 32 random hex character
 (`store.LEDGER_INSTANCE_KEY`). `store.open_db()` mints it when it is absent, and does
 nothing when it is present, so a steady-state open never needs the write lock; a busy
 first open skips it. Every reply that names it mints it first if absent: `list_backups`
-prints it on its first line on every exit, `export_history` names it or writes no file,
+prints it on a `Ledger instance:` line in every listing it answers with (a refusal is not
+a listing and names none; read the line by its label, not its position, since the
+dispatcher prepends settlement sentences), `export_history` names it or writes no file,
 and `delete_all_data`, which says it remains, mints it inside its erasure transaction. It belongs to the database file: `meta` is kept live across a restore, and
 `delete_all_data` keeps it as a structural key, so a workflow can tell an emptied ledger
 from a different one. It changes only when the file is recreated, and sandbox and
