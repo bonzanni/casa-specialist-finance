@@ -394,6 +394,23 @@ class TestAnErasureInAnotherProcess(ToolBase):
         self.assertEqual(listed_id(out), self.id)      # ...and ITS id
         self.assertEqual(store.ledger_instance(self.raw), self.NEW)
 
+    def test_a_listing_labels_the_settled_state_with_the_id_inside_its_snapshot(self):
+        # An erasure elsewhere just before the listing's BEGIN IMMEDIATE:
+        # the listing's state is post-erasure, so its id must be too.
+        self.interleave(lambda sql: sql.strip() == "BEGIN IMMEDIATE",
+                        self.erase_elsewhere())
+        self.assertEqual(listed_id(call("list_backups")), self.NEW)
+
+    def test_a_listing_mints_inside_its_transaction_when_the_first_mint_cannot(self):
+        # The mint before the snapshot fails (the ledger is busy); the
+        # listing's own write transaction mints, and its COMMIT keeps it.
+        from unittest import mock
+        self.raw.execute("DELETE FROM meta WHERE key=?", (store.LEDGER_INSTANCE_KEY,))
+        with mock.patch.object(store, "reported_ledger_instance", return_value=None):
+            out = call("list_backups")
+        self.assertRegex(listed_id(out), "^%s$" % HEX32)
+        self.assertEqual(store.ledger_instance(self.raw), listed_id(out))
+
     def test_an_export_whose_id_vanished_before_the_snapshot_writes_no_file(self):
         def drop_id():
             other = sqlite3.connect(str(self.root / "f.sqlite"), isolation_level=None)
