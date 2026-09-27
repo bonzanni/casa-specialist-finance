@@ -3149,9 +3149,9 @@ class TestSetupCredentialRung(Base):
         "own domains",
         "never one the mailbox flags as unauthenticated",
         "Zero or several candidates, or any doubt, means the manual copy",
-        "Fetch at most one mail body, pass its sign-in URL exactly as "
-        "signin_link, and make one attempt; any failure ends the "
-        "delegation, with no second read.",
+        "Fetch at most one mail body, store its sign-in URL exactly in the "
+        "drop-off as above, and have this plugin's agent make one attempt; "
+        "any failure ends the delegation, with no second read.",
         "Afterwards, tell the operator which mail was used, by its "
         "received time.",
         "every later send — resend=true, or the automatic send once the "
@@ -3253,6 +3253,90 @@ class TestSetupCredentialRung(Base):
         self._assert_ferry_rules(out, FROZEN_NOW - 300)
         self.assertNotIn(self._utc(FROZEN_NOW), flat)
         self.assertNotIn("through a connector", flat)
+
+    # --- ha-casa-app#1047: the sign-in drop-off -------------------------
+
+    _CODE = "hDSGgqOc8W1oaWJqTEV0X2ZLpwFsSt1kBRTuJ9uNnQAAAGWpQxXQzA"
+    _LINK = ("https://enablebanking.com/__/auth/action?mode=signIn"
+             "&oobCode=" + _CODE + "&apiKey=k&lang=en")
+
+    def test_the_stanza_hands_the_link_over_through_the_drop_off(self):
+        self._no_refresh()
+        flat = " ".join(call("setup_bank_feed").split())
+        self.assertIn("never in a message or a delegation brief", flat)
+        self.assertIn("vault_drop_off(plugin='bank-feed', "
+                      "drop_off='signin_link', value=<the copied URL>)", flat)
+        self.assertIn("bank_feed_signin with no signin_link", flat)
+        self.assertNotIn("pass its sign-in URL exactly as signin_link", flat)
+
+    def test_a_current_drop_off_is_redeemed_once_with_no_argument(self):
+        self._no_refresh()
+        call("setup_bank_feed")                            # sends the email
+        self.vault.drop_off_takes.clear()   # setup looked: none waiting
+        self.vault.drop_off = (self._LINK, FROZEN_NOW + 120)
+        out = call("bank_feed_signin")
+        self.assertEqual(self.vault.drop_off_takes, ["signin_link"])
+        self.assertEqual(self.fb.exchanged, [("op@example.com", self._CODE)])
+        self.assertIn("4.", out)                           # ladder continues
+        self.assertNotIn(self._LINK, out)
+        self.assertNotIn(self._CODE, out)
+
+    def test_a_drop_off_stored_before_the_pending_email_is_refused(self):
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.vault.drop_off = (self._LINK, FROZEN_NOW - 1)
+        out = call("bank_feed_signin")
+        self.assertEqual(self.fb.exchanged, [])
+        self.assertIsNone(self.vault.drop_off)             # taken = deleted
+        self.assertIn("stored before the current sign-in email", out)
+        self.assertNotIn(self._CODE, out)
+
+    def test_a_drop_off_with_no_pending_email_is_refused(self):
+        self._no_refresh()
+        tools_auth._meta_set(self.raw, "setup.oob_email", "op@example.com")
+        self.vault.drop_off = (self._LINK, FROZEN_NOW)
+        out = call("bank_feed_signin")
+        self.assertEqual(self.fb.exchanged, [])
+        self.assertIn("no sign-in email is pending", out)
+
+    def test_a_failed_redemption_does_not_leave_the_link_behind(self):
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.vault.drop_off = (self._LINK, FROZEN_NOW + 5)
+        self.fb._exchange_error = self.fb.AuthError("INVALID_OOB_CODE")
+        call("bank_feed_signin")
+        self.assertIsNone(self.vault.drop_off)
+        call("bank_feed_signin")                           # nothing to retry
+        self.assertEqual(len(self.fb.exchanged), 1)
+
+    def test_an_explicit_link_leaves_the_drop_off_alone(self):
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.vault.drop_off_takes.clear()   # setup looked: none waiting
+        self.vault.drop_off = (self._LINK, FROZEN_NOW + 5)
+        call("bank_feed_signin", signin_link=self._LINK)
+        self.assertEqual(self.vault.drop_off_takes, [])
+        self.assertEqual(self.fb.exchanged, [("op@example.com", self._CODE)])
+
+    def test_resend_sends_a_fresh_email_and_leaves_the_drop_off_alone(self):
+        # Independent of any redemption: with no durable credential stored,
+        # resend=true must reach the send branch, not redeem the waiting link.
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.vault.drop_off_takes.clear()   # setup looked: none waiting
+        self.vault.drop_off = (self._LINK, FROZEN_NOW + 5)
+        call("bank_feed_signin", resend=True)
+        self.assertEqual(len(self.fb.sent), 2)
+        self.assertEqual(self.vault.drop_off_takes, [])
+        self.assertEqual(self.fb.exchanged, [])
+
+    def test_an_unreadable_drop_off_stops_without_redeeming(self):
+        self._no_refresh()
+        call("setup_bank_feed")
+        self.vault.drop_off = self.vault.OpError("More than one item matches")
+        out = call("bank_feed_signin")
+        self.assertEqual(self.fb.exchanged, [])
+        self.assertIn("drop-off could not be read or cleared", out)
 
     def test_no_email_anywhere_asks_for_it_and_sends_nothing(self):
         self._no_refresh()

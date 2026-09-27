@@ -690,3 +690,69 @@ class TestEraseRecorded(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTakeDropOff(Base):
+    """ha-casa-app#1047: the sign-in drop-off Casa writes. The item is read
+    from CASA'S default vault (never the plugin's override), must carry
+    Casa's tag, and is deleted BEFORE the value is handed out."""
+
+    LINK = "https://enablebanking.com/__/auth/action?oobCode=abc&x=1"
+
+    def _doc(self, tags=("casa-drop-off",)):
+        import json
+        d = {"id": "itm1", "created_at": "2026-09-27T08:43:58.606011943+02:00",
+             "fields": [{"id": "password", "value": self.LINK},
+                        {"id": "notesPlain"}]}
+        if tags is not None:
+            d["tags"] = list(tags)
+        return json.dumps(d)
+
+    def setUp(self):
+        import os
+        self.isolate_vault_env()
+        os.environ["ONEPASSWORD_DEFAULT_VAULT"] = "CasaVault"
+        os.environ["BANKFEED_OP_VAULT"] = "OverrideVault"
+
+    def test_a_waiting_link_is_deleted_then_returned(self):
+        r = self.runner(Proc(stdout=self._doc()), Proc())
+        value, created = opvault.take_drop_off("signin_link")
+        self.assertEqual(value, self.LINK)
+        self.assertAlmostEqual(created, 1790491438.606011, places=5)
+        get, delete = (c[0] for c in r.calls)
+        self.assertEqual(get, ["op", "item", "get",
+                               "Casa drop-off bank-feed signin_link",
+                               "--vault", "CasaVault", "--format", "json"])
+        self.assertEqual(delete, ["op", "item", "delete", "itm1",
+                                  "--vault", "CasaVault"])
+
+    def test_nothing_waiting_is_none(self):
+        self.runner(Proc(1, stderr='"Casa drop-off bank-feed signin_link" '
+                                   "isn't an item in the \"CasaVault\" vault"))
+        self.assertIsNone(opvault.take_drop_off("signin_link"))
+
+    def test_no_default_vault_is_none_and_calls_nothing(self):
+        import os
+        os.environ.pop("ONEPASSWORD_DEFAULT_VAULT")
+        r = self.runner()
+        self.assertIsNone(opvault.take_drop_off("signin_link"))
+        self.assertEqual(r.calls, [])
+
+    def test_an_untagged_item_is_refused_and_left_alone(self):
+        r = self.runner(Proc(stdout=self._doc(tags=None)))
+        with self.assertRaises(opvault.OpError) as ei:
+            opvault.take_drop_off("signin_link")
+        self.assertEqual(len(r.calls), 1)                  # no delete
+        self.assertNotIn(self.LINK, str(ei.exception))
+
+    def test_a_failed_delete_withholds_the_value(self):
+        self.runner(Proc(stdout=self._doc()),
+                    Proc(1, stderr="op said " + self.LINK))
+        with self.assertRaises(opvault.OpError) as ei:
+            opvault.take_drop_off("signin_link")
+        self.assertNotIn(self.LINK, str(ei.exception))
+
+    def test_a_malformed_item_is_an_error(self):
+        self.runner(Proc(stdout="{not json"))
+        with self.assertRaises(opvault.OpError):
+            opvault.take_drop_off("signin_link")

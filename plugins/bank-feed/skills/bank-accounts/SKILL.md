@@ -311,16 +311,30 @@ the tool for it — the only place these arguments exist. Use it only when
 `setup_bank_feed` asks:
 
 - it asks for the account email → `bank_feed_signin` with `email`;
-- it asks for the sign-in link → `bank_feed_signin` with `signin_link`;
+- it asks for the sign-in link → see below: usually `bank_feed_signin` with
+  NO `signin_link`, once you are told the link is waiting in the drop-off;
 - the link expired or was consumed → `bank_feed_signin` with `resend: true`.
 
 Never invent any of the three. When it asks for the link, the operator
 COPIES the full "Sign in to Enable Banking" URL out of their own mail client
-and pastes it back — never clicks it (a browser visit consumes the
-single-use code). That manual copy is the default; the delegated ferry
-below is the one alternative. Pass exactly the pasted text as
-`signin_link`; that call runs the rest of setup itself, so there is
-nothing to re-run afterwards.
+— never clicks it (a browser visit consumes the single-use code). That
+manual copy is the default; the delegated ferry below is the one
+alternative. The link never travels in a message or a delegation brief
+(Casa's safety kernel forbids it). It reaches you one of two ways:
+
+- **Through the drop-off (the usual route).** The operator pastes it to the
+  assistant, or the assistant reads it under the ferry below, and stores it
+  with Casa's `vault_drop_off(plugin='bank-feed', drop_off='signin_link',
+  value=…)`. You are then told only that the link is waiting: run
+  `bank_feed_signin` with NO `signin_link`. It takes the link from the
+  drop-off, deletes it there before using it, and refuses one stored before
+  the pending email was sent.
+- **Directly.** In the operator's own conversation with you (a topic of an
+  interactive engagement), they paste it to you: pass exactly the pasted
+  text as `signin_link`.
+
+Either call runs the rest of setup itself, so there is nothing to re-run
+afterwards.
 
 Relay the setup message's sign-in paragraph WHOLE — including its
 "Delegated read" rules — to whoever you report to. You never hold a
@@ -370,8 +384,10 @@ exactly the manual flow above.
   anything is in doubt: fall back to the manual copy/paste instructions
   and do not search again.
 - **One body fetch, one attempt.** Retrieve at most one mail body per
-  delegation. Extract the full sign-in URL and pass it EXACTLY as
-  `signin_link` — copied, never clicked, never trimmed. Some mail relays
+  delegation. Extract the full sign-in URL and store it EXACTLY in the
+  drop-off with `vault_drop_off` — copied, never clicked, never trimmed —
+  then have the plugin's agent run `bank_feed_signin` once, with no
+  `signin_link`. Some mail relays
   have been observed rewriting characters inside the code; others deliver
   it byte-identical. `bank_feed_signin` refuses a visibly mangled code. A
   mangled code, a redemption failure of any kind, or no match consumes the

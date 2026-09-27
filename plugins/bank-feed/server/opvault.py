@@ -28,6 +28,7 @@ renamed 2026-08-05 (was `EnableBanking Production` / `Enable Banking`).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import fcntl
 import json
 import os
@@ -262,6 +263,67 @@ def upsert_field(item: str, vault: str, field: str, value: str,
         _op(["item", "create", "--category", "API Credential",
              "--title", item, "--vault", vault, "--tags", tag,
              f"{field}[{kind}]={value}"], redact=(value,))
+
+
+# ha-casa-app#1047: the sign-in DROP-OFF. The agent holding a sign-in link —
+# read from the operator's mailbox at their request, or pasted by them — puts
+# it in a vault item Casa writes for this plugin's declared drop-off
+# (`casa.dropOffs` in plugin.json) instead of a delegation brief. Casa owns the
+# address: the item is titled `Casa drop-off <plugin> <name>` in CASA'S default
+# vault (never the BANKFEED_OP_VAULT override — Casa does not read it), carries
+# the tag `casa-drop-off`, and holds the value in its `password` field.
+DROP_OFF_PLUGIN = "bank-feed"               # this plugin's manifest name
+DROP_OFF_TAG = "casa-drop-off"
+
+
+def drop_off_title(name: str) -> str:
+    return f"Casa drop-off {DROP_OFF_PLUGIN} {name}"
+
+
+def _epoch(stamp: str) -> float:
+    """op's RFC 3339 time (nanoseconds, an offset or Z) as epoch seconds;
+    fromisoformat on 3.11 takes at most six fractional digits."""
+    stamp = re.sub(r"(\.\d{6})\d+", r"\1", stamp.strip()).replace("Z", "+00:00")
+    return _dt.datetime.fromisoformat(stamp).timestamp()
+
+
+def take_drop_off(name: str):
+    """The value waiting in drop-off *name* and when Casa stored it, as
+    ``(value, created_epoch)``, or None when nothing is waiting.
+
+    The item is DELETED before this returns the value: a sign-in code is
+    single-use, so a value is handed out at most once whatever happens to
+    the attempt, and a crash after the read cannot leave it behind for a
+    second redemption. A delete that fails raises instead of returning the
+    value. An item with the title that Casa did not create (no tag) raises
+    and is left alone. No raised message carries the value."""
+    vault = os.environ.get(ENV_DEFAULT_VAULT_VAR) or ""
+    if not vault:
+        return None
+    try:
+        out = _op(["item", "get", drop_off_title(name), "--vault", vault,
+                   "--format", "json"])
+    except OpError as exc:
+        if exc.not_found:
+            return None
+        raise
+    try:
+        doc = json.loads(out)
+        value = next(f.get("value") for f in doc.get("fields") or []
+                     if f.get("id") == "password")
+        created = _epoch(doc["created_at"])
+        item_id = doc["id"]
+    except (ValueError, KeyError, TypeError, StopIteration):
+        raise OpError("the sign-in drop-off item is not in the shape Casa "
+                      "writes") from None
+    if DROP_OFF_TAG not in (doc.get("tags") or []):
+        raise OpError("an item titled like the sign-in drop-off exists but "
+                      "Casa did not create it — left untouched; remove or "
+                      "rename it in 1Password")
+    _op(["item", "delete", item_id, "--vault", vault], redact=(value or "",))
+    if not isinstance(value, str) or not value:
+        return None
+    return value, created
 
 
 def create_ssh_key(title: str, vault: str) -> None:
