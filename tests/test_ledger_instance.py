@@ -147,6 +147,23 @@ class TestABusyFirstOpen(ToolBase):
         self.addCleanup(conn.close)
         self.assertEqual(store.ledger_instance(conn), self.id)
 
+    def test_a_busy_first_open_does_not_wait_for_the_writer(self):
+        # Swallowing "database is locked" after the full busy timeout turned
+        # "another process is writing" into a ten-second open. No backup
+        # index exists here, so settlement is skipped and cannot wait either.
+        import time
+        self.raw.execute("DELETE FROM meta WHERE key=?", (store.LEDGER_INSTANCE_KEY,))
+        self.hold_the_ledger()
+        store._SETTLE_BUSY_MS = 10000
+        t0 = time.monotonic()
+        conn = store.open_db(self.root / "f.sqlite")
+        elapsed = time.monotonic() - t0
+        self.addCleanup(conn.close)
+        self.assertLess(elapsed, 3.0)
+        self.assertIsNone(store.ledger_instance(conn))
+        # The connection keeps its ordinary busy timeout for everything else.
+        self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 10000)
+
     def test_a_steady_state_open_succeeds_under_the_lock_and_keeps_the_id(self):
         self.hold_the_ledger()
         conn = store.open_db(self.root / "f.sqlite")
@@ -168,6 +185,63 @@ class TestABusyFirstOpen(ToolBase):
         self.assertRegex(minted, "^%s$" % HEX32)
         self.assertEqual(store.ledger_instance(conn), minted)
         self.assertEqual(listed_id(call("list_backups")), minted)
+
+
+class TestEverySiteThatNamesTheIdHasOne(ToolBase):
+    """A busy first open can leave a pre-#69 ledger without an id. Every site
+    that reports the id while it can write mints it first, so no reply
+    names an id that is not there."""
+
+    def setUp(self):
+        super().setUp()
+        self.raw.execute("DELETE FROM meta WHERE key=?", (store.LEDGER_INSTANCE_KEY,))
+
+    def stored(self):
+        return store.ledger_instance(self.raw)
+
+    def test_delete_all_data_mints_the_id_it_says_remains(self):
+        out = call("delete_all_data")
+        self.assertIn("the ledger instance id remain", out)
+        self.assertRegex(self.stored(), "^%s$" % HEX32)
+        self.assertEqual(listed_id(call("list_backups")), self.stored())
+
+    def test_the_incomplete_erasure_listing_mints_it_too(self):
+        call("backup", reason="manual")
+        doomed = sorted(p.name for p in self.paths.backups_dir.glob("*.sqlite"))[0]
+        with open(self.paths.index, "a") as f:
+            f.write("%s erase abcdefabcdefabcd pending\n" % backups.now_ts())
+        real_unlink = pathlib.Path.unlink
+        self.addCleanup(setattr, pathlib.Path, "unlink", real_unlink)
+
+        def selective(p, *a, **k):
+            if p.name == doomed:
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(p, *a, **k)
+        pathlib.Path.unlink = selective
+        self.raw.execute("DELETE FROM meta WHERE key=?", (store.LEDGER_INSTANCE_KEY,))
+        out = call("list_backups")
+        self.assertIn("A recorded erasure of the backup copies could not be finished", out)
+        self.assertRegex(self.stored(), "^%s$" % HEX32)
+        self.assertIn("Ledger instance: %s" % self.stored(), out)
+        self.assertFalse(self.raw.in_transaction)
+
+    def test_ensure_never_replaces_an_id_another_process_minted(self):
+        # The race: this process read "absent", another minted, this one
+        # writes. INSERT OR IGNORE keeps the first; a check-then-replace would
+        # give one file two ids. Simulated by a stale first read.
+        from unittest import mock
+        self.raw.execute("INSERT INTO meta(key, value) VALUES (?, ?)",
+                         (store.LEDGER_INSTANCE_KEY, OTHER))
+        real = store.ledger_instance
+        reads = []
+
+        def stale_first(conn):
+            reads.append(1)
+            return None if len(reads) == 1 else real(conn)
+        with mock.patch.object(store, "ledger_instance", side_effect=stale_first):
+            store.ensure_ledger_instance(self.raw)
+        self.assertEqual(self.stored(), OTHER)
+        self.assertEqual(store.ensure_ledger_instance(self.raw), OTHER)
 
 
 class TestReporting(ToolBase):

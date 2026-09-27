@@ -942,13 +942,20 @@ def open_db(path=None) -> sqlite3.Connection:
     # creation, or at the first open of a ledger that predates it. Only when
     # ABSENT — a steady-state open must not need the write lock — and never
     # failing the open for the same reason `_settle_best_effort` does not:
-    # `list_backups`, where a workflow binds, mints it under its own lock.
+    # every site that reports the id while holding the write lock
+    # (`list_backups`, where a workflow binds; `delete_all_data`) mints it.
     # No schema bump: that would make every existing backup unrestorable.
+    # The attempt waits for no one: swallowing "database is locked" only
+    # after the busy timeout would turn "another process is writing" into a
+    # ten-second open.
     if ledger_instance(conn) is None:
+        conn.execute("PRAGMA busy_timeout=0")
         try:
             ensure_ledger_instance(conn)
         except sqlite3.OperationalError:
             pass
+        finally:
+            conn.execute("PRAGMA busy_timeout=%d" % _SETTLE_BUSY_MS)
 
     _settle_best_effort(conn, db)
 

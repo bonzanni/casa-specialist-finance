@@ -11,6 +11,8 @@ the untrusted fence, for the same reason tags do not.
 """
 from __future__ import annotations
 
+import sqlite3
+
 import backups
 import store
 import tools_auth
@@ -129,7 +131,7 @@ def list_backups(args: dict) -> str:
     try:
         state, handle = backups.settle(c, paths)
         # Minted here if an open found the ledger busy and could not: this
-        # listing is where a workflow binds, so it never reports "none".
+        # listing is where a workflow binds.
         text = render_listing(state, store.ensure_ledger_instance(c))  # under both locks
         c.execute("COMMIT")
     except backups.BackupError as exc:
@@ -140,7 +142,16 @@ def list_backups(args: dict) -> str:
         if c.in_transaction:
             c.execute("ROLLBACK")
         if isinstance(exc, backups.ErasureIncomplete) and exc.state is not None:
-            # THE ONE CALL THAT CHANGES NOTHING STILL ANSWERS. Refusing here
+            # This exit still answers, and it is a listing a workflow binds
+            # from: mint the id if absent, in its own statement now that the
+            # settlement transaction is gone. Only a ledger that cannot be
+            # written at all prints "none" — and "none" matches no fence.
+            try:
+                ledger = store.ensure_ledger_instance(c)
+            except sqlite3.OperationalError:
+                ledger = store.ledger_instance(c)
+            # THE ONE CALL THAT CHANGES NOTHING (but a missing ledger id,
+            # above) STILL ANSWERS. Refusing here
             # hid the residue behind a count: the operator was told copies
             # could not be removed and then denied the only in-tool view of
             # which copies those are. Settlement attached the state it had
@@ -165,7 +176,7 @@ def list_backups(args: dict) -> str:
             return ("A recorded erasure of the backup copies could not be "
                     "finished. Every INDEXED copy is listed below — a copy in "
                     "flight never reached the index and has no row.\n%s"
-                    % render_listing(exc.state, store.ledger_instance(c)))
+                    % render_listing(exc.state, ledger))
         return "%s." % exc
     except Exception:
         # Without this, anything render_listing (or settle) throws that is

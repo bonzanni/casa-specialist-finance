@@ -29,6 +29,7 @@ import re
 import apply
 import backups
 import callbacks
+import store
 import tools_auth
 import tools_read
 from tools_auth import (GATE_NOTE, _conn, _require_declared,
@@ -1273,6 +1274,10 @@ def delete_all_data(args: dict) -> str:
         c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
                   % ", ".join("?" * len(STRUCTURAL_META_KEYS)),
                   tuple(STRUCTURAL_META_KEYS))
+        # The reply below says the ledger instance id remains. A busy first
+        # open can have skipped minting it, so it is minted here, in this
+        # transaction, if absent — the claim is then true by construction.
+        store.ensure_ledger_instance(c)
         # THE ERASURE OF THE COPIES IS RECORDED BEFORE IT HAPPENS, through the
         # same index protocol a mint and a restore already use. Without this
         # record a crash between the COMMIT below and `erase_backups` left an
@@ -1430,8 +1435,8 @@ def delete_all_data(args: dict) -> str:
     # STRUCTURAL_META_KEYS beside `schema_version`, `account_secret` and
     # `ledger_instance`, so a restore that left it behind means one more row
     # remains — a list without it was then false of the row sitting right
-    # there in `meta`. `ledger_instance` is named unconditionally: `open_db`
-    # mints it on every open that finds it absent. The marker only ever exists
+    # there in `meta`. `ledger_instance` is named unconditionally: the
+    # erasure transaction above minted it if an open had not. The marker only ever exists
     # at all when an unsettled restore needed it, so it is named here only
     # when `marker_was_present` — read BEFORE the erasure, for the same
     # reason as `counts` above.
