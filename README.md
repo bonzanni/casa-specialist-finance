@@ -46,7 +46,8 @@ It reconciles the whole install: callback routing, a signing key (forged in your
 vault when absent), the durable control-panel credential, the Enable Banking
 application (registered when absent), and casa's callback redirect URI. When it
 reaches the one step a person has to do — a sign-in link emailed to you — it says
-so and names `bank_feed_signin`, which takes the pasted link.
+so and names `bank_feed_signin`, which takes the link — from the vault drop-off
+casa's assistant stores it in when you paste it there, or pasted to the specialist directly.
 
 Setup stops short of finishing on its own in one place: the references it provisions
 have to be wired into `plugin-env.conf` by casa's configurator, and the server restarted
