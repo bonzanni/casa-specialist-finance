@@ -672,10 +672,10 @@ class TestLedgerIsolation(SandboxBase):
         self.sandbox()
         tools_read.CONN = None
         self.addCleanup(setattr, tools_read, "CONN", None)
-        self.addCleanup(setattr, store, "open_db", store.open_db)
-        def refuse(path=None):
+        self.addCleanup(setattr, store, "_open_locked", store._open_locked)
+        def refuse(db):
             raise store.StoreError("integrity check failed: simulated")
-        store.open_db = refuse
+        store._open_locked = refuse
         with self.assertRaises(store.StoreError):
             tools_read.conn()
         self.assertFalse((self.root / "eb-environment").exists())
@@ -692,13 +692,13 @@ class TestLedgerIsolation(SandboxBase):
         self.addCleanup(setattr, store, "commit_mode_marker",
                         store.commit_mode_marker)
         opened = []
-        real_open = store.open_db
-        self.addCleanup(setattr, store, "open_db", real_open)
-        def recording_open(path=None):
-            c = real_open(path)
+        real_open = store._open_locked
+        self.addCleanup(setattr, store, "_open_locked", real_open)
+        def recording_open(db):
+            c = real_open(db)
             opened.append(c)
             return c
-        store.open_db = recording_open
+        store._open_locked = recording_open
         def refuse(data):
             raise store.StoreError("cannot record the install marker")
         store.commit_mode_marker = refuse
