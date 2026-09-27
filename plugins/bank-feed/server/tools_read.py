@@ -122,19 +122,11 @@ def conn() -> sqlite3.Connection:
             raise RuntimeError(
                 "CLAUDE_PLUGIN_DATA is not set; refusing to place the ledger in "
                 "a default directory")
-        # The filename is spelled ONCE, in store — in production this
-        # composes byte-for-byte the path a literal would. The marker commits
-        # HERE, after the open succeeds, and nowhere else: a failed open pins
-        # nothing, and explicit-path opens in tests never mark. A
-        # commit failure closes the connection — fail closed, never an
-        # opened ledger in an unclaimed directory.
-        opened = store.open_db(os.path.join(data, store.db_filename()))
-        try:
-            store.commit_mode_marker(data)
-        except BaseException:
-            opened.close()
-            raise
-        CONN = opened
+        # The filename is spelled ONCE, in store. The marker commits in
+        # `store.open_ledger`, after the open succeeds and under the same
+        # open lock as the mode check before it, and nowhere else: a failed
+        # open pins nothing, and explicit-path opens in tests never mark.
+        CONN = store.open_ledger(data)
     return CONN
 
 

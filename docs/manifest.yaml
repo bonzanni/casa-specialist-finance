@@ -85,11 +85,13 @@
     - plugins/bank-feed/server/provenance.py::capability
     - plugins/bank-feed/server/money.py
     - plugins/bank-feed/server/store.py::open_db
+    - plugins/bank-feed/server/store.py::open_ledger
   tests:
     - tests/test_ingest.py
     - tests/test_apply.py
     - tests/test_provenance.py
     - tests/test_store.py
+    - tests/test_open_lock.py
     - tests/test_money.py
   related: [architecture/bank-linking.md, architecture/annotations-and-rules.md]
 

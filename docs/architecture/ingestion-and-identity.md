@@ -231,6 +231,16 @@ paths — those checks are part of opening the database rather than something ap
 afterwards. They detect an existing symlink; they are not symlink-race safe, and the
 code says so where it matters.
 
+Every open runs under the data directory's open lock, an exclusive flock on
+`ledger-open.lock` that both modes share (issues #74, #76). Whether the file is new,
+which schema version it carries and whether it needs migrating are read and acted on
+inside it, so two processes opening at once cannot both create the schema, or migrate
+a file one of them misread. `store.open_ledger()`, the open behind the tools, also
+checks the install marker and the other mode's ledger file and commits the marker
+under the same lock, so two first opens in different modes cannot each create a
+ledger. The wait is bounded; a timeout, or a lock SQLite reports while switching to WAL
+or running the integrity check, is refused as busy, never as corruption.
+
 | Table | Holds |
 |---|---|
 | `meta` | schema version, restore fingerprint, install marker |
@@ -266,12 +276,14 @@ the remedy is the operator's.
 - `plugins/bank-feed/server/provenance.py::capability`
 - `plugins/bank-feed/server/money.py`
 - `plugins/bank-feed/server/store.py::open_db`
+- `plugins/bank-feed/server/store.py::open_ledger`
 
 **Tests**
 - `tests/test_ingest.py`
 - `tests/test_apply.py`
 - `tests/test_provenance.py`
 - `tests/test_store.py`
+- `tests/test_open_lock.py`
 - `tests/test_money.py`
 
 **Related**

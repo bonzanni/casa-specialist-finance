@@ -10,7 +10,9 @@ paths. They are not symlink-race safe -- see _create_nofollow.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
+import fcntl
 import hashlib
 import hmac
 import os
@@ -35,6 +37,17 @@ _SETTLE_BUSY_MS = 10000
 _PROD_DB_FILENAME = "bank_feed.sqlite"
 _SANDBOX_DB_FILENAME = "bank_feed.sandbox.sqlite"
 _MARKER_FILENAME = "eb-environment"
+#: THE OPEN LOCK (issues #74, #76): one file per data directory, shared by
+#: both modes, so every open of either mode's ledger is one critical section.
+#: Never unlinked: a waiter holding the old inode and a creator of a new one
+#: would both hold "the" lock. Content-free, so the erasure leaves it like the
+#: marker; its name matches neither mode's ledger prefix nor the snapshot
+#: prefix the residue sweep removes.
+_OPEN_LOCK_FILENAME = "ledger-open.lock"
+#: Seconds an open waits for another process's open before refusing as busy;
+#: read at call time so tests can lower it.
+OPEN_LOCK_WAIT_S = 30.0
+_OPEN_LOCK_POLL_S = 0.05
 _SIDECARS = ("-wal", "-shm")
 
 
@@ -571,9 +584,11 @@ def _resolve(path) -> Path:
 # running a parallel world. It is an early, legible refusal — NOT the isolation
 # boundary; `db_filename()` and the mode-derived vault/application names are.
 # `check_mode_marker` runs at tool dispatch (bank_feed_server.handle), before
-# any tool body; `commit_mode_marker` runs at `tools_read.conn()`, immediately
-# AFTER the ledger opened successfully (commit rule: DB first, marker second —
-# a failed open commits nothing). Both read the SAME raw CLAUDE_PLUGIN_DATA
+# any tool body; `open_ledger` (the open behind `tools_read.conn()`) runs the
+# check AGAIN, then the open, then `commit_mode_marker`, all under one open
+# lock (issue #76), the commit immediately AFTER the ledger opened
+# successfully (commit rule: DB first, marker second — a failed open commits
+# nothing). Both read the SAME raw CLAUDE_PLUGIN_DATA
 # value conn() uses — conn()'s exact truthiness, no stripping — so a
 # whitespace-only value is guarded like any other dir string, not skipped.
 
@@ -886,17 +901,93 @@ def _settle_best_effort(conn, db: Path) -> None:
                 pass
 
 
+_BUSY_OPEN = ("the ledger is busy: %s. Nothing is wrong with it and nothing "
+              "was done; try again.")
+
+
+@contextlib.contextmanager
+def _open_lock(directory: Path):
+    """Hold the data directory's open lock (`_OPEN_LOCK_FILENAME`).
+
+    Every decision an open makes — whether the file is new, which schema
+    version it carries, whether the other mode already owns the directory —
+    is read and acted on inside it, so no second opener can act on the same
+    reading (issues #74, #76). Non-blocking with a bounded wait: flock is not
+    re-entrant in-process, and a nested open must refuse, never hang."""
+    lock = directory / _OPEN_LOCK_FILENAME
+    try:
+        fd = os.open(str(lock), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise StoreError("refusing %s: it is a symlink"
+                             % _OPEN_LOCK_FILENAME) from None
+        raise StoreError("cannot open %s: %s"
+                         % (_OPEN_LOCK_FILENAME, _oserr(exc))) from None
+    try:
+        deadline = time.monotonic() + OPEN_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StoreError(_BUSY_OPEN % "another process is opening "
+                                     "it") from None
+                time.sleep(_OPEN_LOCK_POLL_S)
+            except OSError as exc:
+                raise StoreError("cannot lock %s: %s"
+                                 % (_OPEN_LOCK_FILENAME, _oserr(exc))) from None
+        yield
+    finally:
+        os.close(fd)                       # releases the flock
+
+
+def _is_busy(exc: sqlite3.Error) -> bool:
+    """A lock SQLite would not wait out, as opposed to a damaged file."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code is not None and (code & 0xFF) in (sqlite3.SQLITE_BUSY,
+                                                  sqlite3.SQLITE_LOCKED)
+
+
 def open_db(path=None) -> sqlite3.Connection:
     """Open the ledger with the at-rest modes, integrity check, and migrations.
 
     `path` omitted means $CLAUDE_PLUGIN_DATA/<db_filename()> — the
     mode's ledger. There is no fallback directory: an unset variable raises.
-    This function never touches the install marker — the commit lives at
-    `tools_read.conn()`, the one
-    runtime chokepoint, so explicit-path test opens stay marker-free.
+    This function never touches the install marker — the commit lives in
+    `open_ledger`, the one runtime entry (`tools_read.conn()`), so
+    explicit-path test opens stay marker-free. The whole open runs under the
+    directory's open lock.
     """
     db = _resolve(path)
     _prepare_dir(db.parent)
+    with _open_lock(db.parent):
+        return _open_locked(db)
+
+
+def open_ledger(data: str) -> sqlite3.Connection:
+    """The runtime open: the mode check, the open and the install marker's
+    commit as ONE critical section under the open lock (issue #76). Checked
+    at dispatch as well, that check alone let two first opens in different
+    modes both pass it and each create its own ledger. `data` is the raw
+    CLAUDE_PLUGIN_DATA value, exactly as the marker functions read it. A
+    commit failure closes the connection just opened — fail closed, never
+    an opened ledger in an unclaimed directory."""
+    db = Path(os.path.join(data, db_filename()))
+    _prepare_dir(db.parent)
+    with _open_lock(db.parent):
+        check_mode_marker(data)
+        conn = _open_locked(db)
+        try:
+            commit_mode_marker(data)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+
+def _open_locked(db: Path) -> sqlite3.Connection:
+    """open_db's body; the caller holds the open lock."""
     _create_nofollow(db)
     for suffix in _SIDECARS:
         _guard_nofollow(db.parent / (db.name + suffix))
@@ -915,6 +1006,11 @@ def open_db(path=None) -> sqlite3.Connection:
         checked = [r[0] for r in conn.execute("PRAGMA integrity_check")]
     except sqlite3.DatabaseError as exc:
         conn.close()
+        # A lock is not damage (issue #74): the corruption wording below names
+        # destructive remedies, and a busy ledger needs none of them.
+        if _is_busy(exc):
+            raise StoreError(_BUSY_OPEN % "another process holds it locked"
+                             ) from None
         raise StoreError("integrity check failed: %s. The ledger is unreadable; "
                          "restore a pre-migration snapshot or re-link the banks "
                          "first." % type(exc).__name__) from None
