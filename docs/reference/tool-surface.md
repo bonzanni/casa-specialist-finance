@@ -132,7 +132,7 @@ a model-supplied boolean is inference satisfying itself.
 | `unlink_bank` | Revokes a bank consent. Refresh stops for that bank until it is re-linked; local history stays. |
 | `purge` | Deletes every transaction booked before a date — or the whole ledger with `before_date=all` — with its notes and tags, trims or drops the proven-coverage intervals to match, then reclaims the space. A dated purge deletes a supersession chain (a pending row and the rows that replaced it) whole or not at all: a chain with any row on or after the date is kept, and the reply counts the rows before the date it kept. `user_work` is required: `keep` keeps rules and account labels, categories and include flags; `erase` deletes all of them and every note and tag, on surviving rows too. A whole-ledger purge also resets balances, occurrence marks and sync state (history marked partial). A `pre-erasure` backup is taken first; `restore_backup` undoes it. |
 | `forget_local_account` | Erases one account's local history and drops the account. Revokes nothing — this does not disconnect the bank. A `pre-erasure` backup is taken first; `restore_backup` brings the history back. |
-| `delete_all_data` | Erases the entire local ledger for every account, **then attempts to withdraw every open bank consent**. Consents it cannot prove withdrawn keep their handles so they can be revoked by hand. It is the plugin's `casa.eraseTool`: run to the end, it answers `{"erasure": "complete" \| "incomplete", "report": …}`, `complete` only when nothing is left and every withdrawal was confirmed (see below). |
+| `delete_all_data` | The clean slate. Erases the entire local ledger for every account, **then attempts to withdraw every open bank consent**. Consents it cannot prove withdrawn keep their handles so they can be revoked by hand. Once none is held, it also removes the published exports, the 1Password items bank-feed recorded creating, the backup index and every leftover file, and resets the ledger to what a first start creates. It is the plugin's `casa.eraseTool`: run to the end, it answers `{"erasure": "complete" \| "incomplete", "report": …}`, `complete` only when nothing is left and every withdrawal was confirmed (see below). |
 | `label_account` | Changes an account's label, category or inclusion. Excluding it removes the account from every total shown. |
 | `accept_app_reregistration` | Authorizes registering a **replacement** Enable Banking application. Every bank must be re-linked afterwards. |
 | `restore_backup` | Replaces every ordinary table's rows in place from a backup: transactions, tags, notes, rules, registrations. Bank links are kept live, never taken from the backup; an account in the backup but not linked live comes back needing a re-link. |
@@ -142,8 +142,11 @@ finance specialist and chooses to erase its data (`casa.eraseTool` in the plugin
 manifest). casa removes the plugin only on `"erasure": "complete"`, because removing it
 destroys the one tool that can finish an erasure, so the call claims `complete` only
 when no consent was kept or left unaccounted for, no session handle stayed behind, the
-backup sweep settled every copy, and the reclaim finished (an unfinished `VACUUM`
-leaves erased rows readable in the free pages and the write-ahead log). Everything
+backup sweep settled every copy, the clean slate removed the exports, the vault items
+bank-feed created and every leftover file, and the reclaim finished (an unfinished
+`VACUUM` leaves erased rows readable in the free pages and the write-ahead log).
+[`architecture/backups-erasure.md`](../architecture/backups-erasure.md#the-clean-slate)
+has the clean slate and the lock that keeps every other call out while it runs. Everything
 else is `incomplete`, and `report` is the account the operator is shown. A refusal
 before the erasure ran returns prose, which casa reads as not complete.
 

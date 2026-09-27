@@ -17,8 +17,9 @@ same settlement is still held: it unlinks every `*.sqlite` and `*.sqlite.partial
 backups directory, appends one `prune <op_id> done` per *indexed* copy — removed here or
 already absent, since inside an authorised erasure an absent indexed copy is an erased
 one — flushes the directory, and closes the operation with `erase <op_id> committed`. The
-**index itself is kept**: append-only, so the record of what existed and what went survives
-the erasure it describes and the generation stays monotonic across it.
+**index itself is kept** by the sweep: append-only, so the record of what existed and what
+went survives the erasure it describes and the generation stays monotonic across it. Only
+the clean slate below removes it, once no bank consent is left for a retry to need.
 
 An `aborted` backup earns no `prune`. It never reached a final file — settlement unlinks its
 `.partial` and settles it `aborted` — so a record of its removal would describe a file that
@@ -201,6 +202,54 @@ names that set and no wider: "every other bank-feed call refuses" was false of m
 surface, and an operator told the plugin was wholly wedged goes looking for a fault that is
 not there.
 
+## The clean slate
+
+`delete_all_data` is the clean slate: the eraser casa runs when the operator uninstalls
+with "erase everything", also runnable on its own. Once the withdrawal pass has left no
+consent held, no handle behind and no copy unsettled, it runs a third phase,
+`tools_destructive._clean_slate`, and answers `complete` only if that phase finished too.
+While a consent is still held, the phase does not run at all: its vault half deletes the
+private key every withdrawal needs, and its ledger half the application id
+(`WITHDRAWAL_META_KEYS`, which the row erasure keeps for that reason). The reply is then
+`incomplete`, and a retry that withdraws the consent finishes the phase.
+
+The phase, in order:
+
+1. **Exports.** Everything `export_history` published under casa's handoff folder
+   (`<CASA_HANDOFF_DIR>/bank-feed/`) is removed, staging included. Another producer's
+   files are never touched.
+2. **Vault items bank-feed created.** `opvault` records each creation in
+   `vault-items.jsonl` in the plugin's data directory, outside the ledger so no restore or
+   purge can drop a line, and writes the line **before** the create. The item carries the
+   line's nonce as a tag, so the erasure deletes only items whose tags contain that exact
+   tag (archived items included), and it drops a line only once a listing shows no item
+   carrying it. An item nothing records, such as one made by hand or by a version older
+   than the record, is never deleted: the reply names the mode's two titles for deletion
+   by hand, and that does not make the answer `incomplete`: nothing can tell such an item
+   from one the operator made, and failing on it would keep an uninstall from ever finishing.
+   A deleted item stays in 1Password's Recently Deleted for 30 days.
+3. **The ledger, reset in place.** `meta` is cleared to `schema_version`, with a fresh
+   local `account_secret` and a fresh ledger instance id, and the AUTOINCREMENT counters
+   in `sqlite_sequence` are cleared. The reclaim then clears the freed pages and the WAL.
+   The file is kept on purpose: when SQLite closes a WAL-mode connection, it deletes
+   `<ledger>-wal` by name, so another process's cached connection to an unlinked ledger
+   would delete the next ledger's WAL when it closed.
+4. **Every other file.** The backups directory, the snapshots, the backup index (its
+   restore marker went with `meta`) and any orphan of the other mode's ledger are
+   removed. The other mode's ledger file itself is never removed: it can hold consents
+   only that mode can withdraw, so its presence makes the answer `incomplete`.
+
+The reply always names what no tool here can erase: the Enable Banking application
+registration and its account whitelist.
+
+**The lifecycle lock keeps every other call out.** An export published after step 1, or a
+vault item created after step 2's listing, would survive a `complete` answer. So
+`bank_feed_server.handle` holds a `flock` on the data directory itself for every tool
+call (shared) and for `delete_all_data` (exclusive, for the whole call), and refuses as
+busy after `LOCK_WAIT_S`. Every `op` child inherits the call's lock descriptor
+(`opvault.INHERIT_FDS`), so a create still running after its parent died still holds the
+lock.
+
 ## Source & test map
 
 <!-- BEGIN SOURCEMAP -->
@@ -210,11 +259,15 @@ not there.
 - `plugins/bank-feed/server/backups.py`
 - `plugins/bank-feed/server/tools_backup.py`
 - `plugins/bank-feed/server/tools_destructive.py`
+- `plugins/bank-feed/server/opvault.py`
+- `plugins/bank-feed/server/bank_feed_server.py`
 
 **Tests**
 - `tests/test_backups.py`
 - `tests/test_tools_backup.py`
 - `tests/test_tools_destructive.py`
+- `tests/test_clean_slate.py`
+- `tests/test_opvault.py`
 
 **Related**
 - [`architecture/backups-and-restore.md`](../architecture/backups-and-restore.md)

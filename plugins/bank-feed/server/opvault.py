@@ -28,8 +28,11 @@ renamed 2026-08-05 (was `EnableBanking Production` / `Enable Banking`).
 """
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import re
+import secrets
 import subprocess
 
 import ebmode
@@ -94,6 +97,13 @@ def __getattr__(name: str) -> str:
 RUN = subprocess.run        # the ONE subprocess seam; tests replace it
 _TIMEOUT_S = 60
 
+#: The descriptors every `op` child inherits: the dispatcher sets the call's
+#: lifecycle-lock descriptor here (`bank_feed_server.handle`). A lock is held
+#: by an open file description, so the child holding it keeps the call's
+#: shared lock alive after its parent dies, and `delete_all_data` cannot list
+#: the vault while an `op item create` it would have to see is still running.
+INHERIT_FDS: tuple = ()
+
 
 # op's own not-found wordings, the ONLY evidence that may authorize a create or
 # start credential acquisition: anything else (timeout, auth, rate limit)
@@ -155,9 +165,10 @@ def _op(args, redact=()):
     """Run op. `redact` lists secret strings that must never survive into
     the exception — op can echo a failing assignment (which carries the
     value) back through stderr, so the scrub is unconditional."""
+    extra = {"pass_fds": INHERIT_FDS} if INHERIT_FDS else {}
     try:
         proc = RUN(["op", *args], capture_output=True, text=True,
-                   stdin=subprocess.DEVNULL, timeout=_TIMEOUT_S)
+                   stdin=subprocess.DEVNULL, timeout=_TIMEOUT_S, **extra)
     except FileNotFoundError:
         raise OpError("the `op` CLI is not installed") from None
     except subprocess.TimeoutExpired:
@@ -247,8 +258,9 @@ def upsert_field(item: str, vault: str, field: str, value: str,
                 "— refusing to create a same-titled sibling; inspect it in "
                 "1Password" % item) from None
         kind = "password" if concealed else "text"
+        tag = _record_creation(item, vault)
         _op(["item", "create", "--category", "API Credential",
-             "--title", item, "--vault", vault,
+             "--title", item, "--vault", vault, "--tags", tag,
              f"{field}[{kind}]={value}"], redact=(value,))
 
 
@@ -257,5 +269,227 @@ def create_ssh_key(title: str, vault: str) -> None:
     key never exists outside the vault; the caller re-reads it with read()
     and must confirm it loads and signs before relying on it (the
     cross-phase invariant)."""
+    tag = _record_creation(title, vault)
     _op(["item", "create", "--category", "ssh", "--title", title,
-         "--vault", vault, "--ssh-generate-key", "rsa,4096"])
+         "--vault", vault, "--tags", tag, "--ssh-generate-key", "rsa,4096"])
+
+
+# THE CREATION RECORD (issue #72). `delete_all_data` is the clean slate, and
+# it deletes the vault items bank-feed created and ONLY those: an item the
+# operator made by hand is never touched. So a creation is recorded, and the
+# record is written BEFORE the create. Written after it, a process ending
+# between the two would leave an item bank-feed made that no erasure could
+# know about.
+#
+# A line alone does not prove an item is ours: the process may have ended
+# before the create ran. So the item carries the line's nonce as a tag, and
+# the erasure deletes only items whose tags contain that exact tag. An empty
+# listing means the create never landed or the item is already gone, and
+# either way the line has nothing left to do.
+#
+# The record lives in the plugin's data directory, OUTSIDE the ledger:
+# `restore_backup`, `purge` and the row erasure rewrite the ledger's rows and
+# must never be able to drop a line.
+RECORD_FILENAME = "vault-items.jsonl"
+NONCE_TAG_PREFIX = "bank-feed-"
+_NONCE_RX = re.compile(r"[0-9a-f]{16}")
+
+
+class RecordError(OpError):
+    """The creation record could not be read or written. No create runs."""
+
+
+def record_path():
+    data = (os.environ.get("CLAUDE_PLUGIN_DATA") or "").strip()
+    if not data:
+        raise RecordError("CLAUDE_PLUGIN_DATA is not set, so a vault item "
+                          "created now could not be recorded for the erasure "
+                          "to find; nothing was created")
+    return os.path.join(data, RECORD_FILENAME)
+
+
+def _open_record(create: bool):
+    """The record, locked exclusively, with a torn tail cut off. -> fd, or
+    None when it does not exist and `create` is False.
+
+    A line is whole or absent. A process that ended part way through an
+    append leaves bytes with no newline, and the next append would complete
+    them into a malformed line that hides a real nonce. So every opener cuts
+    back to the last newline first, under the lock, before anything else."""
+    flags = os.O_RDWR | (os.O_CREAT if create else 0)
+    try:
+        fd = os.open(record_path(), flags | os.O_NOFOLLOW, 0o600)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RecordError("the vault creation record could not be opened "
+                          "(%s)" % os.strerror(exc.errno)) from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = _read_all(fd)
+        if data and not data.endswith(b"\n"):
+            os.ftruncate(fd, data.rfind(b"\n") + 1)
+            os.fsync(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise RecordError("the vault creation record could not be prepared "
+                          "(%s)" % os.strerror(exc.errno)) from None
+    return fd
+
+
+def _read_all(fd) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _parse(data: bytes) -> list:
+    """Every line, parsed. A complete line that is not a record refuses:
+    skipping it would drop the one proof that an item is ours."""
+    lines = []
+    for raw in data.split(b"\n"):
+        if not raw:
+            continue
+        try:
+            line = json.loads(raw.decode("utf-8"))
+            ok = (isinstance(line, dict)
+                  and all(isinstance(line.get(k), str) and line.get(k)
+                          for k in ("nonce", "vault", "title"))
+                  and _NONCE_RX.fullmatch(line["nonce"]))
+        except (UnicodeDecodeError, ValueError):
+            ok = False
+        if not ok:
+            raise RecordError("the vault creation record holds a line that "
+                              "is not a record")
+        lines.append(line)
+    return lines
+
+
+def _record_creation(title: str, vault: str) -> str:
+    """Append and flush one line; -> the tag the create must carry. Raises
+    RecordError, and then no create runs."""
+    nonce = secrets.token_hex(8)
+    line = (json.dumps({"nonce": nonce, "vault": vault, "title": title,
+                        "mode": ebmode.mode()}, sort_keys=True) + "\n"
+            ).encode("utf-8")
+    fd = _open_record(create=True)
+    try:
+        _parse(_read_all(fd))            # a record that is not whole refuses
+        start = os.fstat(fd).st_size
+        try:
+            os.lseek(fd, start, os.SEEK_SET)
+            view = memoryview(line)
+            while view:
+                n = os.write(fd, view)
+                if n <= 0:
+                    raise OSError(5, "a write made no progress")
+                view = view[n:]
+            os.fsync(fd)
+        except OSError as exc:
+            try:
+                os.ftruncate(fd, start)
+                os.fsync(fd)
+            except OSError:
+                pass                     # the next opener cuts the torn tail
+            raise RecordError("the vault creation record could not be "
+                              "written (%s); nothing was created"
+                              % os.strerror(exc.errno)) from None
+    finally:
+        os.close(fd)
+    return NONCE_TAG_PREFIX + nonce
+
+
+def _tagged(vault: str, tag: str) -> list:
+    """The ids of the items carrying `tag` EXACTLY. op also returns items
+    tagged `<tag>/<sub>`, and excludes archived items unless asked."""
+    out = _op(["item", "list", "--vault", vault, "--tags", tag,
+               "--include-archive", "--format", "json"])
+    try:
+        items = json.loads(out or "[]")
+    except ValueError:
+        raise OpError("op item list did not answer with JSON") from None
+    if not isinstance(items, list):
+        raise OpError("op item list did not answer with a list")
+    ids = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise OpError("op item list answered an item without an id")
+        if tag in (item.get("tags") or ()):
+            ids.append(item["id"])
+    return ids
+
+
+def erase_recorded() -> tuple:
+    """Delete every item the record proves bank-feed created. -> `(gone,
+    kept)`: titles proven gone, and `(title, reason)` for what is not. Never
+    raises. Each line is dropped only once a listing shows no item carries
+    its tag, so a failure keeps it for the next call."""
+    try:
+        fd = _open_record(create=False)
+    except RecordError as exc:
+        return [], [("the vault creation record", str(exc))]
+    if fd is None:
+        return [], []
+    try:
+        try:
+            lines = _parse(_read_all(fd))
+        except (RecordError, OSError) as exc:
+            return [], [("the vault creation record", str(exc))]
+        gone, kept, left = [], [], []
+        reason = status() if lines else None
+        for line in lines:
+            tag = NONCE_TAG_PREFIX + line["nonce"]
+            if reason is not None:
+                kept.append((line["title"], reason))
+                left.append(line)
+                continue
+            try:
+                ids = _tagged(line["vault"], tag)
+                for item_id in ids:
+                    _op(["item", "delete", item_id, "--vault", line["vault"]])
+                if ids and _tagged(line["vault"], tag):
+                    raise OpError("an item is still listed after its deletion")
+            except OpError as exc:
+                kept.append((line["title"], str(exc)))
+                left.append(line)
+                continue
+            if ids:
+                gone.append(line["title"])
+        # Replaced whole, never truncated in place: a rewrite that failed
+        # part way would otherwise lose the very lines it was keeping. The
+        # caller holds the exclusive lifecycle lock, so no append can land
+        # on the old file between the read above and the rename.
+        try:
+            path = record_path()
+            if left:
+                body = "".join(json.dumps(x, sort_keys=True) + "\n"
+                               for x in left).encode("utf-8")
+                tmp = path + ".tmp"
+                tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                              | os.O_NOFOLLOW, 0o600)
+                try:
+                    view = memoryview(body)
+                    while view:
+                        view = view[os.write(tfd, view):]
+                    os.fsync(tfd)
+                finally:
+                    os.close(tfd)
+                os.replace(tmp, path)
+            else:
+                os.unlink(path)
+            dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError as exc:
+            kept.append(("the vault creation record",
+                         "it could not be rewritten (%s)"
+                         % os.strerror(exc.errno)))
+        return gone, kept
+    finally:
+        os.close(fd)

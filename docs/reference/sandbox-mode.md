@@ -88,8 +88,9 @@ of touching it.
   `DELETE /api/applications {"appId": …}` recipe and purge the two
   sandbox vault items. The plugin itself has no DELETE capability
   (`eb_admin.ALLOW`), in either mode. The plugin's protected
-  `delete_all_data` revokes sandbox sessions and erases the sandbox
-  ledger only (its DB *is* the sandbox file).
+  `delete_all_data` revokes sandbox sessions, erases the sandbox
+  ledger only (its DB *is* the sandbox file), and deletes the sandbox
+  vault items bank-feed recorded creating; items made by hand stay.
 - A second `setup_bank_feed` on a healthy install is a verified no-op —
   the acceptance criterion the plays assert.
 

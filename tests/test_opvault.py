@@ -28,6 +28,27 @@ class Runner:
 
 
 class Base(unittest.TestCase):
+    def setUp(self):
+        # Every create writes the creation record into the plugin's data
+        # directory first (#72), so each test gets its own.
+        import os
+        import tempfile
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.data = pathlib.Path(d.name)
+        saved = os.environ.get("CLAUDE_PLUGIN_DATA")
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+                        if saved is None else
+                        os.environ.__setitem__("CLAUDE_PLUGIN_DATA", saved))
+        os.environ["CLAUDE_PLUGIN_DATA"] = d.name
+
+    def record(self):
+        import json
+        path = self.data / opvault.RECORD_FILENAME
+        if not path.exists():
+            return None
+        return [json.loads(x) for x in path.read_text().splitlines()]
+
     def runner(self, *results):
         r = Runner(results)
         self.addCleanup(setattr, opvault, "RUN", opvault.RUN)
@@ -91,6 +112,20 @@ class TestSubprocessHygiene(Base):
         opvault.read(opvault.REF_REFRESH_TOKEN)
         self.assertEqual(r.calls[0][0],
                          ["op", "read", opvault.REF_REFRESH_TOKEN])
+
+
+    def test_every_child_inherits_the_calls_lifecycle_lock(self):
+        # #72: an `op item create` still running after its parent died must
+        # keep the call's shared lock, or the erasure could list the vault
+        # before the item lands.
+        r = self.runner(Proc(stdout="v\n"), Proc(stdout="v\n"))
+        self.addCleanup(setattr, opvault, "INHERIT_FDS", ())
+        opvault.INHERIT_FDS = (7,)
+        opvault.read("op://ExampleVault/EnableBanking/refresh token")
+        self.assertEqual(r.calls[0][1]["pass_fds"], (7,))
+        opvault.INHERIT_FDS = ()
+        opvault.read("op://ExampleVault/EnableBanking/refresh token")
+        self.assertNotIn("pass_fds", r.calls[1][1])
 
 
 class TestErrors(Base):
@@ -240,10 +275,12 @@ class TestWrites(Base):
         # exists outside the vault.
         r = self.runner(Proc())
         opvault.create_ssh_key("EnableBanking Production", "ExampleVault")
+        [line] = self.record()
         self.assertEqual(r.calls[0][0],
                          ["op", "item", "create", "--category", "ssh",
                           "--title", "EnableBanking Production",
                           "--vault", "ExampleVault",
+                          "--tags", "bank-feed-" + line["nonce"],
                           "--ssh-generate-key", "rsa,4096"])
 
 
@@ -436,6 +473,165 @@ class TestUpsertField(SandboxBase):
                                  "refresh token", "rt-secret")
         self.assertNotIn("rt-secret", str(ctx.exception))
         self.assertEqual(len(r.calls), 3)
+
+
+
+class TestCreationRecord(Base):
+    """Issue #72: the clean slate deletes the vault items bank-feed created,
+    and only those, so every create is recorded BEFORE it runs and the item
+    carries the record's nonce as a tag."""
+
+    def test_the_line_is_durable_before_the_create_runs(self):
+        seen = []
+
+        def create(argv, **kw):
+            seen.append(self.record())
+            return Proc()
+        self.addCleanup(setattr, opvault, "RUN", opvault.RUN)
+        opvault.RUN = create
+        opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        [[line]] = seen
+        self.assertEqual((line["title"], line["vault"]),
+                         ("EnableBanking Key", "ExampleVault"))
+
+    def test_the_credential_create_is_recorded_and_tagged(self):
+        r = self.runner(
+            Proc(1, stderr='"EnableBanking" isn\'t an item'),
+            Proc(1, stderr='"EnableBanking" isn\'t an item'),
+            Proc(0))
+        opvault.upsert_field("EnableBanking", "ExampleVault", "username",
+                             "me@example.com", concealed=False)
+        [line] = self.record()
+        self.assertIn("bank-feed-" + line["nonce"], r.calls[2][0])
+
+    def test_an_edit_that_creates_nothing_records_nothing(self):
+        self.runner(Proc(0))
+        opvault.upsert_field("EnableBanking", "ExampleVault", "username",
+                             "me@example.com", concealed=False)
+        self.assertIsNone(self.record())
+
+    def test_no_data_directory_means_no_create(self):
+        import os
+        os.environ.pop("CLAUDE_PLUGIN_DATA")
+        r = self.runner(Proc())
+        with self.assertRaises(opvault.RecordError):
+            opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        self.assertEqual(r.calls, [])
+
+    def test_a_torn_tail_is_cut_before_the_next_line(self):
+        # A process that ended mid-append left bytes with no newline; the
+        # next append must not complete them into a malformed line.
+        (self.data / opvault.RECORD_FILENAME).write_bytes(b'{"nonce": "ab')
+        self.runner(Proc())
+        opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        [line] = self.record()
+        self.assertEqual(line["title"], "EnableBanking Key")
+
+    def test_a_malformed_whole_line_refuses_the_create(self):
+        (self.data / opvault.RECORD_FILENAME).write_bytes(b"not json\n")
+        r = self.runner(Proc())
+        with self.assertRaises(opvault.RecordError):
+            opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        self.assertEqual(r.calls, [])
+
+    def test_a_failed_append_is_cut_back_and_creates_nothing(self):
+        import os
+        real = os.write
+        self.addCleanup(setattr, os, "write", real)
+
+        def half(fd, data):
+            os.write = real
+            real(fd, bytes(data[:5]))
+            raise OSError(28, "No space left on device")
+        os.write = half
+        r = self.runner(Proc())
+        with self.assertRaises(opvault.RecordError):
+            opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        self.assertEqual(r.calls, [])
+        self.assertEqual((self.data / opvault.RECORD_FILENAME).read_bytes(), b"")
+
+
+class TestEraseRecorded(Base):
+    def setUp(self):
+        super().setUp()
+        self.with_token()
+        self.with_vault("ExampleVault")
+        self.nonces = []
+        for title in ("EnableBanking Key", "EnableBanking"):
+            self.runner(Proc())
+            opvault.create_ssh_key(title, "ExampleVault")
+        self.nonces = [x["nonce"] for x in self.record()]
+
+    def listing(self, *items):
+        import json
+        return Proc(stdout=json.dumps(list(items)))
+
+    def test_our_items_are_deleted_and_the_record_goes(self):
+        a, b = ("bank-feed-" + n for n in self.nonces)
+        r = self.runner(Proc(stdout="v"),                       # status
+                        self.listing({"id": "i1", "tags": [a]}), Proc(),
+                        self.listing(),
+                        self.listing({"id": "i2", "tags": [b]}), Proc(),
+                        self.listing())
+        gone, kept = opvault.erase_recorded()
+        self.assertEqual((gone, kept),
+                         (["EnableBanking Key", "EnableBanking"], []))
+        deletes = [c[0] for c in r.calls if c[0][1:3] == ["item", "delete"]]
+        self.assertEqual([d[3] for d in deletes], ["i1", "i2"])
+        self.assertIsNone(self.record())
+        list_argv = r.calls[1][0]
+        self.assertIn("--include-archive", list_argv)
+
+    def test_an_empty_listing_means_never_created_and_drops_the_line(self):
+        r = self.runner(Proc(stdout="v"), self.listing(), self.listing())
+        self.assertEqual(opvault.erase_recorded(), ([], []))
+        self.assertFalse(any(c[0][1:3] == ["item", "delete"] for c in r.calls))
+        self.assertIsNone(self.record())
+
+    def test_an_item_with_only_a_nested_tag_is_never_deleted(self):
+        a = "bank-feed-" + self.nonces[0]
+        r = self.runner(Proc(stdout="v"),
+                        self.listing({"id": "x", "tags": [a + "/sub"]}),
+                        self.listing())
+        self.assertEqual(opvault.erase_recorded(), ([], []))
+        self.assertFalse(any(c[0][1:3] == ["item", "delete"] for c in r.calls))
+
+    def test_a_refused_delete_keeps_the_line_for_the_retry(self):
+        a = "bank-feed-" + self.nonces[0]
+        self.runner(Proc(stdout="v"),
+                    self.listing({"id": "i1", "tags": [a]}),
+                    Proc(1, stderr="You do not have permission"),
+                    self.listing())
+        gone, kept = opvault.erase_recorded()
+        self.assertEqual(gone, [])
+        self.assertEqual([k[0] for k in kept], ["EnableBanking Key"])
+        self.assertIn("permission", kept[0][1])
+        self.assertEqual([x["nonce"] for x in self.record()], self.nonces[:1])
+
+    def test_an_item_still_listed_after_its_delete_is_kept(self):
+        a = "bank-feed-" + self.nonces[0]
+        self.runner(Proc(stdout="v"),
+                    self.listing({"id": "i1", "tags": [a]}), Proc(),
+                    self.listing({"id": "i1", "tags": [a]}),
+                    self.listing())
+        gone, kept = opvault.erase_recorded()
+        self.assertEqual([k[0] for k in kept], ["EnableBanking Key"])
+        self.assertEqual(len(self.record()), 1)
+
+    def test_op_unusable_keeps_every_line(self):
+        import os
+        os.environ.pop("OP_SERVICE_ACCOUNT_TOKEN")
+        r = self.runner()
+        gone, kept = opvault.erase_recorded()
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(r.calls, [])
+        self.assertEqual(len(self.record()), 2)
+
+    def test_no_record_means_nothing_to_do(self):
+        (self.data / opvault.RECORD_FILENAME).unlink()
+        r = self.runner()
+        self.assertEqual(opvault.erase_recorded(), ([], []))
+        self.assertEqual(r.calls, [])
 
 
 if __name__ == "__main__":
