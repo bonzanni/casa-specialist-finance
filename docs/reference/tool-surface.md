@@ -122,7 +122,7 @@ arguments would only invite an agent to invent values for them.
 
 ## Protected — casa demands an operator grant
 
-These seven are declared in `casa.protectedTools`. casa's fail-closed hook demands a grant
+These eight are declared in `casa.protectedTools`. casa's fail-closed hook demands a grant
 **bound to the exact arguments** before the call reaches this process, and the summary
 the operator sees is the one in the plugin manifest. No tool takes a `confirm` argument:
 a model-supplied boolean is inference satisfying itself.
@@ -133,6 +133,7 @@ a model-supplied boolean is inference satisfying itself.
 | `purge` | Deletes every transaction booked before a date — or the whole ledger with `before_date=all` — with its notes and tags, trims or drops the proven-coverage intervals to match, then reclaims the space. A dated purge deletes a supersession chain (a pending row and the rows that replaced it) whole or not at all: a chain with any row on or after the date is kept, and the reply counts the rows before the date it kept. `user_work` is required: `keep` keeps rules and account labels, categories and include flags; `erase` deletes all of them and every note and tag, on surviving rows too. A whole-ledger purge also resets balances, occurrence marks and sync state (history marked partial). A `pre-erasure` backup is taken first; `restore_backup` undoes it. |
 | `forget_local_account` | Erases one account's local history and drops the account. Revokes nothing — this does not disconnect the bank. A `pre-erasure` backup is taken first; `restore_backup` brings the history back. |
 | `delete_all_data` | The clean slate. Erases the entire local ledger for every account, **then attempts to withdraw every open bank consent**. Consents it cannot prove withdrawn keep their handles so they can be revoked by hand. Once none is held, it also removes the published exports, the 1Password items bank-feed recorded creating, the backup index and every leftover file, and resets the ledger to what a first start creates. It is the plugin's `casa.eraseTool`: run to the end, it answers `{"erasure": "complete" \| "incomplete", "report": …}`, `complete` only when nothing is left and every withdrawal was confirmed (see below). |
+| `delete_data_keep_signins` | Uninstall's "Erase data, keep sign-ins". Erases every transaction, note, tag, rule, balance, coverage interval and reference measurement, every backup copy and snapshot, and the published exports, but **keeps** the bank sessions, the accounts bound to them (their labels, categories and include flags reset), the setup state and the local `account_id` secret, so a reinstall syncs again without re-approving any bank. It asks no bank anything. It is the plugin's `casa.eraseDataOnlyTool` and answers `{"erasure", "report"}` like `delete_all_data`. |
 | `label_account` | Changes an account's label, category or inclusion. Excluding it removes the account from every total shown. |
 | `accept_app_reregistration` | Authorizes registering a **replacement** Enable Banking application. Every bank must be re-linked afterwards. |
 | `restore_backup` | Replaces every ordinary table's rows in place from a backup: transactions, tags, notes, rules, registrations. Bank links are kept live, never taken from the backup; an account in the backup but not linked live comes back needing a re-link. |
@@ -149,6 +150,27 @@ bank-feed created and every leftover file, and the reclaim finished (an unfinish
 has the clean slate and the lock that keeps every other call out while it runs. Everything
 else is `incomplete`, and `report` is the account the operator is shown. A refusal
 before the erasure ran returns prose, which casa reads as not complete.
+
+`delete_data_keep_signins` is the other uninstall choice, "Erase data, keep sign-ins"
+(`casa.eraseDataOnlyTool`). It runs `delete_all_data`'s row erasure and backup sweep,
+with the same crash protocol, but keeps what a reinstall needs to carry on:
+- the `sessions` rows;
+- the account bindings;
+- the attempts that already exchanged their code;
+- the Retry-After holds;
+- the `setup.*` and renewal-handoff metadata;
+- the `account_id` secret. Every account id is derived from it, and only a masked IBAN is
+  stored, so the ids could not be re-keyed.
+
+It cancels any authorization that has not exchanged its code, and refuses while one is
+completing. It claims `complete` only when the backup sweep settled every copy, the
+exports and leftover files went, and the reclaim finished. After it, **the uninstall
+fence** holds: every call except the two erasers, `setup_bank_feed`, `bank_feed_signin`,
+`consent_status` and `unlink_bank` refuses until `setup_bank_feed` runs. Casa runs that
+tool after every install, including a reinstall. Without the fence a sync waiting on the
+lifecycle lock would refill the erased ledger before casa removes the plugin.
+[`architecture/backups-erasure.md`](../architecture/backups-erasure.md#the-data-only-erasure)
+has the detail.
 
 `label_account` is protected despite not deleting anything: silently excluding an
 account changes every number the specialist reports afterwards, which is

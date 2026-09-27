@@ -1104,6 +1104,49 @@ def reported_ledger_instance(conn: sqlite3.Connection) -> str | None:
         return None
 
 
+#: THE UNINSTALL FENCE (issue #73). `delete_data_keep_signins` keeps the bank
+#: sessions and the accounts bound to them, so unlike `delete_all_data` it
+#: leaves everything a `sync` needs. The dispatcher releases the lifecycle
+#: lock before casa has even read the eraser's `complete`, so a call waiting
+#: on that lock would refill the erased ledger (and back it up) before casa
+#: removes the plugin, and the refilled data would outlive the uninstall.
+#: So the erasure commits this key, holding its timestamp, in the same
+#: transaction as the deletion; `bank_feed_server.handle` refuses every call
+#: but a short list while it is set; and `setup_bank_feed`, which casa runs
+#: after every install, reinstall included, is what deletes it.
+UNINSTALL_FENCE_KEY = "uninstall_erasure"
+
+
+def uninstall_fence(conn: sqlite3.Connection) -> str | None:
+    """When the data was erased for an uninstall, or None: not fenced."""
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (UNINSTALL_FENCE_KEY,)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def uninstall_fence_at(data: str) -> str | None:
+    """`uninstall_fence` of the mode's ledger in `data`, read the way the
+    dispatcher needs it: through a plain connection, not `open_ledger`, so the
+    check runs no settlement or migration before the tool's own argument
+    check, and never creates a ledger. A file whose `meta` does not exist yet
+    is one being created: nothing to fence."""
+    db = Path(os.path.join(data, db_filename()))
+    if not db.exists():
+        return None
+    conn = sqlite3.connect(str(db), timeout=_SETTLE_BUSY_MS / 1000)
+    try:
+        try:
+            return uninstall_fence(conn)
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise
+    finally:
+        conn.close()
+        for suffix in _SIDECARS:
+            _harden(db.parent / (db.name + suffix))
+
+
 def local_secret(conn: sqlite3.Connection) -> bytes:
     """Per-database HMAC key, generated at first run."""
     row = conn.execute(

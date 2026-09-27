@@ -12,7 +12,7 @@ the whole thing survives the gates casa actually applies at install:
   and neither names a tool the manifest does not declare;
 * `casa.setupTool` obeys casa's own naming rule and every `protectedTools`
   summary fits the length casa enforces;
-* the protected-tool gate names exactly the seven tools required — the four
+* the protected-tool gate names exactly the eight tools required — the five
   destructive tools plus `label_account`, `accept_app_reregistration` and
   `restore_backup` — and never `collect_authorization`;
 * every AUTHORED file casa marker-scans at install passes its own scan —
@@ -85,10 +85,11 @@ import tools_read  # noqa: E402
 import tools_rules  # noqa: E402,F401
 import tools_refresh  # noqa: E402,F401
 
-# The four genuinely irreversible actions: what the skill's untrusted-text
+# The five genuinely irreversible actions: what the skill's untrusted-text
 # guidance (test_treats_untrusted_text_as_data_never_as_authorization below)
 # must name explicitly.
-DESTRUCTIVE = {"unlink_bank", "purge", "forget_local_account", "delete_all_data"}
+DESTRUCTIVE = {"unlink_bank", "purge", "forget_local_account", "delete_all_data",
+               "delete_data_keep_signins"}
 # Everything casa's protected-tool PreToolUse gate must cover, including
 # label_account: it can set included=false, an inference-only path for
 # attacker-controlled bank text to remove an account from every balance and
@@ -1185,7 +1186,7 @@ class TestPluginManifest(unittest.TestCase):
         for tool in man["casa"]["provides_tools"]:
             self.assertTrue(tool.startswith(prefix), tool)
 
-    def test_protected_tools_are_exactly_the_seven_protected_tools(self):
+    def test_protected_tools_are_exactly_the_eight_protected_tools(self):
         man = _plugin_manifest()
         names = _protected_tool_names(man)
         self.assertEqual(names, PROTECTED)

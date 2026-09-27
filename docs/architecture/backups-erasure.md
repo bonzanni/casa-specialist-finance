@@ -250,6 +250,52 @@ busy after `LOCK_WAIT_S`. Every `op` child inherits the call's lock descriptor
 (`opvault.INHERIT_FDS`), so a create still running after its parent died still holds the
 lock.
 
+## The data-only erasure
+
+`delete_data_keep_signins` is the eraser casa runs when the operator uninstalls with
+"erase data, keep sign-ins" (`casa.eraseDataOnlyTool`, casa v0.331.0). It shares the row
+phase above, `tools_destructive._erase_rows_and_copies`: settle the index, erase inside
+one write transaction, mint a new ledger instance id, record `erase <op> pending` as the
+last statement before the COMMIT, then sweep every copy and snapshot under the
+still-held index handle. The copies therefore go under the same crash protocol. What it
+erases inside that transaction differs:
+
+- **Gone:** every table in `_DATA_ONLY_TABLES`, which is `_DATA_TABLES` minus
+  `SIGNIN_TABLES`, so a data table added later is erased by default. Also gone: each
+  account's label, category and include flag; every `meta` key outside the structural
+  ones, `setup.*` and `renewal_handoff|*`; and the AUTOINCREMENT counters of the erased
+  tables. Every attempt that has not exchanged its code is deleted: a kept one's
+  callback, arriving after the erasure, would bind a session and backfill the erased
+  ledger.
+- **Kept:** the `sessions` rows, the account bindings and the attempts in
+  `_EXCHANGED_PHASES`. A settled attempt is what `consent_status` reads to warn about a
+  quarantined consent, and an `exchange_started` one is what a later collection pass
+  quarantines. The `account_secret` is kept too. Every account id is an HMAC under it
+  over the full IBAN, and only a masked IBAN is stored, so a new secret would fork every
+  account at its next renewal.
+- **Reset:** every account's incarnation is rotated, as `purge` does, so a run that read
+  before the erasure cannot record coverage over it. `sync_state` is reset as a
+  whole-ledger purge resets it: history partial, Retry-After holds kept.
+
+It calls no provider. It refuses, with nothing erased, while
+`tools_auth.authorization_in_progress` holds: deleting a leased `exchange_started`
+attempt could leave a consent at the bank that nothing here can see or revoke. After the
+sweep it removes the exports and the other mode's orphan files, as the clean slate does,
+but keeps the backup index: the restore marker it is settled against is structural and
+stays in `meta`.
+
+**The uninstall fence.** The dispatcher releases the lifecycle lock before casa has read
+the eraser's `complete`, and the bindings this eraser keeps are everything a `sync`
+needs. A call waiting on the lock would therefore refill the erased ledger, and back it
+up, before casa removed the plugin, and that data would outlive the uninstall. So the
+erasure transaction also commits `store.UNINSTALL_FENCE_KEY`. Under the lifecycle lock,
+`bank_feed_server.handle` refuses every call outside `FENCE_EXEMPT` while the key is
+set: the two erasers, `setup_bank_feed`, `bank_feed_signin`, `consent_status` and
+`unlink_bank`. `setup_bank_feed` deletes the key. Casa runs it after every install, a
+reinstall at the same artifact included (the reinstall re-arms the setup obligation), and
+an operator keeping bank-feed runs it by hand. With no ledger on disk the check reads
+nothing and creates nothing (`tools_read.existing_conn`).
+
 ## Source & test map
 
 <!-- BEGIN SOURCEMAP -->
@@ -267,6 +313,7 @@ lock.
 - `tests/test_tools_backup.py`
 - `tests/test_tools_destructive.py`
 - `tests/test_clean_slate.py`
+- `tests/test_data_only_erasure.py`
 - `tests/test_opvault.py`
 
 **Related**

@@ -82,6 +82,8 @@
   doc: reference/tool-surface.md
 - item: tool:delete_all_data
   doc: reference/tool-surface.md
+- item: tool:delete_data_keep_signins
+  doc: reference/tool-surface.md
 - item: tool:delete_tag
   doc: reference/tool-surface.md
 - item: tool:export_history
@@ -136,6 +138,8 @@
   doc: reference/tool-surface.md
 - item: protected:delete_all_data
   doc: reference/tool-surface.md
+- item: protected:delete_data_keep_signins
+  doc: reference/tool-surface.md
 - item: protected:forget_local_account
   doc: reference/tool-surface.md
 - item: protected:label_account
@@ -179,6 +183,8 @@
 - item: role:mcp__plugin_bank-feed_bank-feed__consent_status
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__delete_all_data
+  doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__delete_data_keep_signins
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__delete_tag
   doc: reference/tool-surface.md
