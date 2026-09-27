@@ -339,6 +339,14 @@ def _open_record(create: bool):
     return fd
 
 
+def _fsync_dir(path: str) -> None:
+    dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def _read_all(fd) -> bytes:
     os.lseek(fd, 0, os.SEEK_SET)
     chunks = []
@@ -391,6 +399,10 @@ def _record_creation(title: str, vault: str) -> str:
                     raise OSError(5, "a write made no progress")
                 view = view[n:]
             os.fsync(fd)
+            # The line is durable only once the directory entry is: a first
+            # line creates the file, and a power loss could otherwise lose
+            # the whole record of an item created a moment later.
+            _fsync_dir(os.path.dirname(record_path()))
         except OSError as exc:
             try:
                 os.ftruncate(fd, start)
@@ -431,7 +443,27 @@ def _tagged(vault: str, tag: str) -> list:
                           "shape")
         if tag in tags:
             ids.append(item["id"])
+        elif not any(t.startswith(tag + "/") for t in tags):
+            # Listed under our tag yet carrying neither it nor a nested one:
+            # the listing contradicts itself, and reading it as absence
+            # would drop the line of an item that may be ours.
+            raise OpError("op item list answered an item that does not "
+                          "carry the tag it was listed by")
     return ids
+
+
+def _remove_stale_copy() -> list:
+    """-> [] or one `(what, reason)` for a copy that could not be removed."""
+    try:
+        tmp = record_path() + ".tmp"
+        os.unlink(tmp)
+        _fsync_dir(os.path.dirname(tmp))
+    except FileNotFoundError:
+        return []
+    except (OSError, RecordError) as exc:
+        return [("a leftover copy of the vault creation record",
+                 type(exc).__name__)]
+    return []
 
 
 def erase_recorded() -> tuple:
@@ -439,18 +471,21 @@ def erase_recorded() -> tuple:
     kept)`: titles proven gone, and `(title, reason)` for what is not. Never
     raises. Each line is dropped only once a listing shows no item carries
     its tag, so a failure keeps it for the next call."""
+    # A rewrite interrupted before its rename leaves a copy of the record
+    # beside it; it goes too, whatever the record itself holds.
+    stale = _remove_stale_copy()
     try:
         fd = _open_record(create=False)
     except RecordError as exc:
-        return [], [("the vault creation record", str(exc))]
+        return [], stale + [("the vault creation record", str(exc))]
     if fd is None:
-        return [], []
+        return [], stale
     try:
         try:
             lines = _parse(_read_all(fd))
         except (RecordError, OSError) as exc:
-            return [], [("the vault creation record", str(exc))]
-        gone, kept, left = [], [], []
+            return [], stale + [("the vault creation record", str(exc))]
+        gone, kept, left = [], list(stale), []
         reason = status() if lines else None
         for line in lines:
             tag = NONCE_TAG_PREFIX + line["nonce"]
@@ -492,11 +527,7 @@ def erase_recorded() -> tuple:
                 os.replace(tmp, path)
             else:
                 os.unlink(path)
-            dfd = os.open(os.path.dirname(path), os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
+            _fsync_dir(os.path.dirname(path))
         except OSError as exc:
             kept.append(("the vault creation record",
                          "it could not be rewritten (%s)"

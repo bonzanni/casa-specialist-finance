@@ -534,6 +534,21 @@ class TestCreationRecord(Base):
             opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
         self.assertEqual(r.calls, [])
 
+    def test_the_directory_entry_is_flushed_before_the_create(self):
+        import os
+        seen, real = [], os.fsync
+        self.addCleanup(setattr, os, "fsync", real)
+
+        def fsync(fd):
+            import stat
+            seen.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            return real(fd)
+        os.fsync = fsync
+        r = self.runner(Proc())
+        opvault.create_ssh_key("EnableBanking Key", "ExampleVault")
+        self.assertIn(True, seen)
+        self.assertEqual(len(r.calls), 1)
+
     def test_a_failed_append_is_cut_back_and_creates_nothing(self):
         import os
         real = os.write
@@ -625,7 +640,9 @@ class TestEraseRecorded(Base):
         import json
         for body in ("", "null", json.dumps([{"id": "i1"}]),
                      json.dumps([{"id": "i1", "tags": None}]),
-                     json.dumps([{"id": "i1", "tags": a + "/sub"}])):
+                     json.dumps([{"id": "i1", "tags": a + "/sub"}]),
+                json.dumps([{"id": "i1", "tags": []}]),
+                json.dumps([{"id": "i1", "tags": ["unrelated"]}])):
             with self.subTest(body=body):
                 r = self.runner(Proc(stdout="v"), Proc(stdout=body),
                                 self.listing())
@@ -638,6 +655,22 @@ class TestEraseRecorded(Base):
                 # that line goes.
                 self.assertEqual([x["nonce"] for x in self.record()],
                                  self.nonces[:1])
+
+    def test_a_leftover_copy_of_an_interrupted_rewrite_goes(self):
+        tmp = self.data / (opvault.RECORD_FILENAME + ".tmp")
+        tmp.write_text((self.data / opvault.RECORD_FILENAME).read_text())
+        self.runner(Proc(stdout="v"), self.listing(), self.listing())
+        self.assertEqual(opvault.erase_recorded(), ([], []))
+        self.assertFalse(tmp.exists())
+        self.assertIsNone(self.record())
+
+    def test_a_leftover_copy_goes_even_with_no_record(self):
+        (self.data / opvault.RECORD_FILENAME).unlink()
+        tmp = self.data / (opvault.RECORD_FILENAME + ".tmp")
+        tmp.write_text("x\n")
+        self.runner()
+        self.assertEqual(opvault.erase_recorded(), ([], []))
+        self.assertFalse(tmp.exists())
 
     def test_op_unusable_keeps_every_line(self):
         import os
