@@ -46,6 +46,20 @@ send, `resend=true` or the automatic one after the window lapses, never
 inherits it. No code reads a mailbox in either case, and the
 server-side ladder is byte-identical with or without the delegation.
 
+**How the link reaches the plugin (ha-casa-app#1047).** Never in a message
+or a delegation brief — Casa's safety kernel forbids carrying a sign-in link
+there. The agent holding it, whether the operator pasted it or it was read
+under the delegated ferry, stores it in the plugin's declared drop-off
+(`casa.dropOffs: ["signin_link"]`) with Casa's `vault_drop_off`, and tells
+the specialist only that it is waiting. `bank_feed_signin` with no
+`signin_link` then takes it from the item Casa wrote — `Casa drop-off
+bank-feed signin_link` in Casa's default vault, tagged `casa-drop-off` —
+deleting the item before using it, so a link is redeemed at most once, and
+refusing one stored before the pending email was sent (it may belong to an
+earlier email). An item with that title that Casa did not create is left
+alone and stops the step. In a direct conversation with the specialist, the
+operator can still hand the link over as `signin_link`.
+
 **That is NOT the only human touch in the install.** "Exactly one human touch"
 would be false. The full install keeps: approving the callback consent DM, the
 credential copy/paste above, supplying the account email once (the sign-in email
@@ -106,9 +120,10 @@ Phase 0 is what makes setup idempotent: a second run is a no-op.
      operator asks for a resend.
   2. plugin prints step-by-step instructions naming `bank_feed_signin` and
      the send's time, with the delegated-read rules appended.
-  3. operator **copies** the intact URL out of their own mail client and pastes
-     it back as `signin_link` (not a click — a browser visit consumes the
-     single-use code without handing the plugin anything).
+  3. operator **copies** the intact URL out of their own mail client (not a
+     click — a browser visit consumes the single-use code without handing
+     the plugin anything) and hands it over: to the assistant, which stores
+     it in the drop-off, or straight to the specialist as `signin_link`.
   4. plugin extracts the code, exchanges, stores, and runs the rest of the
      ladder itself.
 

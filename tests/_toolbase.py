@@ -489,6 +489,10 @@ class FakeVault:
         self.fail_reads = {}      # ref -> OpError to raise (transient fault)
         self.exists_error = None  # OpError item_exists should raise
         self.items = None         # None -> derived from values; else a set
+        # ha-casa-app#1047: the sign-in drop-off. (value, created_epoch) when
+        # one is waiting, or an OpError to raise; take_drop_off empties it.
+        self.drop_off = None
+        self.drop_off_takes = []
 
     def status(self):
         return None if self.usable else "the `op` CLI is not installed on this host"
@@ -528,6 +532,14 @@ class FakeVault:
         behaviour under test, not an implementation detail."""
         self.upsert_calls.append((item, vault, field, value, concealed))
         self.values["op://%s/%s/%s" % (vault, item, field)] = value
+
+    def take_drop_off(self, name):
+        self.drop_off_takes.append(name)
+        got = self.drop_off
+        if isinstance(got, Exception):
+            raise got
+        self.drop_off = None
+        return got
 
     def create_ssh_key(self, title, vault):
         self.created.append((title, vault))

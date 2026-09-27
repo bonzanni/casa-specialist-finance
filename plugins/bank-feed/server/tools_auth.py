@@ -1381,6 +1381,11 @@ def _credential_rung(c, lines, args):
         return False
 
     link = args.get("signin_link") or ""
+    if not link and not args.get("resend"):
+        taken = _take_signin_drop_off(c, lines)
+        if taken is None:
+            return False
+        link = taken
     if link:
         try:
             code = FB.parse_signin_link(link)
@@ -1489,10 +1494,9 @@ def _credential_rung(c, lines, args):
             "3. Credential: a sign-in email was already sent to %s at %s, "
             "within the last 15 minutes. Find 'Sign in to Enable Banking' "
             "in that mailbox, COPY the full link (do not click it — a "
-            "browser visit consumes the single-use code), and run "
-            "bank_feed_signin with signin_link=<the copied URL>. Use "
+            "browser visit consumes the single-use code), and %s Use "
             "resend=true for a fresh email. %s Stopping."
-            % (_safe(email), _stamp(float(sent_at)),
+            % (_safe(email), _stamp(float(sent_at)), _HAND_OVER,
                _ferry_rules(email, float(sent_at))))
         return False
     # Stamped BEFORE the request: the stanza's matcher accepts mail received
@@ -1516,13 +1520,67 @@ def _credential_rung(c, lines, args):
     lines.append(
         "3. Credential: a 'Sign in to Enable Banking' email was just sent "
         "to %s at %s. COPY the full sign-in URL out of that email (do not "
-        "click it — a browser visit consumes the single-use code) and run "
-        "bank_feed_signin with signin_link=<the copied URL> within the "
-        "hour. By default the operator does this by hand, in their own "
-        "mail client. %s Everything after that paste is automatic. "
-        "Stopping until then."
-        % (_safe(email), _stamp(sent_at), _ferry_rules(email, sent_at)))
+        "click it — a browser visit consumes the single-use code) within "
+        "the hour, and %s By default the operator copies it by hand, in "
+        "their own mail client. %s Everything after that hand-over is "
+        "automatic. Stopping until then."
+        % (_safe(email), _stamp(sent_at), _HAND_OVER,
+           _ferry_rules(email, sent_at)))
     return False
+
+
+def _take_signin_drop_off(c, lines):
+    """The sign-in link waiting in Casa's drop-off (ha-casa-app#1047), "" when
+    none is, or None after writing a stop line.
+
+    Casa's assistant stores a link there — one the operator pasted, or read
+    from the one sign-in email at the operator's request — instead of putting
+    it in a delegation brief, and tells this plugin's agent only that it is
+    waiting. `take_drop_off` deletes the item before handing the value over,
+    so it is redeemed at most once. A link stored before the pending email was
+    sent (or with no email pending) may belong to an earlier email and is
+    refused: its deletion already happened, so it cannot be tried later
+    either. No line here repeats the value."""
+    try:
+        got = OPVAULT.take_drop_off("signin_link")
+    except OPVAULT.OpError as exc:
+        lines.append(
+            "3. Credential: the sign-in drop-off could not be read or cleared "
+            "(%s). Nothing was redeemed. Stopping." % _safe(str(exc)))
+        return None
+    if got is None:
+        return ""
+    value, created = got
+    sent_at = _meta_get(c, "setup.oob_sent_at")
+    try:
+        current = sent_at is not None and created >= float(sent_at)
+    except ValueError:
+        current = False
+    if not current:
+        lines.append(
+            "3. Credential: a sign-in link was waiting in the drop-off, but it "
+            "was stored before the current sign-in email was sent (or no "
+            "sign-in email is pending), so it may belong to an earlier email. "
+            "It was deleted unused. Store the link from the latest 'Sign in to "
+            "Enable Banking' email, or run bank_feed_signin with resend=true "
+            "for a fresh one. Stopping.")
+        return None
+    return value
+
+
+# ha-casa-app#1047: how the copied link reaches this plugin. Never in a
+# message or a delegation brief — Casa's safety kernel forbids carrying a
+# sign-in link there. The agent holding it stores it in this plugin's declared
+# drop-off, and the plugin's own agent redeems it with no argument; or the
+# operator hands it straight to the plugin's agent in their own conversation.
+_HAND_OVER = (
+    "hand it over — never in a message or a delegation brief: the agent "
+    "holding it stores it with Casa's vault_drop_off(plugin='bank-feed', "
+    "drop_off='signin_link', value=<the copied URL>) and then asks this "
+    "plugin's agent only to run bank_feed_signin with no signin_link, which "
+    "redeems it from the drop-off; or, in the operator's own conversation "
+    "with this plugin's agent, bank_feed_signin runs with signin_link=<the "
+    "copied URL>.")
 
 
 def _stamp(epoch_s: float) -> str:
@@ -1557,9 +1615,10 @@ def _ferry_rules(email: str, sent_at: float) -> str:
         "mailbox flags as unauthenticated or failing its sender checks. "
         "Zero or several candidates, or any doubt, means the manual copy "
         "instead. Fetch "
-        "at most one mail body, pass its sign-in URL exactly as "
-        "signin_link, and make one attempt; any failure ends the "
-        "delegation, with no second read. Afterwards, tell the operator "
+        "at most one mail body, store its sign-in URL exactly in the "
+        "drop-off as above, and have this plugin's agent make one attempt; "
+        "any failure ends the delegation, with no second read. Afterwards, "
+        "tell the operator "
         "which mail was used, by its received time. A request covers one "
         "email and one attempt: every later send — resend=true, or the "
         "automatic send once the 15-minute window lapses — and every "

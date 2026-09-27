@@ -38,6 +38,12 @@ them, and nothing about casa.
 v0.329.0 is the first that reads that key and offers to erase the data at uninstall.
 An older one ignores it, so the floor below is unchanged by it.
 
+`bank-feed` declares a sign-in drop-off (`casa.dropOffs: ["signin_link"]`);
+casa v0.330.0 is the first that reads that key and gives the assistant
+`vault_drop_off`, which stores a sign-in link there instead of in a delegation
+brief (ha-casa-app#1047). An older one ignores the key, and `bank_feed_signin`
+still takes a link passed as `signin_link`, so the floor below is unchanged.
+
 `tx-classifier` declares its classification workflow as a background job
 (`casa.jobs`); casa v0.321.0 is the first that reads that key, and an older one
 ignores it, so the declaration raises nothing and the floor below is unchanged.
@@ -126,8 +132,8 @@ call to any tool the declaration omits. The setup tool is exempt.
 
 bank-feed declares thirty of its thirty-one non-setup tools `safe`: none returns
 a credential that another bank-feed tool could redeem, and `bank_feed_signin`
-consumes a sign-in link the operator pasted and returns statuses and the redirect
-URI, never a live link.
+consumes a sign-in link the operator pasted, or one it takes from its drop-off,
+and returns statuses and the redirect URI, never a live link.
 
 `link_bank` is the one `capability`. It produces the link the operator must open
 (the bank's approval, or in production first the Enable Banking whitelist page),
