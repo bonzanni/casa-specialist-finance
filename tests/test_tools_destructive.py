@@ -196,6 +196,14 @@ class DestructiveBase(Base):
         tools_destructive._vacuum = boom
         return lambda: setattr(tools_destructive, "_vacuum", original)
 
+    def keep_the_index(self):
+        """Leave the backup index for the test to read. Since issue #72 a
+        clean slate removes it in its last phase; the tests that call this
+        inspect the records the erasure wrote BEFORE that phase."""
+        original = tools_destructive._remove_residue
+        self.addCleanup(setattr, tools_destructive, "_remove_residue", original)
+        tools_destructive._remove_residue = lambda paths: (0, [])
+
     def vacuumed(self):
         return [s for s in self.conn.sql if s.strip().upper().startswith("VACUUM")]
 
@@ -1408,54 +1416,41 @@ class TestDeleteAll(DestructiveBase):
         self.assertIsNone(tools_auth._meta_get(self.raw,
                                                "refresh_inflight|acc1"))
 
-    def test_only_the_structural_metadata_survives(self):
+    def test_only_a_fresh_first_start_survives(self):
         # A whitelist, not a blacklist: a key some later feature adds is
-        # deleted by default rather than surviving because nobody updated a
-        # list of things to remove.
+        # deleted by default. And since issue #72 the clean slate goes one
+        # further: nothing left in `meta` links the file to its past, so the
+        # local account_id secret and the instance id are NEW, exactly as a
+        # first start would write them.
         self.raw.execute(
             "INSERT INTO meta(key, value) VALUES ('some_future_key','x')")
         secret_before = store.local_secret(self.raw)
+        instance_before = store.ledger_instance(self.raw)
         out = call("delete_all_data")
-        # No `backup_restore_op` was ever written here, so the reply must not
-        # name the backup subsystem's marker as a survivor -- only the two
-        # rows that actually remain.
-        self.assertIn("the schema version and the local account_id secret "
-                      "remain", out)
+        self.assertIn("reset to what a first start creates", out)
         self.assertNotIn("crash-recovery marker", out)
         keys = {r[0] for r in self.raw.execute("SELECT key FROM meta")}
-        # `backup_restore_op` is structural too, but it is only ever WRITTEN
-        # by a restore — nothing here ran one, so it is correctly absent
-        # rather than present-and-empty. assertEqual against the full
-        # whitelist would wrongly demand a key nothing wrote; the subset
-        # check plus the two keys `store.open_db` always populates is the
-        # accurate claim. The ledger instance id is not structural: the
-        # erasure replaces it with a new one (issue #69).
-        self.assertLessEqual(keys - {store.LEDGER_INSTANCE_KEY},
-                             set(tools_destructive.STRUCTURAL_META_KEYS))
         self.assertEqual(keys, {"schema_version", "account_secret",
                                 store.LEDGER_INSTANCE_KEY})
-        # The two survivors are structural for a reason: regenerating the
-        # secret would silently re-key every account id on the next link.
-        self.assertEqual(store.local_secret(self.raw), secret_before)
+        self.assertNotEqual(store.local_secret(self.raw), secret_before)
+        self.assertNotEqual(store.ledger_instance(self.raw), instance_before)
         self.assertEqual(
             int(self.raw.execute("SELECT value FROM meta WHERE"
                                  " key='schema_version'").fetchone()[0]),
             store.SCHEMA_VERSION)
+        self.assertEqual(out.result["erasure"], "complete")
 
-    def test_the_ledger_reopens_after_the_erasure(self):
-        # The claim the whitelist makes — "the database is immediately usable
-        # again" — asserted by using it, not by counting keys. A missing
-        # schema_version sends `store.open_db` down the pre-versioning branch;
-        # a regenerated account_secret silently re-keys every account_id.
+    def test_the_ledger_reopens_after_the_erasure_under_a_new_key(self):
+        # The file is reset in place, not removed, and it has to open like a
+        # new one. Its account ids are re-keyed on purpose: the old secret is
+        # what linked a re-link to the erased past.
         self.session()
         self.account()
-        secret_before = store.local_secret(self.raw)
         expected = self.expected_account_id(LINKED_IBAN)
         call("delete_all_data")
         reopened = store.open_db(self.root / "f.sqlite")
         self.addCleanup(reopened.close)
-        self.assertEqual(store.local_secret(reopened), secret_before)
-        self.assertEqual(
+        self.assertNotEqual(
             store.account_id(LINKED_IBAN, "EUR", store.local_secret(reopened)),
             expected)
 
@@ -1506,31 +1501,34 @@ class TestDeleteAll(DestructiveBase):
             ["acc1"])
         self.assertIsNotNone(tools_auth._meta_get(self.raw, "some_future_key"))
 
-    def test_delete_all_data_erases_registrations_and_keeps_the_restore_marker(self):
+    def test_the_clean_slate_takes_the_restore_marker_with_the_index(self):
+        # The marker belongs to the backup index's crash protocol, which the
+        # first phase settles; the clean slate then removes the index, so the
+        # marker has nothing left to protect (issue #72).
         self.raw.execute(
             "INSERT INTO workflow_registrations VALUES"
             " ('acct@1.0.0','aaaaaaaaaaaaaaaa','t')")
         self.raw.execute(
             "INSERT INTO meta(key, value) VALUES ('backup_restore_op',"
             "'bbbbbbbbbbbbbbbb')")
+        call("delete_all_data")
+        self.assertEqual(self.count("workflow_registrations"), 0)
+        self.assertIsNone(tools_auth._meta_get(self.raw, "backup_restore_op"))
+
+    def test_a_kept_consent_keeps_the_restore_marker_and_names_it(self):
+        # No clean slate while a consent is held: the index survives, so its
+        # marker does too, and the reply must name it rather than claim only
+        # two rows remain.
+        self.session()
+        self.ais = PickyAIS(failures={SESSION_ID: rate_limited(120)})
+        self.raw.execute(
+            "INSERT INTO meta(key, value) VALUES ('backup_restore_op',"
+            "'bbbbbbbbbbbbbbbb')")
         out = call("delete_all_data")
-        # The marker WAS kept, so "only the schema version and the local
-        # account_id secret remain" is false of this call's own database --
-        # a third structural row is sitting right there in `meta` -- and the
-        # reply must name it rather than silently drop it from the count.
-        self.assertNotIn(
-            "only the schema version and the local account_id secret remain",
-            out)
         self.assertIn("crash-recovery marker", out)
-        self.assertEqual(
-            self.raw.execute(
-                "SELECT count(*) FROM workflow_registrations").fetchone()[0],
-            0)
-        self.assertEqual(
-            self.raw.execute(
-                "SELECT value FROM meta WHERE"
-                " key='backup_restore_op'").fetchone()[0],
-            "bbbbbbbbbbbbbbbb")
+        self.assertEqual(tools_auth._meta_get(self.raw, "backup_restore_op"),
+                         "bbbbbbbbbbbbbbbb")
+        self.assertEqual(out.result["erasure"], "incomplete")
 
     def test_the_two_lists_cross_check_the_backups_module(self):
         # STRUCTURAL_META_KEYS and _DATA_TABLES re-spell `backups.MARKER_KEY`
@@ -1663,6 +1661,38 @@ class TestDeleteAllAndTheBanksOwnPermissions(DestructiveBase):
         self.assertEqual(self.count("sessions"), 0)
         self.assertIn("Withdrawn at the bank: 2 consent(s)", out)
         self.assertNotIn("NOT FULLY ERASED", out)
+
+    def test_an_app_id_known_only_to_meta_still_reaches_the_bank(self):
+        # Issue #71. The row erasure deleted meta `setup.app_id` before the
+        # withdrawal pass built its client, so an install whose id setup
+        # discovered (meta) but casa never wired (env) asked no bank and
+        # kept every consent — with the one id a retry needs already gone.
+        # The suite's AIS_FACTORY skips exactly that resolution, so this
+        # drives the real `_bare_ais` and stubs only the provider call.
+        tools_auth.AIS_FACTORY = None
+        os.environ.pop("CASA_BANKFEED_EB_APP_ID", None)
+        tools_auth._meta_set(self.raw, "setup.app_id", "app-in-meta")
+        tools_auth._WORLD_OK.add("app-in-meta")
+        self.session()
+        asked = []
+        with mock.patch.object(eb_ais.AIS, "delete_session",
+                               lambda self_, sid: asked.append(sid) or {}):
+            out = call("delete_all_data")
+        self.assertEqual(asked, [SESSION_ID])
+        self.assertEqual(self.count("sessions"), 0)
+        self.assertNotIn("NOT FULLY ERASED", out)
+
+    def test_a_kept_consent_keeps_the_app_id_its_retry_needs(self):
+        # The other half of #71: a consent the bank would not confirm gone is
+        # kept for `unlink_bank` to retry, and that retry resolves the app id
+        # from the same meta key.
+        tools_auth._meta_set(self.raw, "setup.app_id", "app-in-meta")
+        self.session()
+        self.ais = PickyAIS(failures={SESSION_ID: rate_limited(120)})
+        call("delete_all_data")
+        self.assertEqual(self.count("sessions"), 1)
+        self.assertEqual(tools_auth._meta_get(self.raw, "setup.app_id"),
+                         "app-in-meta")
 
     def test_a_404_counts_as_withdrawn_and_the_row_goes(self):
         # The one final failure. The provider stating the session does not
@@ -2432,6 +2462,7 @@ class TestDeleteAllDataSettlesFirst(DestructiveBase):
     """
 
     def test_a_mint_that_died_after_commit_settles_committed_even_across_delete_all_data(self):
+        self.keep_the_index()
         db_path = self.root / "f.sqlite"
         out = subprocess.run(
             [sys.executable, "-c", MINT_AND_DIE, str(SERVER_DIR), str(db_path)],
@@ -2512,6 +2543,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
                 if l.split()[1:2] == ["prune"]]
 
     def test_delete_all_data_erases_every_backup_file_and_records_each_one(self):
+        self.keep_the_index()
         paths = self._two_real_backups()
         out = call("delete_all_data")
         self.assertEqual(sorted(p.name for p in paths.backups_dir.iterdir()), [])
@@ -2526,6 +2558,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         self.assertIn("Restore generation: 0", listing)
 
     def test_a_copy_in_flight_goes_with_them(self):
+        self.keep_the_index()
         paths = self._two_real_backups()
         partial = paths.partial_file("b" * 16)
         partial.write_bytes(b"half a copy")
@@ -2542,6 +2575,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # A crash between the ledger COMMIT and the unlinking used to leave an
         # empty ledger beside an intact whole-ledger copy. The record is what
         # closes that window: settlement in any later process finishes the job.
+        self.keep_the_index()
         paths = self._two_real_backups()
         call("delete_all_data")
         records = [l.split()[1:] for l in paths.index.read_text().splitlines()[1:]]
@@ -2573,6 +2607,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # The sweep used to stop at the first failure, so the reply's "run it
         # again" made no progress: the retry met the same file first and every
         # copy behind it stayed a restorable whole ledger.
+        self.keep_the_index()
         paths = self._two_real_backups()
         doomed = sorted(p.name for p in paths.backups_dir.glob("*.sqlite"))[0]
         real_unlink = pathlib.Path.unlink
@@ -2837,6 +2872,7 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
         # the erasure is complete. Reporting "the erasure of the backup files
         # stopped part way ... this call cannot say which of them are still
         # there" described a directory this call had just emptied.
+        self.keep_the_index()
         paths = self._two_real_backups()
         real_write, real_fsync = os.write, os.fsync
         armed = []

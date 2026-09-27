@@ -9,10 +9,11 @@ tools_auth.py, tools_refresh.py, tools_destructive.py) that is testable
 without a running MCP session.
 """
 from __future__ import annotations
-import importlib.util, json, os, sys
+import fcntl, importlib.util, json, os, sys, time
 
 import backups
 import ebmode
+import opvault
 import store
 
 TOOLS: dict = {}          # name -> {"description": str, "schema": {...}, "fn": callable}
@@ -22,6 +23,59 @@ PROTOCOL_VERSION = "2024-11-05"
 #: nothing to neutralise.
 SANDBOX_BANNER = ("[SANDBOX] Disposable test world — sandbox application, "
                   "sandbox vault items, sandbox ledger. No real money.")
+
+
+#: THE LIFECYCLE LOCK (issue #72). `delete_all_data` removes the ledger file,
+#: its copies, the exports and the vault items bank-feed created. A call in
+#: another process running at the same time would publish an export after
+#: the sweep, create a vault item after the vault was listed, or write into
+#: a ledger file already removed, and the erasure would still answer
+#: `complete`. So every tool call holds a shared flock on the data directory
+#: itself (no lock file exists to outlive the erasure) and `delete_all_data`
+#: holds it exclusively for its whole call. Seconds a call waits before
+#: refusing as busy; read at call time so tests can lower it.
+LOCK_WAIT_S = 30.0
+EXCLUSIVE_TOOLS = frozenset({"delete_all_data"})
+BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
+        "Try again when it has finished.")
+
+
+LOCK_UNAVAILABLE = ("Refused, nothing was done: the plugin data directory "
+                    "could not be locked (%s).")
+
+
+def _lifecycle_lock(name):
+    """-> `(fd or None, refusal or None)`. The path is the RAW variable,
+    exactly as `tools_read.conn()` and `opvault.record_path()` read it: a
+    normalised spelling could name a different directory, and a lock on
+    that one excludes nothing. An unset variable means no lock (every tool
+    that touches data refuses on it anyway). A directory that does not
+    exist yet is created first, so even the call that creates the ledger
+    runs under the lock; any failure refuses rather than running unlocked."""
+    data = os.environ.get("CLAUDE_PLUGIN_DATA") or ""
+    if not data:
+        return None, None
+    try:
+        os.makedirs(data, mode=0o700, exist_ok=True)
+        fd = os.open(data, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
+    exclusive = name in EXCLUSIVE_TOOLS
+    op = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, op)
+            return fd, None
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None, BUSY % ("" if exclusive else
+                                     ", an erasure of all data")
+            time.sleep(0.05)
+        except OSError as exc:
+            os.close(fd)
+            return None, LOCK_UNAVAILABLE % (type(exc).__name__,)
 
 
 def _result(id_, payload):
@@ -82,10 +136,18 @@ def handle(req: dict) -> dict | None:
         # reply of its own — and this is the only place that log is
         # rendered: on success, refusal and exception alike.
         token = backups.open_log()
+        lock_fd, busy = _lifecycle_lock(params.get("name"))
         try:
             try:
-                store.check_mode_marker(os.environ.get("CLAUDE_PLUGIN_DATA"))
-                out = tool["fn"](params.get("arguments") or {})
+                if busy:
+                    out = busy
+                else:
+                    # Every `op` child holds the call's lock too (`opvault`).
+                    opvault.INHERIT_FDS = (lock_fd,) if lock_fd is not None \
+                        else ()
+                    store.check_mode_marker(
+                        os.environ.get("CLAUDE_PLUGIN_DATA"))
+                    out = tool["fn"](params.get("arguments") or {})
             except Exception as exc:                   # surfaced, never swallowed
                 # A capability tool's link exists as bytes on its own path,
                 # and a stdlib parser quotes the bytes it chokes on (a status
@@ -98,6 +160,9 @@ def handle(req: dict) -> dict | None:
                 else:
                     out = f"error: {type(exc).__name__}: {exc}"
         finally:
+            opvault.INHERIT_FDS = ()
+            if lock_fd is not None:
+                os.close(lock_fd)
             settled = backups.close_log(token)
         head = "\n".join(p for p in (SANDBOX_BANNER if sandbox else "",
                                      settled) if p)

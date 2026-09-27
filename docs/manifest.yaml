@@ -134,15 +134,19 @@
 
 - doc: architecture/backups-erasure.md
   summary: What delete_all_data removes beside the ledger, in what order, what is durable when, and what each failure may say.
-  when_changing: the erasure of the backup copies, the prune records it writes, or what a stuck erasure reports
+  when_changing: the erasure of the backup copies, the prune records it writes, what a stuck erasure reports, the clean slate or the lifecycle lock
   covers:
     - plugins/bank-feed/server/backups.py
     - plugins/bank-feed/server/tools_backup.py
     - plugins/bank-feed/server/tools_destructive.py
+    - plugins/bank-feed/server/opvault.py
+    - plugins/bank-feed/server/bank_feed_server.py
   tests:
     - tests/test_backups.py
     - tests/test_tools_backup.py
     - tests/test_tools_destructive.py
+    - tests/test_clean_slate.py
+    - tests/test_opvault.py
   related: [architecture/backups-and-restore.md, reference/tool-surface.md]
 
 - doc: architecture/backups-settlement.md

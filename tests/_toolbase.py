@@ -545,6 +545,15 @@ class FakeVault:
         self.created.append((title, vault))
         self.values["op://%s/%s/private key" % (vault, title)] = TEST_KEY_PEM
 
+    def erase_recorded(self):
+        """opvault.erase_recorded as the clean slate sees it (#72): the
+        titles proven gone and `(title, reason)` for what was kept. Counted,
+        so a test can prove the vault is never touched while a consent is
+        still held."""
+        self.erase_calls = getattr(self, "erase_calls", 0) + 1
+        return (list(getattr(self, "erase_gone", [])),
+                list(getattr(self, "erase_kept", [])))
+
 
 class FakeFB:
     """fbauth as tools_auth sees it. Behavior is parameterised per test;

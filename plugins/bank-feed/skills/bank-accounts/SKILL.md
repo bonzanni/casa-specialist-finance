@@ -208,6 +208,12 @@ the names understate two of them and overstate one.
   the whole ledger, so leaving them would leave the data restorable) **and asks every bank to withdraw its consent** — real
   calls to the provider, not a local-only wipe. This is the one tool that can
   end bank access everywhere at once. Say so before it runs, not after.
+  Once every consent is withdrawn it is a clean slate: it also removes the
+  exports it published, deletes the 1Password items bank-feed created (they
+  sit in 1Password's Recently Deleted for 30 days), and resets the ledger to a
+  first start. It never deletes an item it did not record creating, and it
+  cannot remove the Enable Banking application registration; relay the lines
+  that name those.
 
 Two things about `delete_all_data`'s output that read as errors and are not:
 

@@ -24,11 +24,16 @@ provider-side unlink is not built.
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import re
+import shutil
+import stat
+from pathlib import Path
 
 import apply
 import backups
 import callbacks
+import casa_handoff
 import store
 import tools_auth
 import tools_read
@@ -56,6 +61,15 @@ DESTRUCTIVE_TOOLS = ("unlink_bank", "purge", "forget_local_account",
 #: session identifier, which is bearer-equivalent. The list is a whitelist on
 #: purpose: a key added by a later feature is deleted by default.
 STRUCTURAL_META_KEYS = ("schema_version", "account_secret", "backup_restore_op")
+
+#: Kept by the row erasure for the consent withdrawal that follows it (issue
+#: #71). `tools_auth._bare_ais` resolves the application id env-first and
+#: from this key second, so erasing it before the banks are asked left an
+#: install whose id only setup recorded unable to ask any bank, and the
+#: consents it kept unable to be withdrawn by any later call. It is not
+#: structural: it goes with the ledger file in the teardown, which runs only
+#: once no consent is left to withdraw.
+WITHDRAWAL_META_KEYS = ("setup.app_id",)
 
 #: Every table `delete_all_data` empties unconditionally. `occurrence_alloc` is
 #: on the list because it is per-account data — an unsalted sha256 over amount,
@@ -1157,6 +1171,186 @@ def _second_sweep(paths, handle, state, erase_op):
     return True, line
 
 
+#: The producer name `export_history` publishes under (`tools_refresh`).
+EXPORT_PRODUCER = "bank-feed"
+
+#: Always said by a clean slate (issue #72): what no tool here can erase.
+_NOT_ERASABLE = (
+    "Not erasable by any tool here: the Enable Banking application "
+    "registration and its account whitelist (their API offers no deletion; "
+    "remove them in the Enable Banking control panel), and the deleted "
+    "1Password items, which 1Password keeps in Recently Deleted for 30 days "
+    "(restore or purge them in the 1Password apps).")
+
+
+def _erase_exports():
+    """Remove every file `export_history` published into casa's handoff
+    folder. -> `(published ids removed, failure or None)`. The producer
+    directory is bank-feed's own by the handoff contract, so everything
+    under it goes, staging included; a link there is removed as a link and
+    never followed."""
+    pdir = Path(casa_handoff.root_dir()) / EXPORT_PRODUCER
+    try:
+        st = os.lstat(str(pdir))
+    except FileNotFoundError:
+        return 0, None
+    except OSError as exc:
+        return 0, type(exc).__name__
+    if not stat.S_ISDIR(st.st_mode):
+        return 0, "the export folder is not a directory"
+    removed = 0
+    try:
+        for entry in sorted(os.scandir(str(pdir)), key=lambda e: e.name):
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
+                if not entry.name.startswith(casa_handoff.STAGING_PREFIX):
+                    removed += 1
+            else:
+                os.unlink(entry.path)
+        os.rmdir(str(pdir))
+    except OSError as exc:
+        return removed, type(exc).__name__
+    return removed, None
+
+
+def _reset_ledger(c):
+    """Clear `meta` to what a first open writes, with a fresh local secret
+    and instance id. Runs only once no row of any kind is left (the gate), so
+    after it nothing in the file links it to the erased past. -> failure
+    class name or None."""
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("DELETE FROM meta WHERE key <> 'schema_version'")
+        # The AUTOINCREMENT counters are allocation history of the erased
+        # install (the next rule would be #2, not #1), and VACUUM keeps them.
+        # Every table they count is empty by now.
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                     " AND name='sqlite_sequence'").fetchone():
+            c.execute("DELETE FROM sqlite_sequence")
+        store.local_secret(c)
+        store.ensure_ledger_instance(c)
+        c.execute("COMMIT")
+    except Exception as exc:                 # noqa: BLE001 — class name only
+        if c.in_transaction:
+            c.execute("ROLLBACK")
+        return type(exc).__name__
+    return None
+
+
+def _remove_residue(paths):
+    """Remove the backup subsystem's files and the other mode's orphans.
+    -> `(count removed, [failures])`. The ledger file itself is never
+    touched: another process may hold it open, and SQLite deletes a WAL by
+    NAME when such a connection closes, which would take the next ledger's
+    WAL with it. Under the lifecycle lock nothing holds these files."""
+    removed, failures = 0, []
+    data = paths.db.parent
+    other = store._other_db_filename()
+    targets = [paths.backups_dir, paths.index]
+    try:
+        names = sorted(os.listdir(str(data)))
+    except OSError as exc:
+        return 0, [type(exc).__name__]
+    targets += [data / n for n in names if n.startswith(paths.snapshot_prefix)]
+    if other in names:
+        # A whole ledger of the other mode: it can hold consents, and it is
+        # that mode's `delete_all_data` that may withdraw them.
+        failures.append("the other mode's ledger (%s) exists; run "
+                        "delete_all_data in that mode" % other)
+    else:
+        targets += [data / n for n in names if n.startswith(other)]
+    for t in targets:
+        try:
+            st = os.lstat(str(t))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append(type(exc).__name__)
+            continue
+        try:
+            if stat.S_ISDIR(st.st_mode):
+                shutil.rmtree(str(t))
+            else:
+                os.unlink(str(t))
+            removed += 1
+        except OSError as exc:
+            failures.append(type(exc).__name__)
+    try:
+        fd = os.open(str(data), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        failures.append(type(exc).__name__)
+    return removed, failures
+
+
+def _clean_slate(c, paths):
+    """Phase 3 (issue #72): the exports, the vault items bank-feed created,
+    and the ledger's links to its past. Runs only when no consent is left to
+    withdraw. -> `(ok, [report lines])`; never raises."""
+    lines, ok = [], True
+    exported, failure = _erase_exports()
+    if exported:
+        lines.append("%d export file(s) published to casa's handoff folder "
+                     "were removed." % exported)
+    if failure:
+        ok = False
+        lines.append("WARNING — the removal of the published exports did not "
+                     "finish (%s); they are in casa's handoff folder under "
+                     "%s/ until casa's %d-day sweep. Run delete_all_data again "
+                     "to finish." % (failure, EXPORT_PRODUCER,
+                                     casa_handoff.RETENTION_S // 86400))
+    try:
+        gone, kept = tools_auth.OPVAULT.erase_recorded()
+    except Exception as exc:                 # noqa: BLE001 — never raises
+        gone, kept = [], [("the vault creation record", type(exc).__name__)]
+    if gone:
+        lines.append("Deleted from 1Password, as items bank-feed created: %s."
+                     % ", ".join(_safe(t) for t in gone))
+    if kept:
+        ok = False
+        lines.append("WARNING — %d 1Password item(s) bank-feed created were NOT "
+                     "deleted: %s. The record of them is kept; run "
+                     "delete_all_data again when 1Password answers, or delete "
+                     "them by hand." % (len(kept), "; ".join(
+                         "%s (%s)" % (_safe(t), _safe(r)) for t, r in kept)))
+    unproven = [t for t in (tools_auth.OPVAULT.KEY_ITEM,
+                            tools_auth.OPVAULT.CRED_ITEM)
+                if t not in gone and t not in [k[0] for k in kept]]
+    if unproven:
+        lines.append("Not deleted, because nothing here records bank-feed "
+                     "creating them: any 1Password item titled %s. If an "
+                     "earlier version of bank-feed created them, delete them by "
+                     "hand; an item you made yourself is never touched."
+                     % " or ".join("'%s'" % t for t in unproven))
+    failure = _reset_ledger(c)
+    if failure:
+        ok = False
+        lines.append("WARNING — the ledger's last identifying keys (its local "
+                     "account_id secret, its instance id and its application "
+                     "id) could not be cleared (%s). Run delete_all_data again "
+                     "to finish." % failure)
+    else:
+        lines.append("The ledger file was reset to what a first start creates: "
+                     "a new local account_id secret and a new ledger instance "
+                     "id, and nothing else but its schema version. The ledger "
+                     "instance id was replaced by a new one, so a workflow "
+                     "bound to the old one now sees a different ledger.")
+    removed, failures = _remove_residue(paths)
+    if failures:
+        ok = False
+        lines.append("WARNING — %d backup or leftover file(s) could not be "
+                     "removed beside the ledger (%s). Run delete_all_data again "
+                     "to finish." % (len(failures), "; ".join(failures)))
+    elif removed:
+        lines.append("The backup index and every leftover backup file beside "
+                     "the ledger were removed (%d)." % removed)
+    lines.append(_NOT_ERASABLE)
+    return ok, lines
+
+
 @register("delete_all_data",
           "Erase the entire local ledger. Protected: casa demands an operator "
           "grant bound to this exact call.",
@@ -1267,9 +1461,9 @@ def delete_all_data(args: dict) -> str:
         # identifiers. Everything non-structural goes; the structural keys are
         # named explicitly, so a key added later is deleted by default rather
         # than surviving because nobody remembered it.
+        kept = STRUCTURAL_META_KEYS + WITHDRAWAL_META_KEYS
         c.execute("DELETE FROM meta WHERE key NOT IN (%s)"
-                  % ", ".join("?" * len(STRUCTURAL_META_KEYS)),
-                  tuple(STRUCTURAL_META_KEYS))
+                  % ", ".join("?" * len(kept)), kept)
         # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69; operator,
         # 2026-09-27). This is the erasure an uninstall runs, and an erased
         # ledger is not the same ledger emptied: a workflow bound to the old
@@ -1467,6 +1661,7 @@ def delete_all_data(args: dict) -> str:
     # A RETRY'S OWN SETTLEMENT CAN FINISH THE EARLIER CALL'S SWEEP before this
     # call's sweep runs; what it removed there is the dispatcher's settlement
     # sentence (#48), and `erased_backups` below counts this call's own sweep.
+    copies_said = ""
     if erased_backups is not None:
         # EVERY NUMBER HERE COUNTS ONLY WHAT WENT, one per shape
         # (`Erasure.went`): an indexed copy leaves a `prune` record, a copy in
@@ -1476,8 +1671,8 @@ def delete_all_data(args: dict) -> str:
         # erase says nothing at all — "0 backup file(s) were erased" reads as
         # a failure of a call that succeeded.
         if erased_backups.removed_any():
-            done += (" %s were erased too — each is a copy, or part of a copy, "
-                     "of this ledger." % erased_backups.went())
+            copies_said += (" %s were erased too — each is a copy, or part of "
+                            "a copy, of this ledger." % erased_backups.went())
         if erased_backups.index_warning:
             # The sweep finished and only the terminal record's FLUSH did not.
             # The line is readable, so the erasure is complete and the next
@@ -1485,9 +1680,11 @@ def delete_all_data(args: dict) -> str:
             # durability, not in the erasure, and saying the sweep "stopped
             # part way" — which is what this used to print — described an empty
             # directory as one still holding copies.
-            done += (" Every backup copy was erased; %s."
-                     % backups.record_event("completion", True,
-                                            erased_backups.index_warning))
+            copies_said += (" Every backup copy was erased; %s."
+                            % backups.record_event(
+                                "completion", True,
+                                erased_backups.index_warning))
+    done += copies_said
 
     # PAST THIS LINE THIS TOOL DOES NOT RAISE. Everything below is either
     # irreversible at a bank or already committed here, so an exception would
@@ -1509,6 +1706,15 @@ def delete_all_data(args: dict) -> str:
 
     handles_ok, handles_note, sweep_lines, copies_ok = _destroy_proven_handles(
         c, paths)
+
+    # THE CLEAN SLATE RUNS ONLY WHEN NOTHING IS LEFT TO WITHDRAW (issue #72).
+    # Its vault half deletes the private key every withdrawal needs, and its
+    # ledger half the application id, so a consent still held here keeps
+    # both; the reply is then `incomplete` and a retry finishes from here.
+    slate_ok, slate_lines = None, []
+    if (halted is None and not kept and handles_ok and copies_ok
+            and backups_warning is None):
+        slate_ok, slate_lines = _clean_slate(c, paths)
 
     # THE ITEM THAT COSTS MONEY LEADS. What became of the banks'
     # own permissions is the only part of this call that can still cost the
@@ -1622,6 +1828,16 @@ def delete_all_data(args: dict) -> str:
     if consents:
         head += " The next line, not this one, says what became of them."
 
+    if slate_ok is not None:
+        # The ledger was reset, so the survivors sentence of the row erasure
+        # no longer describes it; the clean slate's own lines do.
+        done = ("Done. Every data row and every metadata row went with the "
+                "data, including the renewal-handoff records whose keys embed "
+                "a bank session identifier." + copies_said)
+    elif tools_auth._meta_get(c, "setup.app_id") is not None:
+        done += (" The Enable Banking application id was kept, because a "
+                 "consent above is still held and withdrawing it needs the id; "
+                 "it goes when a retry leaves no consent behind.")
     notice = [head] + consents + [
         "What re-linking WOULD restore: a fresh SCA reopens each bank's "
         "deep-history window, so re-linking recovers that bank's history as "
@@ -1647,6 +1863,7 @@ def delete_all_data(args: dict) -> str:
     if not handles_ok:
         notice.append(handles_note)
     notice.extend(sweep_lines)
+    notice.extend(slate_lines)
     reclaimed, reclaim_line = _reclaim(c)
     notice.append(reclaim_line)
     notice.append(GATE_NOTE)
@@ -1659,7 +1876,11 @@ def delete_all_data(args: dict) -> str:
     # erased rows, session ids included, readable in the free pages and the WAL.
     # Every refusal before this point returns prose, which casa reads as not
     # complete, so only this return needs the verdict.
+    # And, since issue #72, only when the clean slate ran and finished: the
+    # exports, the vault items bank-feed created and the ledger's links to
+    # its past are part of "nothing this plugin holds".
     complete = (halted is None and not kept and handles_ok and copies_ok
-                and backups_warning is None and reclaimed)
+                and backups_warning is None and reclaimed
+                and slate_ok is True)
     return {"erasure": "complete" if complete else "incomplete",
             "report": "\n".join(notice)}

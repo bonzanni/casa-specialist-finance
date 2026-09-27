@@ -29,7 +29,7 @@ Start with the row that matches what you are about to change.
 | the component layout, the plugin split, or how a tool call is dispatched | [`architecture/overview.md`](architecture/overview.md) |
 | the deny sweep, its pattern file, the secret scanner, the exception inventory, the push hook, hook installation, or the release-tag route | [`contributing/publication-guards.md`](contributing/publication-guards.md) |
 | the documentation rules, the corpus verifier, or the coverage ledger | [`contributing/doc-contract.md`](contributing/doc-contract.md) |
-| the erasure of the backup copies, the prune records it writes, or what a stuck erasure reports | [`architecture/backups-erasure.md`](architecture/backups-erasure.md) |
+| the erasure of the backup copies, the prune records it writes, what a stuck erasure reports, the clean slate or the lifecycle lock | [`architecture/backups-erasure.md`](architecture/backups-erasure.md) |
 | the setup tools, the reconcile ladder, or what setup provisions | [`reference/setup-flow.md`](reference/setup-flow.md) |
 <!-- END ROUTING -->
 
