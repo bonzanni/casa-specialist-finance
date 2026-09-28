@@ -390,78 +390,106 @@ TAG_REVISIONS_TABLE = "tag_revisions"
 #: is missing.
 TAG_REVISION_TRIGGERS = ("trg_tag_rev_ai", "trg_tag_rev_ad", "trg_tag_rev_au")
 
-_BUMP = ("INSERT INTO meta(key, value) VALUES ('%s', '1') ON CONFLICT(key)"
-         " DO UPDATE SET value = CAST(value AS INTEGER) + 1;"
-         % TAG_REVISION_SEQ_KEY)
+#: The note revision (issue #89): the same machine over `transaction_notes`,
+#: with its own counter, table and triggers.
+NOTE_REVISION_SEQ_KEY = "note_revision_seq"
+NOTE_REVISIONS_TABLE = "note_revisions"
+NOTE_REVISION_TRIGGERS = ("trg_note_rev_ai", "trg_note_rev_ad",
+                          "trg_note_rev_au")
 
 
-def _stamp(ref: str) -> str:
-    return ("INSERT INTO tag_revisions(row_id, revision) VALUES (%s,"
-            " (SELECT CAST(value AS INTEGER) FROM meta WHERE key='%s'))"
-            " ON CONFLICT(row_id) DO UPDATE SET revision = excluded.revision;"
-            % (ref, TAG_REVISION_SEQ_KEY))
+def _revision_schema(source: str, table: str, seq_key: str,
+                     triggers: tuple, update_of: str) -> str:
+    """The table and three triggers that keep `table` = per-row revision of
+    `source`'s rows, stamped from the `meta` counter `seq_key`. `update_of`
+    is the UPDATE trigger's column clause ("" for any column)."""
+    bump = ("INSERT INTO meta(key, value) VALUES ('%s', '1') ON CONFLICT(key)"
+            " DO UPDATE SET value = CAST(value AS INTEGER) + 1;" % seq_key)
+
+    def stamp(ref):
+        return ("INSERT INTO %s(row_id, revision) VALUES (%s,"
+                " (SELECT CAST(value AS INTEGER) FROM meta WHERE key='%s'))"
+                " ON CONFLICT(row_id) DO UPDATE SET revision = excluded.revision;"
+                % (table, ref, seq_key))
+    ai, ad, au = triggers
+    return """
+CREATE TABLE IF NOT EXISTS %(table)s (
+  row_id INTEGER PRIMARY KEY NOT NULL,
+  revision INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS %(ai)s
+AFTER INSERT ON %(source)s BEGIN
+  %(bump)s
+  %(new)s
+END;
+CREATE TRIGGER IF NOT EXISTS %(ad)s
+AFTER DELETE ON %(source)s BEGIN
+  %(bump)s
+  %(old)s
+END;
+CREATE TRIGGER IF NOT EXISTS %(au)s
+AFTER UPDATE%(of)s ON %(source)s BEGIN
+  %(bump)s
+  %(old)s
+  %(new)s
+END;
+""" % {"table": table, "source": source, "ai": ai, "ad": ad, "au": au,
+       "of": " OF " + update_of if update_of else "", "bump": bump,
+       "old": stamp("old.row_id"), "new": stamp("new.row_id")}
 
 
-# The tag revision (issue #86). An export consumer caches (ledger instance,
-# row_id, tag_revision) and reads an EQUAL revision as "the row's tag set is
-# unchanged", so a missed bump ships a stale classification. SQLite keeps it,
-# not the call sites: every row-level change to transaction_tags fires one of
+# The tag revision (issue #86) and the note revision (issue #89). An export
+# consumer caches (ledger instance, row_id, revision) and reads an EQUAL
+# revision as "the row's tag set / note journal is unchanged", so a missed
+# bump ships a stale classification or hides a newer note. SQLite keeps it,
+# not the call sites: every row-level change to the source table fires one of
 # these, whichever code path (or plugin version) makes it, and a no-op
 # `INSERT OR IGNORE` / skipped `UPDATE OR IGNORE` row fires nothing.
 #
-# The counter is ONE ledger-wide value in `meta`, because `meta` is the table
-# a restore never rolls back (`backups.KEEP_LIVE_TABLES`, where
-# `tag_revisions` is too): an AUTOINCREMENT would roll back with the
+# Each counter is ONE ledger-wide value in `meta`, because `meta` is the
+# table a restore never rolls back (`backups.KEEP_LIVE_TABLES`, where both
+# revision tables are too): an AUTOINCREMENT would roll back with the
 # restored `sqlite_sequence` and re-issue values already exported. A restore
-# rewrites `transaction_tags` by DML, so these fire and stamp every row it
-# touches above any value ever issued. The counter and `ledger_instance` are
+# rewrites both source tables by DML, so these fire and stamp every row it
+# touches above any value ever issued. The counters and `ledger_instance` are
 # erased together (every non-whitelisted meta key goes in both total
 # erasers), so a restarted count always comes with a new instance id.
 #
+# The note trigger fires on an UPDATE of ANY column: the journal is
+# append-only, and its one updater (apply_plan's supersede migration)
+# re-points row_id; any other edit is a journal change too.
+#
 # No schema bump — that would make every existing backup unrestorable
 # (`backups.restore`); `open_db` installs these on a ledger that lacks them.
-_TAG_REVISION_SCHEMA = """
-CREATE TABLE IF NOT EXISTS tag_revisions (
-  row_id INTEGER PRIMARY KEY NOT NULL,
-  revision INTEGER NOT NULL);
-CREATE TRIGGER IF NOT EXISTS trg_tag_rev_ai
-AFTER INSERT ON transaction_tags BEGIN
-  %(bump)s
-  %(new)s
-END;
-CREATE TRIGGER IF NOT EXISTS trg_tag_rev_ad
-AFTER DELETE ON transaction_tags BEGIN
-  %(bump)s
-  %(old)s
-END;
-CREATE TRIGGER IF NOT EXISTS trg_tag_rev_au
-AFTER UPDATE OF row_id, tag ON transaction_tags BEGIN
-  %(bump)s
-  %(old)s
-  %(new)s
-END;
-""" % {"bump": _BUMP, "old": _stamp("old.row_id"), "new": _stamp("new.row_id")}
+_TAG_REVISION_SCHEMA = _revision_schema(
+    "transaction_tags", TAG_REVISIONS_TABLE, TAG_REVISION_SEQ_KEY,
+    TAG_REVISION_TRIGGERS, "row_id, tag")
+_NOTE_REVISION_SCHEMA = _revision_schema(
+    "transaction_notes", NOTE_REVISIONS_TABLE, NOTE_REVISION_SEQ_KEY,
+    NOTE_REVISION_TRIGGERS, "")
+_REVISION_SCHEMA = _TAG_REVISION_SCHEMA + _NOTE_REVISION_SCHEMA
+_REVISION_NAMES = ((TAG_REVISIONS_TABLE,) + TAG_REVISION_TRIGGERS
+                   + (NOTE_REVISIONS_TABLE,) + NOTE_REVISION_TRIGGERS)
 
-_SCHEMA += _TAG_REVISION_SCHEMA
+_SCHEMA += _REVISION_SCHEMA
 
 
-def _tag_revision_missing(conn: sqlite3.Connection) -> bool:
+def _revisions_missing(conn: sqlite3.Connection) -> bool:
     names = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE name IN (%s)"
-        % ", ".join("?" * (1 + len(TAG_REVISION_TRIGGERS))),
-        (TAG_REVISIONS_TABLE,) + TAG_REVISION_TRIGGERS)}
-    return len(names) != 1 + len(TAG_REVISION_TRIGGERS)
+        % ", ".join("?" * len(_REVISION_NAMES)), _REVISION_NAMES)}
+    return len(names) != len(_REVISION_NAMES)
 
 
-def _ensure_tag_revision(conn: sqlite3.Connection) -> None:
-    """Install the tag revision on a ledger from before it (issue #86).
-    FAILS CLOSED: a connection handed out without the triggers would write
-    tag changes no revision records — exactly the silent failure they exist
-    for — so an install that cannot take the write lock fails the open."""
-    if not _tag_revision_missing(conn):
+def _ensure_revisions(conn: sqlite3.Connection) -> None:
+    """Install the tag and note revisions on a ledger from before either
+    (issues #86, #89). FAILS CLOSED: a connection handed out without the
+    triggers would write changes no revision records — exactly the silent
+    failure they exist for — so an install that cannot take the write lock
+    fails the open."""
+    if not _revisions_missing(conn):
         return
     try:
-        conn.executescript("BEGIN IMMEDIATE;\n" + _TAG_REVISION_SCHEMA
+        conn.executescript("BEGIN IMMEDIATE;\n" + _REVISION_SCHEMA
                            + "\nCOMMIT;\n")
     except sqlite3.Error as exc:
         if conn.in_transaction:
@@ -470,7 +498,7 @@ def _ensure_tag_revision(conn: sqlite3.Connection) -> None:
         if _is_busy(exc):
             raise StoreError(_BUSY_OPEN % "another process holds it locked"
                              ) from None
-        raise StoreError("could not install the tag revision: %s"
+        raise StoreError("could not install the revisions: %s"
                          % type(exc).__name__) from None
 
 # Forward-only migrations: {target_version: (sql, ...)}. Anything _SCHEMA
@@ -1133,7 +1161,7 @@ def _open_locked(db: Path) -> sqlite3.Connection:
     elif current < SCHEMA_VERSION:
         snapshot_before_migration(db)     # before any schema change
         _migrate(conn, current)
-    _ensure_tag_revision(conn)
+    _ensure_revisions(conn)
 
     # The ledger instance id (issue #69), minted once per database FILE: at
     # creation, or at the first open of a ledger that predates it. Only when

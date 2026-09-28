@@ -77,7 +77,7 @@ alone is enough:
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
-| `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it; the reply names the ledger instance id, and no file is written when that id cannot be recorded. Every row ends with `tags` (sorted, comma-joined in CSV, a list in JSONL) and `tag_revision`, which changes whenever the row's tags do — see `architecture/annotations-and-rules.md`. |
+| `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it; the reply names the ledger instance id, and no file is written when that id cannot be recorded. Every row ends with `tags` (sorted, comma-joined in CSV, a list in JSONL) `tag_revision`, which changes whenever the row's tags do, and `note_revision`, which changes whenever the row's notes do — see `architecture/annotations-and-rules.md`. |
 | `backup` | Take a consistent copy of the whole ledger. `reason` is `weekly` or `manual`; retention keeps the 8 most recent of each. |
 | `list_backups` | The ledger instance id (a workflow's `expected_ledger`), every backup with its time, size, reason and state; the registered workflow strings; the restore events; and the restore generation. Settles any pending backup or restore first, which can append to the index — why this sits under Writing rather than Reading. |
 

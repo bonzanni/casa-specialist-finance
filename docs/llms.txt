@@ -5,7 +5,7 @@ repository. Code is the source of truth; these files are a map.
 
 ## Architecture
 
-- [architecture/annotations-and-rules.md](architecture/annotations-and-rules.md): Tags, the tag revision, the append-only note journal, the deterministic rulebook, and the classifier split.
+- [architecture/annotations-and-rules.md](architecture/annotations-and-rules.md): Tags, the tag and note revisions, the append-only note journal, the deterministic rulebook, and the classifier split.
 - [architecture/backups-and-restore.md](architecture/backups-and-restore.md): Backups, the event index beside the ledger, settlement, the minted restore point, and the in-place restore.
 - [architecture/backups-erasure.md](architecture/backups-erasure.md): What the two uninstall erasers remove beside the ledger, in what order, what is durable when, and what each failure may say.
 - [architecture/backups-settlement.md](architecture/backups-settlement.md): Settlement of the backup index — the terminal record each pending operation gets, and what settlement reports.
