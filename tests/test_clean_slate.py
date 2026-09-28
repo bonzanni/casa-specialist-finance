@@ -286,6 +286,24 @@ class TestTheLifecycleLock(CleanSlateBase):
         self.assertIn("an erasure of all data", out)
         self.assertEqual(self.exports(), [])
 
+    def test_unlink_bank_runs_alone(self):
+        # Issue #84: a withdrawal must not interleave with any other call —
+        # each interleaving made its reply false or left a note behind.
+        self.assertIn("unlink_bank", bank_feed_server.EXCLUSIVE_TOOLS)
+        self.session()
+        self.hold(fcntl.LOCK_SH)             # another process mid-call
+        out = dispatch("unlink_bank", consent_ref=tools_auth._consent_ref(
+            SESSION_ID))
+        self.assertIn("Refused, nothing was done", out)
+        self.assertEqual(self.ais.deleted, [])
+        self.assertIsNone(self.raw.execute(
+            "SELECT closed_at FROM sessions").fetchone()[0])
+
+    def test_a_running_withdrawal_makes_another_call_refuse(self):
+        self.hold(fcntl.LOCK_EX)             # an unlink_bank mid-call
+        out = dispatch("consent_status")
+        self.assertIn("a bank consent withdrawal", out)
+
     def test_a_data_directory_not_there_yet_is_created_and_locked(self):
         # The first call ever creates the ledger: it must hold the lock too,
         # or an erasure could run beside it.

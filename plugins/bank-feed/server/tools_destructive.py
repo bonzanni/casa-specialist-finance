@@ -1109,33 +1109,6 @@ def _withdraw_open_consents(c):
     return gone, kept
 
 
-def _reconcile_kept(c, kept):
-    """Split the consents the withdrawal pass kept into those still open and
-    those another call closed since, as the ledger says NOW. Never raises: a
-    failed read keeps the pass's own account, which errs toward "held"."""
-    still, closed = [], []
-    try:
-        for r in kept:
-            now = c.execute("SELECT status, closed_at FROM sessions"
-                            " WHERE session_id=?", (r["session_id"],)).fetchone()
-            if now is not None and not now["closed_at"]:
-                still.append(r)
-            else:
-                closed.append(dict(r, status=now["status"] if now else None))
-    except Exception:                        # noqa: BLE001 — see docstring
-        return kept, []
-    return still, closed
-
-
-def _closed_how(status) -> str:
-    if status == apply.OPERATOR_WITHDRAWN_STATUS:
-        return ("you recorded that you withdrew it at the bank; the provider "
-                "never confirmed it")
-    if status is None:
-        return "its row was already removed"
-    return "the provider confirmed the withdrawal"
-
-
 def _destroy_proven_handles(c, paths):
     """Delete the session rows the provider PROVED gone — and only those.
 
@@ -1961,15 +1934,8 @@ def delete_all_data(args: dict) -> str:
         # nobody proved dead survives and stays revocable.
         gone, kept, halted = [], [], type(exc).__name__
 
-    # The pass's `kept` is what the banks said; the LEDGER may have moved
-    # since (issue #84): a flagged unlink_bank alongside can close a consent
-    # while the bank is being asked. Re-read before the sweep, so a consent
-    # closed by then is swept like any closed row — and again after it, so
-    # one closed later is reported as closed, never as held open.
-    kept, meanwhile = _reconcile_kept(c, kept)
     handles_ok, handles_note, sweep_lines, copies_ok = _destroy_proven_handles(
         c, paths)
-    kept, late = _reconcile_kept(c, kept)
 
     # THE CLEAN SLATE RUNS ONLY WHEN NOTHING IS LEFT TO WITHDRAW (issue #72).
     # Its vault half deletes the private key every withdrawal needs, and its
@@ -2014,21 +1980,6 @@ def delete_all_data(args: dict) -> str:
                ", so their local rows went with the rest." if handles_ok else
                ". Their local rows could not be removed with the rest — the "
                "note below says what is left and how to clear it."))
-    for row in meanwhile:
-        consents.append(
-            "Closed by another call while this erasure ran: %s — consent_ref "
-            "%s (%s). It is no longer held here as an open consent."
-            % (_safe(row["aspsp_name"]) or "an unnamed bank",
-               tools_auth._consent_ref(row["session_id"]),
-               _closed_how(row.get("status"))))
-    for row in late:
-        consents.append(
-            "Closed by another call after this erasure swept the closed "
-            "consents: %s — consent_ref %s (%s). Its row is still here; run "
-            "delete_all_data again to clear it."
-            % (_safe(row["aspsp_name"]) or "an unnamed bank",
-               tools_auth._consent_ref(row["session_id"]),
-               _closed_how(row.get("status"))))
     if kept:
         # Saying "erased everything" here would be the lie this whole
         # ordering exists to avoid.
@@ -2117,7 +2068,7 @@ def delete_all_data(args: dict) -> str:
                 "a bank session identifier." + copies_said)
     elif tools_auth._meta_get(c, "setup.app_id") is not None:
         # Branched on whether a consent IS still held: the clean slate also
-        # waits on a sweep, a copy or a consent closed after the sweep.
+        # waits on the session-row sweep and the backup copies.
         done += (" The Enable Banking application id was kept, because a "
                  "consent above is still held and withdrawing it needs the id; "
                  "it goes when a retry leaves no consent behind." if kept or halted
@@ -2169,11 +2120,7 @@ def delete_all_data(args: dict) -> str:
     # never blocks `complete`, which would keep an uninstall from ever
     # finishing. It is named in the report and, for casa, in
     # `unrecorded_vault_items` (issue #82).
-    # `late`: a consent closed after the sweep still has its row here. It
-    # needs no application id or key to clear, so the slate above may run,
-    # but the erasure is not complete until a retry sweeps that row.
-    complete = (halted is None and not kept and not late and handles_ok
-                and copies_ok
+    complete = (halted is None and not kept and handles_ok and copies_ok
                 and backups_warning is None and reclaimed
                 and slate_ok is True)
     result = {"erasure": "complete" if complete else "incomplete",

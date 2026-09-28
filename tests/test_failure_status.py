@@ -745,50 +745,6 @@ class TestOperatorSettlement(FailureBase):
             self.raw, SESSION_ID, revoked=False, operator_withdrawn=True))
         self.assertIsNone(self.session_row()["closed_at"])
 
-    def test_an_erasure_reports_a_consent_settled_meanwhile_as_closed(self):
-        # delete_all_data's withdrawal fails; while the bank is being asked, a
-        # flagged unlink alongside settles the consent. The report must not
-        # call it held open, and the erasure can complete.
-        self.failed_once()
-        raw = self.raw
-
-        class SettledDuringErasure(FakeAIS):
-            def delete_session(self, sid):
-                apply.record_revocation(raw, sid, revoked=False,
-                                        operator_withdrawn=True)
-                raise eb_ais.ApiError(401, "delete_session")
-        self.ais_factory(SettledDuringErasure())
-        result = tools_destructive.delete_all_data({})
-        self.assertEqual(result["erasure"], "complete")
-        out = result["report"]
-        self.assertIn("Closed by another call while this erasure ran", out)
-        self.assertIn("you recorded that you withdrew it at the bank", out)
-        self.assertNotIn("could not be withdrawn", out)
-        self.assertEqual(self.raw.execute(
-            "SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
-
-    def test_a_consent_closed_after_the_sweep_keeps_the_erasure_incomplete(self):
-        self.failed_once()
-        raw = self.raw
-        real = tools_destructive._destroy_proven_handles
-
-        def sweep_then_settle(c, paths):
-            result = real(c, paths)
-            apply.record_revocation(raw, SESSION_ID, revoked=False,
-                                    operator_withdrawn=True)
-            return result
-        self.addCleanup(setattr, tools_destructive, "_destroy_proven_handles",
-                        real)
-        tools_destructive._destroy_proven_handles = sweep_then_settle
-        self.ais.raise_on_delete = eb_ais.ApiError(401, "delete_session")
-        result = tools_destructive.delete_all_data({})
-        self.assertEqual(result["erasure"], "incomplete")
-        out = result["report"]
-        self.assertIn("after this erasure swept the closed consents", out)
-        self.assertNotIn("could not be withdrawn", out)
-        self.assertEqual(self.raw.execute(
-            "SELECT COUNT(*) FROM sessions").fetchone()[0], 1)
-
     def test_the_erasure_then_completes(self):
         self.failed_once()
         call("unlink_bank", consent_ref=self.ref(), withdrawn_at_bank=True)

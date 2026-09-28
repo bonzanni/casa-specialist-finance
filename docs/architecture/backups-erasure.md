@@ -252,7 +252,9 @@ registration and its account whitelist.
 vault item created after step 2's listing, would survive a `complete` answer. So
 `bank_feed_server.handle` holds a `flock` on the data directory itself for every tool
 call (shared) and for `delete_all_data` (exclusive, for the whole call), and refuses as
-busy after `LOCK_WAIT_S`. Every `op` child inherits the call's lock descriptor
+busy after `LOCK_WAIT_S`. `delete_data_keep_signins` and `unlink_bank` hold it exclusively
+too: a withdrawal records the provider's answer after asking, and a call alongside could
+change the consent in between. Every `op` child inherits the call's lock descriptor
 (`opvault.INHERIT_FDS`), so a create still running after its parent died still holds the
 lock.
 
