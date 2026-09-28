@@ -211,11 +211,13 @@ the names understate two of them and overstate one.
   calls to the provider, not a local-only wipe. This is the one tool that can
   end bank access everywhere at once. Say so before it runs, not after.
   Once every consent is withdrawn it is a clean slate: it also removes the
-  exports it published, deletes the 1Password items bank-feed created (they
-  sit in 1Password's Recently Deleted for 30 days), and resets the ledger to a
-  first start. It never deletes an item it did not record creating, and it
-  cannot remove the Enable Banking application registration; relay the lines
-  that name those.
+  exports it published, deletes the 1Password items bank-feed recorded
+  creating (they sit in 1Password's Recently Deleted for 30 days), and resets
+  the ledger to a first start. It never deletes an item it did not record
+  creating, and it does not remove the Enable Banking application
+  registration; relay the lines that name those, including the one saying
+  that an application still registered with the deleted key blocks a later
+  setup.
 - `delete_data_keep_signins` is the uninstall's **"Erase data, keep
   sign-ins"**: every transaction, note, tag, rule, balance, measurement,
   backup and export goes, but the bank consents and the accounts bound to
@@ -348,6 +350,14 @@ alternative. The link never travels in a message or a delegation brief
 
 Either call runs the rest of setup itself, so there is nothing to re-run
 afterwards.
+
+When setup says the signing key **cannot authenticate to an application**
+(HTTP 401 or 403), that is a key/application mismatch, not a vanished
+application: relay the recoveries it names, in its order, and follow none
+that it does not name. Whether the application can be removed is the
+operator's decision alone — setup cannot tell which bank sessions ride it —
+so never present removal as the default, and never ask for a control-panel
+token to remove it yourself.
 
 Relay the setup message's sign-in paragraph WHOLE — including its
 "Delegated read" rules — to whoever you report to. You never hold a

@@ -205,6 +205,9 @@ HANDOFF_CAVEAT = (
 # Seams, so the whole surface is testable without a provider or a spool.
 CB = callbacks
 AIS_FACTORY = None
+# (app_id, key) -> an AIS client signing with `key` as `kid=app_id`: setup's
+# probe of an application it has not bound yet (issue #80).
+KEYED_AIS_FACTORY = None
 ADMIN_FACTORY = None
 OPVAULT = opvault     # test seam: setup's vault access goes through this name
 FB = fbauth           # test seam: setup's Firebase access goes through this name
@@ -236,7 +239,15 @@ class WorldUnverified(RuntimeError):
     WorldMismatch and from eb_ais.ApiError so that sync's per-resource
     "FAILED (<type>)" line and the dispatcher's error rendering name the
     check, not the bank: a 503 on GET /application must not read as two dead
-    account endpoints."""
+    account endpoints.
+
+    `status` is the HTTP status the check was answered with, or None: setup
+    reads it, because a 401 or 403 there is a key mismatch, not a transient
+    failure (issue #80)."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _assert_world(app_id, record=None, admin=None) -> None:
@@ -789,10 +800,58 @@ def _ais():
                 "account data endpoints were NOT tried and cached data "
                 "is unchanged. This is a transient verification "
                 "failure, not a bank failure: retry when "
-                "GET /application answers." % type(exc).__name__
-            ) from None
+                "GET /application answers." % type(exc).__name__,
+                status=exc.status if isinstance(exc, eb_ais.ApiError)
+                else None) from None
         _assert_world(app_id, record=record)
     return client
+
+
+def _keyed_ais(app_id, key):
+    """An AIS client that signs with `key` as `kid=app_id`, for an application
+    no binding names yet. No world check: the caller holds the listing entry
+    that is its world evidence."""
+    if KEYED_AIS_FACTORY is not None:
+        return KEYED_AIS_FACTORY(app_id, key)
+    return eb_ais.AIS(app_id, key)
+
+
+#: The statuses with which the provider refuses a JWT whose signature does not
+#: verify against the application's registered certificate.
+KEY_REFUSED = (401, 403)
+
+
+def _key_mismatch(step, app_id, status, key_source, removed):
+    # Step 4 refuses before recording anything; step 6 runs after the binding
+    # was recorded and the redirect registered, so it can only say less.
+    """Setup's report when the signing key in use cannot authenticate to an
+    application (issue #80): what that means and the recoveries that exist,
+    in order. `removed` says what follows a removal of the application in the
+    control panel. Deletion is never the default: nothing here can tell which
+    bank sessions ride the application."""
+    if key_source == "env":
+        who = ("the signing key this process received as %s" % WIRE_KEY_VAR)
+        restart = (", have the configurator make %s resolve to the restored "
+                   "key and restart the plugin" % WIRE_KEY_VAR)
+    else:
+        who = "the signing key in 1Password ('%s')" % OPVAULT.KEY_ITEM
+        restart = ""
+    return (
+        "%s. Application: %s cannot authenticate to application %s (HTTP %s): "
+        "the application was registered with a different key — for example "
+        "one delete_all_data erased. %s Recoveries: (1) if the key it was "
+        "registered "
+        "with is still in 1Password's Recently Deleted (kept 30 days), restore "
+        "it — first delete or rename any '%s' item a later setup made, so "
+        "that exactly one item carries that title%s — then re-run "
+        "setup_bank_feed; (2) otherwise it is your decision whether that "
+        "application can go: this plugin cannot tell which bank sessions ride "
+        "it. If you remove it in the Enable Banking control panel, %s; every "
+        "bank must be re-linked afterwards. Stopping."
+        % (step, who, _safe(app_id), status,
+           "It was not adopted and no application was created." if step == 4
+           else "No application was created.",
+           OPVAULT.KEY_ITEM, restart, removed))
 
 
 def _admin():
@@ -1909,6 +1968,28 @@ def _reconcile(args: dict) -> str:
                     "live application. Report this record shape. "
                     "Stopping." % (ebmode.mode(), _app_name()))
                 return "\n".join(lines)
+            # A name match is not ownership (issue #80): the application may
+            # be registered with a key this install no longer has, and one
+            # adopted here fails at step 6 with a 401 that no recovery fits.
+            # The resolved key, whatever its source, must authenticate to it
+            # BEFORE the binding is recorded.
+            try:
+                _keyed_ais(found, key).application()
+            except Exception as exc:             # noqa: BLE001
+                status = getattr(exc, "status", None)
+                if isinstance(exc, eb_ais.ApiError) and status in KEY_REFUSED:
+                    lines.append(_key_mismatch(
+                        4, found, status, key_source,
+                        "re-run setup_bank_feed and it registers a new one"))
+                else:
+                    lines.append(
+                        "4. Application: '%s' exists (%s), but whether the "
+                        "signing key can authenticate to it could not be "
+                        "checked (%s%s). Nothing was adopted and no "
+                        "application was created. Retry. Stopping."
+                        % (_app_name(), _safe(found), type(exc).__name__,
+                           "" if status is None else " status %s" % status))
+                return "\n".join(lines)
             app_id = found
             # The matched listing entry is the world evidence.
             _assert_world(app_id, record=matches[0])
@@ -2064,9 +2145,24 @@ def _reconcile(args: dict) -> str:
             "5. Callback redirect: already registered (%s) — nothing to do, "
             "and no request was made." % _safe_url(redirect_uri))
 
+    # A 401 or 403 here is the key and the application disagreeing, not an
+    # outage and not a vanished app (issue #80). It arrives as ApiError, or
+    # as WorldUnverified when this process had not yet checked the id.
+    removed = ("run accept_app_reregistration (casa will ask the operator to "
+               "confirm)%s, then re-run setup_bank_feed"
+               % (", have the configurator CLEAR %s from plugin-env.conf and "
+                  "restart the plugin" % WIRE_APP_ID_VAR
+                  if os.environ.get("CASA_BANKFEED_EB_APP_ID") else ""))
     try:
         app = _ais().application()
-    except (WorldMismatch, WorldUnverified) as exc:
+    except WorldUnverified as exc:
+        if exc.status in KEY_REFUSED:
+            lines.append(_key_mismatch(6, app_id, exc.status, key_source,
+                                       removed))
+        else:
+            lines.append("6. Application: %s Stopping." % exc)
+        return "\n".join(lines)
+    except WorldMismatch as exc:
         # The guarded _ais() itself refused — each carries its own remedy
         # sentence, and folding either into the generic GET-failed wording
         # below would bury it under 404-recovery advice it must never receive.
@@ -2074,6 +2170,10 @@ def _reconcile(args: dict) -> str:
         return "\n".join(lines)
     except Exception as exc:                     # noqa: BLE001
         status = getattr(exc, "status", None)
+        if isinstance(exc, eb_ais.ApiError) and status in KEY_REFUSED:
+            lines.append(_key_mismatch(6, app_id, status, key_source,
+                                       removed))
+            return "\n".join(lines)
         lines.append(
             "6. Application: GET /application failed (%s%s). Reported, never "
             "auto-repaired: re-registering very likely orphans every existing "

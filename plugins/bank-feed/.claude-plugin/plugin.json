@@ -1,6 +1,6 @@
 {
   "name": "bank-feed",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Read-only bank account information (PSD2 AIS via Enable Banking), the finance data tools, local transaction annotations (tags, notes) with note search, batch annotation and spend-by-tag aggregation, deterministic auto-tagging rules applied at ingest, and ledger backups with a protected restore.",
   "author": {"name": "Nicola Bonzanni"},
   "casa": {
@@ -15,7 +15,7 @@
       {"name": "unlink_bank", "summary": "Revokes the Enable Banking consent identified by {consent_ref}. Refresh stops for that bank's accounts until it is re-linked. Local history is not erased."},
       {"name": "purge", "summary": "Deletes transactions before_date={before_date} + notes/tags/coverage (all: + balances). {user_work}: keep=rules, account settings; erase=ALL notes/tags/rules/settings. May drop oldest erasure backup."},
       {"name": "forget_local_account", "summary": "Erases account {account_id} locally: its history, notes, tags, balances, coverage, sync, link-attempt records. Tagging rules stay. Revokes no bank consent. Backed up; may drop oldest erasure backup."},
-      {"name": "delete_all_data", "summary": "Erases the ENTIRE local finance ledger and tries to erase every plugin backup (not HA backups); asks each bank to withdraw its consent (then re-approval is needed). Reports any failure. Irreversible."},
+      {"name": "delete_all_data", "summary": "Erases ALL local finance data; tries to erase every plugin backup (not HA backups), exports, and the 1Password key + sign-in it made (setup redoes both); asks banks to withdraw consent. Irreversible."},
       {"name": "delete_data_keep_signins", "summary": "Erases local finance data: transactions, notes/tags/rules, balances, every plugin backup (not HA backups), exports. KEEPS bank consents + account links: reinstall needs no re-approval. Irreversible."},
       {"name": "label_account", "summary": "Changes account {account_id}'s label, category or included status. Excluding it removes the account from every balance and transaction total shown until it is re-included."},
       {"name": "accept_app_reregistration", "summary": "Authorizes setup_bank_feed to REGISTER A REPLACEMENT Enable Banking application because the previously bound one vanished from the control panel. Every bank must be re-linked afterwards."},

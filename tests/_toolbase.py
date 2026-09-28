@@ -488,6 +488,7 @@ class FakeVault:
         self.reads = []           # every ref read() was asked for, in order
         self.fail_reads = {}      # ref -> OpError to raise (transient fault)
         self.exists_error = None  # OpError item_exists should raise
+        self.exists_calls = []    # every (item, vault) item_exists was asked
         self.items = None         # None -> derived from values; else a set
         # ha-casa-app#1047: the sign-in drop-off. (value, created_epoch) when
         # one is waiting, or an OpError to raise; take_drop_off empties it.
@@ -514,6 +515,9 @@ class FakeVault:
         return self.values[ref]
 
     def item_exists(self, item, vault):
+        # Logged before any outcome, as `read` is: a check that raised still
+        # asked the vault.
+        self.exists_calls.append((item, vault))
         if self.exists_error is not None:
             raise self.exists_error
         if self.items is not None:
@@ -756,6 +760,17 @@ class FakeCB:
 
 
 class Base(unittest.TestCase):
+    def keyed_ais(self, app_id, key):
+        test = self
+
+        class Keyed:
+            def application(self):
+                test.keyed_calls.append((app_id, (key.n, key.e)))
+                if test.keyed_error is not None:
+                    raise test.keyed_error
+                return {"kid": app_id}
+        return Keyed()
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -766,6 +781,12 @@ class Base(unittest.TestCase):
         self.addCleanup(setattr, tools_read, "CONN", None)
         self.ais = FakeAIS()
         self.admin = FakeAdmin()
+        # Setup's probe of an application found by name (issue #80): every
+        # (app id, public half of the signing key) it was asked with, and
+        # what `application()` then raises — None answers, as a key the
+        # application was registered with does.
+        self.keyed_calls = []
+        self.keyed_error = None
         self.cb = FakeCB(str(self.root))
         self.state_hash = STATE_HASH
 
@@ -789,6 +810,7 @@ class Base(unittest.TestCase):
         for module, attr, value in (
                 (tools_auth, "CB", self.cb),
                 (tools_auth, "AIS_FACTORY", lambda: self.ais),
+                (tools_auth, "KEYED_AIS_FACTORY", self.keyed_ais),
                 (tools_auth, "ADMIN_FACTORY", lambda: self.admin),
                 (tools_auth, "_now_s", lambda: FROZEN_NOW),
                 (tools_auth, "_PROTECTED_CACHE", tools_auth._PROTECTED_CACHE),

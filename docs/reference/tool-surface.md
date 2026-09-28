@@ -144,12 +144,16 @@ manifest). casa removes the plugin only on `"erasure": "complete"`, because remo
 destroys the one tool that can finish an erasure, so the call claims `complete` only
 when no consent was kept or left unaccounted for, no session handle stayed behind, the
 backup sweep settled every copy, the clean slate removed the exports, the vault items
-bank-feed created and every leftover file, and the reclaim finished (an unfinished
+bank-feed recorded creating and every leftover file, and the reclaim finished (an unfinished
 `VACUUM` leaves erased rows readable in the free pages and the write-ahead log).
 [`architecture/backups-erasure.md`](../architecture/backups-erasure.md#the-clean-slate)
 has the clean slate and the lock that keeps every other call out while it runs. Everything
 else is `incomplete`, and `report` is the account the operator is shown. A refusal
-before the erasure ran returns prose, which casa reads as not complete.
+before the erasure ran returns prose, which casa reads as not complete. An item under
+bank-feed's vault titles that nothing records it creating is never deleted and does not
+block `complete`; when the vault shows one, or cannot be asked, the result also carries
+`unrecorded_vault_items`, a list of `{"title", "found"}` with `found` true (present) or
+null (unchecked), so casa can tell that `complete` apart from one that left nothing.
 
 `delete_data_keep_signins` is the other uninstall choice, "Erase data, keep sign-ins"
 (`casa.eraseDataOnlyTool`). It runs `delete_all_data`'s row erasure and backup sweep,
