@@ -287,11 +287,6 @@ def unlink_bank(args: dict) -> str:
         # (issue #84). Either way it is the answer this tool would go and ask
         # for: asking spends a live API call to learn what the row records.
         return _already_closed(bank, row)
-    # A quarantined consent is exactly what this tool has to be able to
-    # revoke — it is a live consent at the bank that nothing is bound to, and
-    # it was previously unreachable because only `attempts.session_id` held it.
-    quarantined = (row is not None
-                   and str(row["status"] or "") == callbacks.REVIEW_REQUIRED_STATUS)
     # THE SETTLEMENT INTERLOCK, HALF ONE (issue #84): the operator's word
     # closes a row only if a withdrawal had ALREADY failed when THIS call
     # started — read here, before the provider is asked. It is not redundant
@@ -340,6 +335,16 @@ def unlink_bank(args: dict) -> str:
     c.execute("BEGIN IMMEDIATE")
     settled = False
     try:
+        # A quarantined consent is exactly what this tool has to be able to
+        # revoke — it is a live consent at the bank that nothing is bound to,
+        # and it was previously unreachable because only `attempts.session_id`
+        # held it. Read HERE, before this call's own writes and after the
+        # provider answered: a collection alongside can bind the consent
+        # while this call waits, and then it is no longer quarantined.
+        now = c.execute("SELECT status FROM sessions WHERE session_id=?",
+                        (session_id,)).fetchone()
+        quarantined = (now is not None and str(now["status"] or "")
+                       == callbacks.REVIEW_REQUIRED_STATUS)
         if revoked:
             apply.record_revocation(c, session_id, revoked=True)
         else:
@@ -2229,6 +2234,18 @@ def delete_data_keep_signins(args: dict) -> str:
                              for _ in SIGNIN_META_PREFIXES)),
                   kept + tuple(p.replace("_", "\\_") + "%"
                                for p in SIGNIN_META_PREFIXES))
+        # A routine-sync record is kept only while it describes a binding
+        # that is kept: one naming a consent the account no longer serves
+        # (unlinked, renewed away) is erased data, and it carries a session id.
+        current = {tools_auth.sync_health_key(r[0]) for r in c.execute(
+            "SELECT account_id FROM accounts WHERE session_id IS NOT NULL")
+            if tools_auth.sync_health(c, r[0]) is not None}
+        for (key,) in c.execute(
+                "SELECT key FROM meta WHERE key LIKE ? ESCAPE '\\'",
+                (tools_auth.SYNC_HEALTH_PREFIX.replace("_", "\\_") + "%",)
+                ).fetchall():
+            if key not in current:
+                c.execute("DELETE FROM meta WHERE key=?", (key,))
         # The AUTOINCREMENT counters of the erased tables are allocation
         # history of the erased data.
         if c.execute("SELECT 1 FROM sqlite_master WHERE type='table'"

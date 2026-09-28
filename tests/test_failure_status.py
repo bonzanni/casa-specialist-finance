@@ -373,6 +373,13 @@ class TestSyncHealthAndTheErasers(FailureBase):
             "SELECT COUNT(*) FROM meta WHERE key LIKE 'sync_health|%'"
         ).fetchone()[0], 0)
 
+    def test_the_data_only_eraser_drops_a_record_for_a_released_binding(self):
+        self.failing()
+        self.raw.execute("UPDATE accounts SET session_id=NULL, uid=NULL"
+                         " WHERE account_id='acc1'")
+        call("delete_data_keep_signins")
+        self.assertIsNone(self.health("acc1"))
+
     def test_the_data_only_eraser_keeps_it_with_the_binding(self):
         self.failing()
         call("delete_data_keep_signins")
@@ -641,6 +648,27 @@ class TestOperatorSettlement(FailureBase):
                       "consent and keep refreshing", out)
         self.assertEqual(self.bindings(), [("acc1", None, None),
                                            ("acc2", OTHER_SESSION, "uid-acc2")])
+
+    def test_a_consent_linked_meanwhile_is_not_called_quarantined(self):
+        self.session(status=callbacks.REVIEW_REQUIRED_STATUS)
+        raw, test = self.raw, self
+
+        class LinkedMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                raw.execute("UPDATE sessions SET status=? WHERE session_id=?",
+                            (callbacks.LIVE_SESSION_STATUS, sid))
+                test.account("acc1")
+                return {"deleted": True}
+        self.ais_factory(LinkedMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertNotIn("QUARANTINED", out)
+        self.assertIn("No account is bound to it any more", out)
+
+    def test_a_quarantined_consent_is_still_called_quarantined(self):
+        # The control for the test above.
+        self.session(status=callbacks.REVIEW_REQUIRED_STATUS)
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("QUARANTINED", out)
 
     def test_a_row_erased_meanwhile_is_not_called_listed_or_live(self):
         self.failed_once()
