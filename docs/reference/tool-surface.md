@@ -63,7 +63,7 @@ alone is enough:
 | `list_tags` | Every tag in use with its transaction count. |
 | `spend_by_tag` | Signed spend per tag and currency, plus an untagged bucket. A lens, not a ledger — groups overlap. |
 | `list_rules` | The auto-tagging rulebook, one line per rule. |
-| `consent_status` | Per-bank consent expiry, days remaining, in-flight authorizations, restore detection. |
+| `consent_status` | Per-bank consent expiry, days remaining, in-flight authorizations, restore detection, and every bound account whose routine transaction sync keeps failing, with the HTTP status. |
 | `list_banks` | Banks available in a country, with their consent ceiling. |
 
 ## Writing, and refreshing
@@ -129,7 +129,7 @@ a model-supplied boolean is inference satisfying itself.
 
 | Tool | Irreversible effect |
 |---|---|
-| `unlink_bank` | Revokes a bank consent. Refresh stops for that bank until it is re-linked; local history stays. |
+| `unlink_bank` | Revokes a bank consent. Refresh stops for that bank until it is re-linked; local history stays. With `withdrawn_at_bank=true`, a consent whose withdrawal already failed and that the provider still will not confirm is recorded as withdrawn by the operator (status `WITHDRAWN_BY_OPERATOR`), never as provider-confirmed. |
 | `purge` | Deletes every transaction booked before a date — or the whole ledger with `before_date=all` — with its notes and tags, trims or drops the proven-coverage intervals to match, then reclaims the space. A dated purge deletes a supersession chain (a pending row and the rows that replaced it) whole or not at all: a chain with any row on or after the date is kept, and the reply counts the rows before the date it kept. `user_work` is required: `keep` keeps rules and account labels, categories and include flags; `erase` deletes all of them and every note and tag, on surviving rows too. A whole-ledger purge also resets balances, occurrence marks and sync state (history marked partial). A `pre-erasure` backup is taken first; `restore_backup` undoes it. |
 | `forget_local_account` | Erases one account's local history and drops the account. Revokes nothing — this does not disconnect the bank. A `pre-erasure` backup is taken first; `restore_backup` brings the history back. |
 | `delete_all_data` | The clean slate. Erases the entire local ledger for every account, **then attempts to withdraw every open bank consent**. Consents it cannot prove withdrawn keep their handles so they can be revoked by hand. Once none is held, it also removes the published exports, the 1Password items bank-feed recorded creating, the backup index and every leftover file, and resets the ledger to what a first start creates. It is the plugin's `casa.eraseTool`: run to the end, it answers `{"erasure": "complete" \| "incomplete", "report": …}`, `complete` only when nothing is left and every withdrawal was confirmed (see below). |

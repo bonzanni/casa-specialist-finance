@@ -48,6 +48,7 @@ import sqlite3
 import backups
 import apply
 import bank_feed_server
+import eb_ais
 import flows
 import money
 import rules
@@ -539,8 +540,9 @@ def _freshness(c, account_ids, resource: str) -> list:
                 # actual success in its RETURN VALUE. Both are read below.
                 returned = REFRESHER(c, account_id, resource, out=res_out)
             except Exception as exc:            # noqa: BLE001 — class only
-                # Never the message: it can carry a provider body.
-                error = type(exc).__name__
+                # Never the message: it can carry a provider body. The status
+                # of an `ApiError` is ours to print (issue #83).
+                error = eb_ais.failure_label(exc)
                 # A class name is not a remedy. An exception whose class
                 # declares `operator_exit` is stating that the state it creates
                 # has a named way OUT, and that text is OURS (a constant in the

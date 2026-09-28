@@ -34,6 +34,7 @@ import apply
 import backups
 import callbacks
 import casa_handoff
+import eb_ais
 import store
 import tools_auth
 import tools_read
@@ -209,14 +210,26 @@ def _reclaim(c):
 
 @register("unlink_bank",
           "Revoke a bank consent. Stops refreshing; does NOT erase local "
-          "history. Protected: casa demands an operator grant.",
+          "history. withdrawn_at_bank=true only when the operator says they "
+          "withdrew this consent on the bank's own screen after a withdrawal "
+          "here already failed: if the provider still does not confirm, the "
+          "consent is recorded as withdrawn by the operator. Protected: casa "
+          "demands an operator grant.",
           {"type": "object",
-           "properties": {"consent_ref": {"type": "string"}},
+           "properties": {"consent_ref": {"type": "string"},
+                          "withdrawn_at_bank": {"type": "boolean"}},
            "required": ["consent_ref"]})
 def unlink_bank(args: dict) -> str:
     refusal = _require_declared("unlink_bank")
     if refusal:
         return refusal
+    # Strictly a boolean (issue #84), like `merge` in tools_annotate: the
+    # string "false" is truthy, and this flag closes a consent on the
+    # operator's word.
+    withdrawn = args.get("withdrawn_at_bank", False)
+    if not isinstance(withdrawn, bool):
+        return ("withdrawn_at_bank must be true or false. Nothing was called "
+                "and " + backups.unchanged(perfect=True, start=False))
     c = _conn()
     session_id = _resolve_consent_ref(c, args.get("consent_ref"))
     if session_id is None:
@@ -233,9 +246,18 @@ def unlink_bank(args: dict) -> str:
         # `_resolve_consent_ref` scans every session, closed ones included, and
         # `_mismatch_lines` prints an OLD ref the operator may still be
         # holding. `closed_at` is written by `apply.record_revocation` on a
-        # CONFIRMED revocation and by nothing else, so it is already the proof
-        # this tool would go and ask for: the provider can only answer 404, and
-        # asking spends a live API call to learn what the row already records.
+        # CONFIRMED revocation — or on the operator's own statement, which the
+        # status records and this reply must not upgrade to a confirmation
+        # (issue #84). Either way it is the answer this tool would go and ask
+        # for: asking spends a live API call to learn what the row records.
+        if str(row["status"] or "") == apply.OPERATOR_WITHDRAWN_STATUS:
+            return ("%s: that consent is already closed: on %s you recorded "
+                    "that you withdrew it on %s's own consent screen. The "
+                    "provider never confirmed the withdrawal. %s and nothing "
+                    "local was lost by it. consent_status lists the consents "
+                    "that still exist."
+                    % (bank, _safe(str(row["closed_at"])[:10]), bank,
+                       backups.unchanged(perfect=True, stop=False)))
         return ("%s: that consent has already been withdrawn and the provider "
                 "confirmed it. %s and nothing local was lost by it. "
                 "consent_status lists the consents that still exist."
@@ -258,7 +280,7 @@ def unlink_bank(args: dict) -> str:
     except Exception as exc:                     # noqa: BLE001
         absent = tools_auth.revocation_is_final(exc)
         revoked = absent
-        failure = type(exc).__name__            # a CLASS name, never a body
+        failure = eb_ais.failure_label(exc)     # class + status, never a body
 
     kept = c.execute(
         "SELECT COUNT(*) FROM transactions WHERE account_id IN"
@@ -276,9 +298,23 @@ def unlink_bank(args: dict) -> str:
     # one statement: a crash between them leaves accounts pointing at a closed
     # consent, which is the dead end the release exists to prevent.
     c.execute("BEGIN IMMEDIATE")
+    settled = False
     try:
-        apply.record_revocation(c, session_id, revoked=revoked)
         if revoked:
+            apply.record_revocation(c, session_id, revoked=True)
+        else:
+            # The settlement interlock (issue #84) is `record_revocation`'s:
+            # the operator's word closes a row only while it is still
+            # REVOKE_FAILED — a withdrawal had already failed and been
+            # reported before this call — and it runs before this call's own
+            # failure is recorded, so a first attempt cannot qualify itself.
+            if withdrawn:
+                settled = apply.record_revocation(
+                    c, session_id, revoked=False, operator_withdrawn=True)
+            if not settled:
+                apply.record_revocation(c, session_id, revoked=False,
+                                        failure=failure)
+        if revoked or settled:
             # THE CONTRACT WITH THE COLLECTOR, probed rather than reasoned
             # about. Closing the session row alone leaves every account
             # still pointing at a dead consent, so the escape this plugin
@@ -289,14 +325,33 @@ def unlink_bank(args: dict) -> str:
             # `session_id` AND `uid` exactly this way for a quarantined
             # consent, so this is the same statement, not a new mechanism.
             #
-            # Only on a revocation we are sure of: while the consent may still
-            # be live at the bank, the accounts really are still bound to it.
+            # Only on a revocation we are sure of, or one the operator has
+            # stated: while the consent may still be live at the bank, the
+            # accounts really are still bound to it.
             c.execute("UPDATE accounts SET session_id=NULL, uid=NULL"
                       " WHERE session_id=?", (session_id,))
         c.execute("COMMIT")
     except Exception:
         c.execute("ROLLBACK")
         raise
+
+    if settled:
+        # Issue #84: the one close that is not the provider's. Said as such,
+        # in the reply and in the status every later reply reads.
+        return "\n".join([
+            "%s: the provider still did not confirm the withdrawal (%s). On "
+            "your statement that you withdrew it on %s's own consent screen, "
+            "this consent is now recorded as WITHDRAWN BY YOU, not confirmed "
+            "by the provider. It leaves consent_status, and its accounts are "
+            "no longer bound to any consent, so nothing refreshes them until "
+            "you link the bank again. If the bank does still hold the "
+            "permission, only its own consent screen can show it now."
+            % (bank, failure, bank),
+            "Unlink is not erase: %d transaction%s of local history survive%s "
+            "and stay queryable." % (kept, "" if kept == 1 else "s",
+                                     "s" if kept == 1 else ""),
+            GATE_NOTE,
+        ])
 
     if not revoked:
         # Nothing else changes: a half-applied unlink — permission still live
@@ -337,10 +392,18 @@ def unlink_bank(args: dict) -> str:
                outcome),
             "Run unlink_bank consent_ref=%s again — the handle has not "
             "changed, so a retry reaches the same consent. consent_status "
-            "lists it as needing attention until it succeeds; if it keeps "
-            "failing, withdraw it from %s's own consent screen." % (ref, bank),
-            GATE_NOTE,
-        ])
+            "lists it as needing attention until it succeeds. If it keeps "
+            "failing, withdraw it from %s's own consent screen, then run "
+            "unlink_bank consent_ref=%s withdrawn_at_bank=true to record that "
+            "you did." % (ref, bank, ref),
+        ] + ([
+            # The interlock, said rather than silently ignored: the flag was
+            # asked for and did not apply.
+            "withdrawn_at_bank was NOT applied: it settles only a consent "
+            "whose withdrawal had already failed before this call, and this "
+            "was the first attempt. If you did withdraw it on %s's own "
+            "consent screen, run the same call again." % bank
+        ] if withdrawn else []) + [GATE_NOTE])
 
     lines = ["%s: consent %s. Its accounts are no longer bound to any consent, "
              "so nothing refreshes them until you link the bank again."
@@ -853,6 +916,11 @@ def forget_local_account(args: dict) -> str:
                       (account_id,))
         for table in _ACCOUNT_TABLES:
             c.execute("DELETE FROM %s WHERE account_id=?" % table, (account_id,))
+        # Issue #83: the account's routine-sync record goes with it, in this
+        # transaction — the same id linked again starts with no history of
+        # the old binding's failures.
+        c.execute("DELETE FROM meta WHERE key=?",
+                  (tools_auth.sync_health_key(account_id),))
         # Rules are row-independent and survive, account-scoped ones included:
         # the account id is a keyed hash of IBAN+currency, so the same account
         # linked again brings them back into force. Counted in the same
@@ -957,7 +1025,11 @@ def _withdraw_open_consents(c):
             proven, failure = True, None
         except Exception as exc:             # noqa: BLE001
             proven = tools_auth.revocation_is_final(exc)
-            failure = type(exc).__name__     # a CLASS name, never a body
+            # Class + status, never a body (issue #84). Printed in this reply
+            # only: NOT passed to `record_revocation`, which would store it in
+            # meta — and this runs after the erasure emptied meta, so the key
+            # would outlive the erasure it belongs to.
+            failure = eb_ais.failure_label(exc)
         apply.record_revocation(c, row["session_id"], revoked=proven)
         (gone if proven else kept).append(dict(row, failure=failure))
     return gone, kept
@@ -1066,7 +1138,7 @@ def _destroy_proven_handles(c, paths):
             return False, (
                 "Note — the sweep of session rows could not run (%s), but "
                 "NOTHING WAS DUE for removal: no consent is recorded here as "
-                "proven gone, so this call destroyed no handle and left none "
+                "closed, so this call destroyed no handle and left none "
                 "behind. There is nothing to clear." % failure), extra, True
         # EVERY CLAIM HERE IS SCOPED TO THE ROWS IT COUNTS. This warning can
         # stand beside the halted-pass warning, which is about the DISJOINT
@@ -1076,10 +1148,11 @@ def _destroy_proven_handles(c, paths):
         # apart on the page.
         return False, (
             "WARNING — the local ledger IS erased, but %d session row(s) "
-            "belonging to consents ALREADY PROVEN GONE could not be removed "
-            "(%s). Those rows are inert: the provider confirmed those consents "
-            "gone, so consent_status does not list them and there is nothing "
-            "left to revoke at those banks. Run delete_all_data again to clear "
+            "belonging to consents ALREADY CLOSED could not be removed "
+            "(%s). Those rows are inert: those consents are closed here — the "
+            "provider confirmed them gone, or you recorded withdrawing them at "
+            "the bank — so consent_status does not list them and this plugin "
+            "has nothing left to revoke for them. Run delete_all_data again to clear "
             "the residue." % (due, failure)), extra, True
     lines = []
     try:
@@ -1101,19 +1174,20 @@ def _handles_kept_note(due, exc, appending: bool) -> str:
     if due == 0:
         return ("Note — the sweep of session rows could not run (%s), but "
                 "NOTHING WAS DUE for removal: no consent is recorded here as "
-                "proven gone, so this call destroyed no handle and left none "
+                "closed, so this call destroyed no handle and left none "
                 "behind. There is nothing to clear." % exc)
     counted = ("%d session row(s)" % due if due is not None
                else "the session rows")
     note = ("WARNING — the local ledger IS erased, but %s belonging to "
-            "consents ALREADY PROVEN GONE were kept: the backup index could "
+            "consents ALREADY CLOSED were kept: the backup index could "
             "not settle or record the sweep of the backup copies that has to "
             "go with them (%s), and destroying the rows without it could "
             "leave a copy holding an identifier this ledger no longer has. "
             "Those rows are "
-            "inert: the provider confirmed those consents gone, so "
-            "consent_status does not list them and there is nothing left to "
-            "revoke at those banks. Run delete_all_data again to clear them."
+            "inert: those consents are closed here — the provider confirmed "
+            "them gone, or you recorded withdrawing them at the bank — so "
+            "consent_status does not list them and this plugin has nothing "
+            "left to revoke for them. Run delete_all_data again to clear them."
             % (counted, exc))
     if appending and exc.written is not False:
         # The sweep's `pending` append as the event it was; whether a
@@ -1145,7 +1219,7 @@ def _second_sweep(paths, handle, state, erase_op):
     except backups.ErasureIncomplete as exc:
         # The sweep's own event; what is left afterwards, what it blocks and
         # how to finish it is the dispatcher's lock-release sentence (#48).
-        return False, ("WARNING — the session rows of consents proven gone were "
+        return False, ("WARNING — the session rows of closed consents were "
                 "destroyed, but the sweep of the backup copies found after the "
                 "banks were asked did not finish: %s went, and %s."
                 % (exc.erasure.went(), exc.residue()))
@@ -1153,7 +1227,7 @@ def _second_sweep(paths, handle, state, erase_op):
         # The sweep's own event, with what it removed before stopping;
         # whether its erasure is still pending is the dispatcher's
         # lock-release sentence.
-        return False, ("WARNING — the session rows of consents proven gone were "
+        return False, ("WARNING — the session rows of closed consents were "
                 "destroyed, but the sweep of the backup copies found after the "
                 "banks were asked stopped part way (%s)%s."
                 % (exc, ", after removing %s" % er.went()
@@ -1876,10 +1950,12 @@ def delete_all_data(args: dict) -> str:
             consents.append(
                 "  %s — consent_ref %s (%s). Run unlink_bank consent_ref=%s to "
                 "retry; consent_status lists it until it succeeds. If it keeps "
-                "failing, withdraw it from that bank's own consent screen, then "
-                "run delete_all_data again to clear the row."
+                "failing, withdraw it from that bank's own consent screen, run "
+                "unlink_bank consent_ref=%s withdrawn_at_bank=true to record "
+                "that you did, then run delete_all_data again to clear the row."
                 % (_safe(row["aspsp_name"]) or "an unnamed bank",
                    tools_auth._consent_ref(row["session_id"]), row["failure"],
+                   tools_auth._consent_ref(row["session_id"]),
                    tools_auth._consent_ref(row["session_id"])))
 
     # THE HEADLINE STATES NO OUTCOME IT DOES NOT YET KNOW. It used to say
@@ -2002,9 +2078,12 @@ _EXCHANGED_PHASES = tuple(sorted(callbacks.SETTLED_PHASES
 
 #: `meta` keys `delete_data_keep_signins` keeps beside the structural ones:
 #: the setup state (the application id first of all, which every bank call
-#: needs) and the renewal handoff of each kept consent. Everything else goes,
+#: needs) and the renewal handoff of each kept consent — with its last failed
+#: withdrawal and its accounts' routine-sync health (issues #83/#84), which
+#: describe the kept consents, not the erased data. Everything else goes,
 #: including the renewal-mismatch diagnostics, which quote account labels.
-SIGNIN_META_PREFIXES = ("setup.", "renewal_handoff|")
+SIGNIN_META_PREFIXES = ("setup.", "renewal_handoff|", "revoke_failure|",
+                        "sync_health|")
 
 #: `sync_state.last_error` of every account after a data-only erasure: what
 #: the reads and `sync` print about the gap, as `PURGED_NOTE` is for a purge.

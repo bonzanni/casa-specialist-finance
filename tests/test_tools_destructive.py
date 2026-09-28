@@ -1938,8 +1938,8 @@ class TestTheCombinedOutputIsOneAccount(DestructiveBase):
         self.assertIn("MAY ALREADY HAVE BEEN WITHDRAWN", out)
         self.assertIn("consent_status", out)
         # And nothing claims a proven-gone row was left behind.
-        self.assertNotIn("proven gone could not be removed", out)
-        self.assertNotIn("there is nothing left to revoke", out)
+        self.assertNotIn("ALREADY CLOSED could not be removed", out)
+        self.assertNotIn("nothing left to revoke", out)
         self.assertNotIn("consent_status does not list", out)
         # The sweep's failure is still named — not silently swallowed — and it
         # is named as the no-op it was.
@@ -1961,7 +1961,7 @@ class TestTheCombinedOutputIsOneAccount(DestructiveBase):
         out = call("delete_all_data")
         self.assertEqual(self.due(), 1)
         self.assertIn("1 session row(s)", out)
-        self.assertIn("ALREADY PROVEN GONE could not be removed", out)
+        self.assertIn("ALREADY CLOSED could not be removed", out)
         self.assertIn("MAY ALREADY HAVE BEEN WITHDRAWN", out)
         self.assertNotIn("NOTHING WAS DUE", out)
         # AND THE TWO WARNINGS NOW STAND SIDE BY SIDE, about DISJOINT sets —
@@ -1970,8 +1970,8 @@ class TestTheCombinedOutputIsOneAccount(DestructiveBase):
         # rows it counted, or the second reads as a retraction of the first.
         for line in out.split("\n"):
             if "nothing left to revoke" in line:
-                self.assertIn("ALREADY PROVEN GONE", line)
-                self.assertIn("at those banks", line)
+                self.assertIn("ALREADY CLOSED", line)
+                self.assertIn("for them", line)
 
     def test_the_residue_warning_counts_the_rows_the_sweep_would_remove(self):
         # An identity, not a shape: two consents proven gone means two rows.
@@ -2017,7 +2017,7 @@ class TestTheCombinedOutputIsOneAccount(DestructiveBase):
         out = call("delete_all_data")
         self.assertEqual(self.due(), 0)
         self.assertIn("NOTHING WAS DUE", out)
-        self.assertNotIn("proven gone could not be removed", out)
+        self.assertNotIn("ALREADY CLOSED could not be removed", out)
         self.assertIn("NOT FULLY ERASED", out)
 
     def test_a_sweep_it_cannot_even_size_says_it_does_not_know(self):
@@ -2030,7 +2030,7 @@ class TestTheCombinedOutputIsOneAccount(DestructiveBase):
         out = call("delete_all_data")
         self.assertIn("could not read how many were due", out)
         self.assertNotIn("NOTHING WAS DUE", out)
-        self.assertNotIn("proven gone could not be removed", out)
+        self.assertNotIn("ALREADY CLOSED could not be removed", out)
         self.assertIn("consent_status", out)
 
     def test_a_clean_run_says_nothing_about_a_sweep_at_all(self):
@@ -2929,8 +2929,8 @@ class TestDeleteAllDataErasesTheBackupFiles(DestructiveBase):
                          "one backup file", out)
         # The same full disk refuses the settlement that opens the
         # session-row sweep, so the proven-gone row is KEPT, and said so.
-        self.assertIn("1 session row(s) belonging to consents ALREADY PROVEN "
-                      "GONE were kept", out)
+        self.assertIn("1 session row(s) belonging to consents ALREADY CLOSED "
+                      "were kept", out)
         self.assertEqual(self.count("sessions"), 1)
         self.assertIn("Every backup copy was erased and the directory flushed, but its "
                       "completion record could not be written (the backup index could "
@@ -3560,8 +3560,8 @@ class TestACopyTakenWhileTheBanksAnswerDoesNotSurvive(DestructiveBase):
         # sweep record would leave the copy holding an identifier the ledger
         # no longer has.
         self.assertEqual(self.count("sessions"), 1)
-        self.assertIn("1 session row(s) belonging to consents ALREADY PROVEN "
-                      "GONE were kept: the backup index could not settle or "
+        self.assertIn("1 session row(s) belonging to consents ALREADY CLOSED "
+                      "were kept: the backup index could not settle or "
                       "record the sweep of the backup copies that has to go "
                       "with them "
                       "(the backup index could not be written: ENOSPC)", out)

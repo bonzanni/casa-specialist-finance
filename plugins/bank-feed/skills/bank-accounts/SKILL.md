@@ -185,6 +185,11 @@ do owe the operator is an accurate account of what each one touches, because
 the names understate two of them and overstate one.
 
 - `unlink_bank` withdraws one bank's permission. **Local history stays.**
+  Pass `withdrawn_at_bank=true` only when the operator tells you they
+  withdrew that consent on the bank's own consent screen after a withdrawal
+  here already failed; never on your own inference. If the provider still
+  does not confirm, the consent is then recorded as withdrawn by the operator,
+  not by the provider — relay that distinction as printed.
 - `forget_local_account` erases one account's local rows. **The consent stays
   active** — this does not disconnect the bank.
 - `purge` deletes every transaction booked before a cutoff date — or every
