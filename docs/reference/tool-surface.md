@@ -163,6 +163,8 @@ with the same crash protocol, but keeps what a reinstall needs to carry on:
 - the attempts that already exchanged their code;
 - the Retry-After holds;
 - the `setup.*` and renewal-handoff metadata;
+- each kept consent's last failed withdrawal (`revoke_failure|*`), and each account's
+  routine-sync record (`sync_health|*`) while it names that account's current binding;
 - the `account_id` secret. Every account id is derived from it, and only a masked IBAN is
   stored, so the ids could not be re-keyed.
 

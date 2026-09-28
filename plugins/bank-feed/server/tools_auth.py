@@ -805,7 +805,10 @@ def _ais():
                 "is unchanged. This is a transient verification "
                 "failure, not a bank failure: retry when "
                 "GET /application answers." % type(exc).__name__,
+                # The transport raises a 429 as `RateLimited`, not ApiError;
+                # it is still a status the operator needs (issue #84).
                 status=exc.status if isinstance(exc, eb_ais.ApiError)
+                else 429 if isinstance(exc, httpx.RateLimited)
                 else None) from None
         _assert_world(app_id, record=record)
     return client

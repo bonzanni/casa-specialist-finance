@@ -269,7 +269,8 @@ erases inside that transaction differs:
 - **Gone:** every table in `_DATA_ONLY_TABLES`, which is `_DATA_TABLES` minus
   `SIGNIN_TABLES`, so a data table added later is erased by default. Also gone: each
   account's label, category and include flag; every `meta` key outside the structural
-  ones, `setup.*` and `renewal_handoff|*`; and the AUTOINCREMENT counters of the erased
+  ones, `setup.*`, `renewal_handoff|*`, `revoke_failure|*` and each `sync_health|*`
+  record that names its account's current binding; and the AUTOINCREMENT counters of the erased
   tables. Every attempt that has not exchanged its code is deleted: a kept one's
   callback, arriving after the erasure, would bind a session and backfill the erased
   ledger.
