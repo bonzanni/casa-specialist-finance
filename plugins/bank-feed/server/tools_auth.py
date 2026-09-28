@@ -1053,12 +1053,22 @@ def _refused_elsewhere(c, account_id: str, record: dict):
     return None
 
 
+def _health_for(c, account_id: str, session: dict):
+    """`sync_health`, and only if it is about THIS consent: the account can be
+    re-bound by a renewal between the caller's read of the consent and this
+    read, and the new consent's record must not print under the old one."""
+    record = sync_health(c, account_id)
+    if record is None or record.get("session") != session.get("session_id"):
+        return None
+    return record
+
+
 def refusal_hint(c, account_id: str, session: dict):
     """The one rendering of the 401/403-while-another-consent-works finding,
     for `consent_status` and `sync` alike. Nothing is closed or revoked: a
     refused data call does not prove the consent is gone
     (`eb_ais.revocation_is_final`)."""
-    record = sync_health(c, account_id)
+    record = _health_for(c, account_id, session)
     if not record or not isinstance(record.get("fail"), dict):
         return None
     elsewhere = _refused_elsewhere(c, account_id, record)
@@ -1080,8 +1090,8 @@ def refusal_hint(c, account_id: str, session: dict):
 def sync_failure_lines(c, account_id: str, name: str, session: dict) -> list:
     """What `consent_status` says under a consent about one bound account
     whose routine transaction sync is failing. Empty when the record is
-    absent, stale or healthy."""
-    record = sync_health(c, account_id)
+    absent, stale, healthy or about another consent."""
+    record = _health_for(c, account_id, session)
     fail = (record or {}).get("fail")
     if not isinstance(fail, dict):
         return []

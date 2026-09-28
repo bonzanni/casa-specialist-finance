@@ -176,6 +176,22 @@ class TestConsentStatusShowsAFailingSync(FailureBase):
         self.raw.execute("UPDATE accounts SET session_id=?", (OTHER_SESSION,))
         self.assertNotIn("SYNC FAILING", call("consent_status"))
 
+    def test_a_record_prints_only_under_the_consent_it_names(self):
+        # consent_status read the OLD consent's accounts; a renewal then
+        # re-bound the account and its new consent's sync failed. The new
+        # record must not print under the old consent.
+        self.session()
+        self.session(sid=OTHER_SESSION)
+        self.account(session_id=OTHER_SESSION)
+        tools_auth.record_sync_health(self.raw, "acc1", OTHER_SESSION,
+                                      eb_ais.ApiError(403, "transactions"), 1.0)
+        old = {"session_id": SESSION_ID, "aspsp_name": "Rabobank"}
+        new = {"session_id": OTHER_SESSION, "aspsp_name": "Rabobank"}
+        self.assertEqual(tools_auth.sync_failure_lines(self.raw, "acc1", "a", old), [])
+        self.assertIsNone(tools_auth.refusal_hint(self.raw, "acc1", old))
+        self.assertEqual(len(tools_auth.sync_failure_lines(
+            self.raw, "acc1", "a", new)), 1)
+
     def test_the_writer_is_fenced_on_the_session_alone(self):
         self.session()
         self.session(sid=OTHER_SESSION)
@@ -315,7 +331,7 @@ class TestRefusalHintOrdering(FailureBase):
         self.assertEqual(self.health("acc1")["fail"]["last"],
                          self.health("acc2")["ok_at"])        # same second
         self.assertIsNone(tools_auth.refusal_hint(
-            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
+            self.raw, "acc1", {"aspsp_name": "Rabobank", "session_id": SESSION_ID}))
 
     def test_an_identical_instant_is_not_evidence_either(self):
         self.two_banks()
@@ -324,7 +340,7 @@ class TestRefusalHintOrdering(FailureBase):
         tools_auth.record_sync_health(self.raw, "acc1", SESSION_ID, exc, 1000.0)
         tools_auth.record_sync_health(self.raw, "acc2", OTHER_SESSION, None, 1000.0)
         self.assertIsNone(tools_auth.refusal_hint(
-            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
+            self.raw, "acc1", {"aspsp_name": "Rabobank", "session_id": SESSION_ID}))
 
     def test_a_later_success_in_the_same_second_is(self):
         self.two_banks()
@@ -334,7 +350,7 @@ class TestRefusalHintOrdering(FailureBase):
         self.at(1000.9)
         tools_auth.record_sync_health(self.raw, "acc2", OTHER_SESSION, None, 1000.8)
         self.assertIn("(ING)", tools_auth.refusal_hint(
-            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
+            self.raw, "acc1", {"aspsp_name": "Rabobank", "session_id": SESSION_ID}))
 
 
 class TestSyncHealthAndTheErasers(FailureBase):
@@ -549,6 +565,39 @@ class TestOperatorSettlement(FailureBase):
         self.assertNotIn("STILL LIVE", out)
         self.assertEqual(self.session_row()["status"], "CLOSED")
         self.assertIsNone(self.revoke_key())
+
+    def test_a_provider_confirmation_after_a_settlement_upgrades_it(self):
+        # Another call settles on the operator's word while this one waits;
+        # then the provider confirms this call's DELETE. The stronger
+        # provenance wins, and the original close time stays.
+        self.failed_once()
+        raw = self.raw
+
+        class SettledMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                assert apply.record_revocation(raw, sid, revoked=False,
+                                               operator_withdrawn=True)
+                return {"deleted": True}
+        self.ais_factory(SettledMeanwhile())
+        call("unlink_bank", consent_ref=self.ref())
+        settled_at = self.session_row()["closed_at"]
+        self.assertEqual(self.session_row()["status"], "CLOSED")
+        self.assertEqual(self.session_row()["closed_at"], settled_at)
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("the provider confirmed it", out)
+        self.assertEqual(callbacks.left_behind(self.raw, SESSION_ID), "closed")
+
+    def test_a_confirmation_keeps_the_first_close_time(self):
+        self.failed_once()
+        call("unlink_bank", consent_ref=self.ref(), withdrawn_at_bank=True)
+        first = self.session_row()["closed_at"]
+        self.raw.execute("UPDATE sessions SET closed_at='2000-01-01T00:00:00Z'")
+        self.assertTrue(apply.record_revocation(self.raw, SESSION_ID,
+                                                revoked=True))
+        row = self.session_row()
+        self.assertEqual(row["status"], "CLOSED")
+        self.assertEqual(row["closed_at"], "2000-01-01T00:00:00Z")
+        self.assertIsNotNone(first)
 
     def ais_factory(self, ais):
         self.addCleanup(setattr, tools_auth, "AIS_FACTORY", tools_auth.AIS_FACTORY)

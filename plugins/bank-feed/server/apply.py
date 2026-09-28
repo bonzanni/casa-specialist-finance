@@ -446,10 +446,14 @@ def record_revocation(conn, session_id: str, *, revoked: bool,
         return False
     if revoked or operator_withdrawn:
         if revoked:
+            # The provider's confirmation also UPGRADES an operator-recorded
+            # close that landed first (a concurrent settlement): the stronger
+            # provenance wins, and the original close time stays.
             cur = conn.execute(
-                "UPDATE sessions SET status='CLOSED', closed_at=?"
-                " WHERE session_id=? AND closed_at IS NULL",
-                (_now(), session_id))
+                "UPDATE sessions SET status='CLOSED',"
+                " closed_at=COALESCE(closed_at, ?)"
+                " WHERE session_id=? AND (closed_at IS NULL OR status=?)",
+                (_now(), session_id, OPERATOR_WITHDRAWN_STATUS))
         else:
             cur = conn.execute(
                 "UPDATE sessions SET status=?, closed_at=?"
