@@ -1091,7 +1091,7 @@ def _withdraw_open_consents(c):
         ais = tools_auth._ais()
     except Exception as exc:                 # noqa: BLE001 — e.g. no credential
         # Nothing was asked, so nothing is proven gone. Every row is kept.
-        return [], [dict(r, failure=type(exc).__name__) for r in rows]
+        return [], [dict(r, failure=eb_ais.failure_label(exc)) for r in rows]
     gone, kept = [], []
     for row in rows:
         try:

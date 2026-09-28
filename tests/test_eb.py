@@ -212,6 +212,23 @@ class TestFailureLabel(unittest.TestCase):
         exc.args = ("a provider body naming an account",)
         self.assertEqual(eb_ais.failure_label(exc), "ApiError: HTTP 401 unauthorized")
 
+    def test_a_class_that_declares_its_status_is_labelled_too(self):
+        class Wrapped(RuntimeError):
+            LABELS_STATUS = True
+
+            def __init__(self, status):
+                super().__init__("body text")
+                self.status = status
+        label = eb_ais.failure_label(Wrapped(503))
+        self.assertEqual(label, "Wrapped: HTTP 503 provider_error")
+        # Never read back as a consent's answer.
+        self.assertIsNone(eb_ais.label_status(label))
+        self.assertEqual(eb_ais.failure_label(Wrapped(None)), "Wrapped")
+
+        class Undeclared(RuntimeError):
+            status = 401
+        self.assertEqual(eb_ais.failure_label(Undeclared()), "Undeclared")
+
     def test_out_of_range_status_falls_back_to_the_class(self):
         exc = eb_ais.ApiError(401, "transactions")
         exc.status = 9999

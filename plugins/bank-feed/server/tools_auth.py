@@ -243,7 +243,11 @@ class WorldUnverified(RuntimeError):
 
     `status` is the HTTP status the check was answered with, or None: setup
     reads it, because a 401 or 403 there is a key mismatch, not a transient
-    failure (issue #80)."""
+    failure (issue #80). `LABELS_STATUS` lets `eb_ais.failure_label` print it
+    (issue #84) — as `WorldUnverified: HTTP 503 provider_error`, so the check
+    stays named, and `label_status` never reads it as a consent's answer."""
+
+    LABELS_STATUS = True
 
     def __init__(self, message, status=None):
         super().__init__(message)

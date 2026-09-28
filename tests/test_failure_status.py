@@ -437,6 +437,19 @@ class TestRevokeFailureCarriesItsStatus(FailureBase):
                          apply.REVOKE_FAILED_STATUS)
 
 
+class TestApplicationCheckStatus(FailureBase):
+    def test_a_failed_application_check_keeps_its_status(self):
+        self.session()
+        self.addCleanup(tools_auth._WORLD_OK.clear)
+        tools_auth._WORLD_OK.clear()
+        self.ais.raise_on_application = eb_ais.ApiError(503, "application")
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("NOT revoked (WorldUnverified: HTTP 503 provider_error)",
+                      out)
+        out = call("delete_all_data")
+        self.assertIn("WorldUnverified: HTTP 503 provider_error", out)
+
+
 class _Refusing:
     def __init__(self, status):
         self.status = status

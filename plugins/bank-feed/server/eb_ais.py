@@ -117,16 +117,20 @@ def failure_label(exc) -> str:
 
     An `ApiError` becomes `ApiError: HTTP 401 unauthorized` — the status and
     the fixed `error_kind` vocabulary, which is what tells an unauthorized
-    answer from a rate limit or an outage. Anything else stays its class name,
-    as it always was. Neither reads `str(exc)` or `args`, so no provider body
+    answer from a rate limit or an outage. So does any exception whose class
+    declares `LABELS_STATUS = True` and carries the status it wraps
+    (`tools_auth.WorldUnverified`, the application check, which this module
+    cannot import). Anything else stays its class name, as it always was. Neither reads `str(exc)` or `args`, so no provider body
     can reach a ledger column or a reply through it. No parentheses: the label
     is printed inside the callers' own `(…)`.
     """
-    if isinstance(exc, ApiError):
-        status = exc.status
+    if isinstance(exc, ApiError) or getattr(type(exc), "LABELS_STATUS",
+                                            False) is True:
+        status = getattr(exc, "status", None)
         if (isinstance(status, int) and not isinstance(status, bool)
                 and 100 <= status <= 599):
-            return "ApiError: HTTP %d %s" % (status, error_kind(status))
+            return "%s: HTTP %d %s" % (type(exc).__name__, status,
+                                        error_kind(status))
     return type(exc).__name__
 
 
