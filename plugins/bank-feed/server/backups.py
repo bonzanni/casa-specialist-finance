@@ -1707,7 +1707,10 @@ def _erase(paths: Paths, handle: IndexHandle, state: LedgerState,
     return out
 
 
-KEEP_LIVE_TABLES = frozenset({"sessions", "attempts", "meta"})
+#: `tag_revisions` (issue #86) is live state like the `meta` counter it is
+#: stamped from: a revision rolled back to a backup's value could be issued
+#: again for a different tag set. A backup from before it restores too.
+KEEP_LIVE_TABLES = frozenset({"sessions", "attempts", "meta", "tag_revisions"})
 FTS_TABLES = frozenset({"notes_fts", "notes_fts_data", "notes_fts_idx",
                         "notes_fts_docsize", "notes_fts_config"})
 _SPECIAL_TABLES = frozenset({"sqlite_sequence"})

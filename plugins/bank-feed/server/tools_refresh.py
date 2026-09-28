@@ -1038,6 +1038,14 @@ EXPORT_EXCLUDE = {
 }
 
 
+#: The two columns an export appends after the ledger's own (issue #86):
+#: `tags` (sorted; comma-joined in CSV, a list in JSONL) and `tag_revision`,
+#: which changes whenever the row's tag set does, removals included — for one
+#: ledger instance id, an equal revision means an equal tag set. 0 is "no
+#: change recorded since the revision was installed on this ledger".
+EXPORT_TAG_COLUMNS = ("tags", "tag_revision")
+
+
 def _export_columns(c) -> list:
     columns = [row[1] for row in c.execute("PRAGMA table_info(transactions)")]
     stale = [name for name in EXPORT_EXCLUDE if name not in columns]
@@ -1046,6 +1054,11 @@ def _export_columns(c) -> list:
         # "considered and rejected" while excluding nothing.
         raise RuntimeError("export exclusion names no such column: %s"
                            % ", ".join(sorted(stale)))
+    clash = [name for name in EXPORT_TAG_COLUMNS if name in columns]
+    if clash:
+        # The appended columns would silently overwrite a ledger column.
+        raise RuntimeError("export column clashes with a ledger column: %s"
+                           % ", ".join(clash))
     return [name for name in columns if name not in EXPORT_EXCLUDE]
 
 
@@ -1056,7 +1069,8 @@ _EXPORT_UNLABELLED = ("The export was not written: the ledger could not "
 
 @register("export_history",
           "Write the full local ledger as CSV or JSONL into Casa's handoff "
-          "folder and return the path. Another plugin can take the file from "
+          "folder and return the path. Each row carries its current tags and "
+          "a tag_revision that changes whenever its tags do. Another plugin can take the file from "
           "that path (an accounting import, an email attachment); it is kept "
           "7 days.",
           {"type": "object",
@@ -1085,6 +1099,14 @@ def export_history(args: dict) -> str:
         rows = [dict(r) for r in c.execute(
             "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
             % ", ".join(columns))]
+        # Issue #86: each row's current tags and tag revision, from the same
+        # snapshot, so a consumer learns every classification in one import.
+        tags = {}
+        for rid, tag in c.execute(
+                "SELECT row_id, tag FROM transaction_tags ORDER BY row_id, tag"):
+            tags.setdefault(rid, []).append(tag)
+        revisions = dict(c.execute(
+            "SELECT row_id, revision FROM %s" % store.TAG_REVISIONS_TABLE))
         c.execute("COMMIT")
     except BaseException:
         if c.in_transaction:
@@ -1092,13 +1114,18 @@ def export_history(args: dict) -> str:
         raise
     if ledger is None:
         return _EXPORT_UNLABELLED
+    for row in rows:
+        row["tags"] = tags.get(row["row_id"], [])
+        row["tag_revision"] = revisions.get(row["row_id"], 0)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.StringIO(newline="")
     if fmt == "csv":
-        writer = csv.DictWriter(buf, fieldnames=columns)
+        writer = csv.DictWriter(buf, fieldnames=columns + list(EXPORT_TAG_COLUMNS))
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            # The tag grammar admits no comma or whitespace, so the join is
+            # unambiguous; an empty cell is no tags.
+            writer.writerow(dict(row, tags=",".join(row["tags"])))
     else:
         for row in rows:
             buf.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -1110,7 +1137,8 @@ def export_history(args: dict) -> str:
         return "The export could not be written: %s" % exc
     return "\n".join([
         "Exported %d transaction(s) as %s, every column of the ledger except "
-        "%s. The file is written in full — it is a file, not model context, "
+        "%s, then each row's current tags and its tag_revision (it changes "
+        "whenever the row's tags do). The file is written in full — it is a file, not model context, "
         "so nothing is clipped or delimited, and it therefore contains "
         "bank-supplied text exactly as the bank sent it. It is in Casa's "
         "handoff folder for %d days: pass the path to the tool that needs it, "
