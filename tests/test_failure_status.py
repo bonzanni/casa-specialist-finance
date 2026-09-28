@@ -530,6 +530,26 @@ class TestOperatorSettlement(FailureBase):
         self.assertEqual(row["status"], apply.REVOKE_FAILED_STATUS)
         self.assertEqual(self.bindings(), [("acc1", SESSION_ID, "uid-acc1")])
 
+    def test_a_close_by_another_call_meanwhile_is_reported_as_closed(self):
+        # While this call waits on the provider, another unlink gets the
+        # provider's confirmation and closes the row. This call's own attempt
+        # then fails — and must not call the consent "NOT revoked".
+        self.failed_once()
+        raw = self.raw
+
+        class ClosedMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                apply.record_revocation(raw, sid, revoked=True)
+                raise eb_ais.ApiError(500, "delete_session")
+        self.ais_factory(ClosedMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref(),
+                   withdrawn_at_bank=True)
+        self.assertIn("already been withdrawn and the provider confirmed it", out)
+        self.assertNotIn("NOT revoked", out)
+        self.assertNotIn("STILL LIVE", out)
+        self.assertEqual(self.session_row()["status"], "CLOSED")
+        self.assertIsNone(self.revoke_key())
+
     def ais_factory(self, ais):
         self.addCleanup(setattr, tools_auth, "AIS_FACTORY", tools_auth.AIS_FACTORY)
         tools_auth.AIS_FACTORY = lambda: ais

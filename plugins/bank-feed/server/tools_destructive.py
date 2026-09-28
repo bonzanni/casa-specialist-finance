@@ -208,6 +208,24 @@ def _reclaim(c):
     return True, _RECLAIMED
 
 
+def _already_closed(bank: str, row) -> str:
+    """The reply for a consent whose row is already closed, by whichever
+    writer closed it: the provider's confirmation, or the operator's own
+    statement (issue #84), which is never upgraded to a confirmation."""
+    if str(row["status"] or "") == apply.OPERATOR_WITHDRAWN_STATUS:
+        return ("%s: that consent is already closed: on %s you recorded "
+                "that you withdrew it on %s's own consent screen. The "
+                "provider never confirmed the withdrawal. %s and nothing "
+                "local was lost by it. consent_status lists the consents "
+                "that still exist."
+                % (bank, _safe(str(row["closed_at"])[:10]), bank,
+                   backups.unchanged(perfect=True, stop=False)))
+    return ("%s: that consent has already been withdrawn and the provider "
+            "confirmed it. %s and nothing local was lost by it. "
+            "consent_status lists the consents that still exist."
+            % (bank, backups.unchanged(perfect=True, stop=False)))
+
+
 @register("unlink_bank",
           "Revoke a bank consent. Stops refreshing; does NOT erase local "
           "history. withdrawn_at_bank=true only when the operator says they "
@@ -250,18 +268,7 @@ def unlink_bank(args: dict) -> str:
         # status records and this reply must not upgrade to a confirmation
         # (issue #84). Either way it is the answer this tool would go and ask
         # for: asking spends a live API call to learn what the row records.
-        if str(row["status"] or "") == apply.OPERATOR_WITHDRAWN_STATUS:
-            return ("%s: that consent is already closed: on %s you recorded "
-                    "that you withdrew it on %s's own consent screen. The "
-                    "provider never confirmed the withdrawal. %s and nothing "
-                    "local was lost by it. consent_status lists the consents "
-                    "that still exist."
-                    % (bank, _safe(str(row["closed_at"])[:10]), bank,
-                       backups.unchanged(perfect=True, stop=False)))
-        return ("%s: that consent has already been withdrawn and the provider "
-                "confirmed it. %s and nothing local was lost by it. "
-                "consent_status lists the consents that still exist."
-                % (bank, backups.unchanged(perfect=True, stop=False)))
+        return _already_closed(bank, row)
     # A quarantined consent is exactly what this tool has to be able to
     # revoke — it is a live consent at the bank that nothing is bound to, and
     # it was previously unreachable because only `attempts.session_id` held it.
@@ -320,6 +327,11 @@ def unlink_bank(args: dict) -> str:
             if not settled:
                 apply.record_revocation(c, session_id, revoked=False,
                                         failure=failure)
+        # What the row says NOW, in this transaction. Another call may have
+        # closed it while this one waited on the provider; a failure reply
+        # would then call a closed consent "NOT revoked" and very likely live.
+        after = c.execute("SELECT status, closed_at FROM sessions"
+                          " WHERE session_id=?", (session_id,)).fetchone()
         if revoked or settled:
             # THE CONTRACT WITH THE COLLECTOR, probed rather than reasoned
             # about. Closing the session row alone leaves every account
@@ -340,6 +352,10 @@ def unlink_bank(args: dict) -> str:
     except Exception:
         c.execute("ROLLBACK")
         raise
+
+    if not revoked and not settled and after is not None \
+            and after["closed_at"]:
+        return _already_closed(bank, after)
 
     if settled:
         # Issue #84: the one close that is not the provider's. Said as such,
