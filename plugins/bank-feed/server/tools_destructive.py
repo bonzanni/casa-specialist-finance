@@ -289,6 +289,11 @@ def unlink_bank(args: dict) -> str:
     # the consent live at the bank, and closing the row anyway hid it from
     # `consent_status` (which lists open sessions only) and took away the one
     # handle the operator had for retrying.
+    # The accounts this consent serves, read BEFORE the provider is asked: a
+    # call alongside can release the bindings while this one waits, and the
+    # history this reply says survives is theirs either way.
+    served = [r[0] for r in c.execute(
+        "SELECT account_id FROM accounts WHERE session_id=?", (session_id,))]
     absent, failure = False, None
     try:
         tools_auth._ais().delete_session(session_id)
@@ -299,9 +304,8 @@ def unlink_bank(args: dict) -> str:
         failure = eb_ais.failure_label(exc)     # class + status, never a body
 
     kept = c.execute(
-        "SELECT COUNT(*) FROM transactions WHERE account_id IN"
-        " (SELECT account_id FROM accounts WHERE session_id=?)",
-        (session_id,)).fetchone()[0]
+        "SELECT COUNT(*) FROM transactions WHERE account_id IN (%s)"
+        % ", ".join("?" * len(served)), served).fetchone()[0] if served else 0
 
     # `apply.record_revocation` is the ONLY writer of `closed_at` anywhere in
     # this plugin, and therefore also the authority on what is written instead

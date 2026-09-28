@@ -587,6 +587,24 @@ class TestOperatorSettlement(FailureBase):
         self.assertIn("the provider confirmed it", out)
         self.assertEqual(callbacks.left_behind(self.raw, SESSION_ID), "closed")
 
+    def test_the_history_count_survives_a_concurrent_release(self):
+        # A settlement alongside releases the bindings while this call waits;
+        # this call's success reply still counts the history that survives.
+        self.failed_once()
+        self.tx("acc1")
+        raw = self.raw
+
+        class SettledMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                apply.record_revocation(raw, sid, revoked=False,
+                                        operator_withdrawn=True)
+                raw.execute("UPDATE accounts SET session_id=NULL, uid=NULL"
+                            " WHERE session_id=?", (sid,))
+                return {"deleted": True}
+        self.ais_factory(SettledMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("1 transaction of local history survives", out)
+
     def test_a_confirmation_keeps_the_first_close_time(self):
         self.failed_once()
         call("unlink_bank", consent_ref=self.ref(), withdrawn_at_bank=True)
