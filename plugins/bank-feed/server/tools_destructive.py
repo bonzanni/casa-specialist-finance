@@ -289,9 +289,14 @@ def unlink_bank(args: dict) -> str:
     # the consent live at the bank, and closing the row anyway hid it from
     # `consent_status` (which lists open sessions only) and took away the one
     # handle the operator had for retrying.
-    # The accounts this consent serves, read BEFORE the provider is asked: a
-    # call alongside can release the bindings while this one waits, and the
-    # history this reply says survives is theirs either way.
+    # THE REPLY IS RENDERED FROM WHAT THE WRITE TRANSACTION BELOW READS, never
+    # from what was read before the provider was asked. Calls alongside this
+    # one — another unlink, a settlement, a collection, an erasure — can
+    # close the row, release or add bindings, or delete the row while this
+    # call waits, and every snapshot taken earlier described a ledger that no
+    # longer exists by the time the reply is written. The accounts served at
+    # the START are kept only so a release alongside cannot shrink the
+    # history this reply says survives.
     served = [r[0] for r in c.execute(
         "SELECT account_id FROM accounts WHERE session_id=?", (session_id,))]
     absent, failure = False, None
@@ -303,9 +308,6 @@ def unlink_bank(args: dict) -> str:
         revoked = absent
         failure = eb_ais.failure_label(exc)     # class + status, never a body
 
-    kept = c.execute(
-        "SELECT COUNT(*) FROM transactions WHERE account_id IN (%s)"
-        % ", ".join("?" * len(served)), served).fetchone()[0] if served else 0
 
     # `apply.record_revocation` is the ONLY writer of `closed_at` anywhere in
     # this plugin, and therefore also the authority on what is written instead
@@ -331,11 +333,18 @@ def unlink_bank(args: dict) -> str:
             if not settled:
                 apply.record_revocation(c, session_id, revoked=False,
                                         failure=failure)
-        # What the row says NOW, in this transaction. Another call may have
-        # closed it while this one waited on the provider; a failure reply
-        # would then call a closed consent "NOT revoked" and very likely live.
+        # The facts the reply is rendered from, read NOW, in this
+        # transaction, before the release below: the row as it stands (or
+        # None — an erasure alongside removed it), and the history of every
+        # account this consent served at the start or is bound to now.
         after = c.execute("SELECT status, closed_at FROM sessions"
                           " WHERE session_id=?", (session_id,)).fetchone()
+        ids = sorted(set(served) | {r[0] for r in c.execute(
+            "SELECT account_id FROM accounts WHERE session_id=?",
+            (session_id,))})
+        kept = c.execute(
+            "SELECT COUNT(*) FROM transactions WHERE account_id IN (%s)"
+            % ", ".join("?" * len(ids)), ids).fetchone()[0] if ids else 0
         if revoked or settled:
             # THE CONTRACT WITH THE COLLECTOR, probed rather than reasoned
             # about. Closing the session row alone leaves every account
@@ -357,8 +366,18 @@ def unlink_bank(args: dict) -> str:
         c.execute("ROLLBACK")
         raise
 
-    if not revoked and not settled and after is not None \
-            and after["closed_at"]:
+    if after is None:
+        # The row went while this call waited: only an erasure deletes
+        # session rows, and it deletes only closed ones — so no claim about a
+        # listed or live consent can be made from here.
+        return "\n".join([
+            "%s: this consent's local record was removed by another call "
+            "(an erasure) while this one waited on the provider, whose answer "
+            "to this call was %s. consent_status lists what still exists."
+            % (bank, "a confirmed withdrawal" if revoked
+               else "not a confirmation (%s)" % failure),
+            GATE_NOTE])
+    if not revoked and not settled and after["closed_at"]:
         return _already_closed(bank, after)
 
     if settled:

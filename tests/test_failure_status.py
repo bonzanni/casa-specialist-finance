@@ -605,6 +605,44 @@ class TestOperatorSettlement(FailureBase):
         out = call("unlink_bank", consent_ref=self.ref())
         self.assertIn("1 transaction of local history survives", out)
 
+    def test_a_binding_added_meanwhile_is_counted_too(self):
+        # A collection alongside binds another account while this call waits.
+        self.session()
+        self.account("acc1")
+        self.tx("acc1", ik="a")
+        test = self
+
+        class BoundMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                test.account("acc2")
+                test.tx("acc2", ik="b")
+                return {"deleted": True}
+        self.ais_factory(BoundMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("2 transactions of local history survive", out)
+        self.assertEqual(self.bindings(),
+                         [("acc1", None, None), ("acc2", None, None)])
+
+    def test_a_row_erased_meanwhile_is_not_called_listed_or_live(self):
+        self.failed_once()
+        raw = self.raw
+
+        class ErasedMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                # What delete_all_data leaves: meta emptied, the row gone.
+                raw.execute("DELETE FROM meta WHERE key=?",
+                            (apply.revoke_failure_key(sid),))
+                raw.execute("DELETE FROM sessions WHERE session_id=?", (sid,))
+                raise eb_ais.ApiError(500, "delete_session")
+        self.ais_factory(ErasedMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref(),
+                   withdrawn_at_bank=True)
+        self.assertIn("removed by another call", out)
+        self.assertIn("ApiError: HTTP 500 provider_error", out)
+        self.assertNotIn("STILL LIVE", out)
+        self.assertNotIn("lists it", out)
+        self.assertIsNone(self.revoke_key())
+
     def test_a_confirmation_keeps_the_first_close_time(self):
         self.failed_once()
         call("unlink_bank", consent_ref=self.ref(), withdrawn_at_bank=True)
