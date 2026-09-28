@@ -188,6 +188,61 @@ class TestRevocationIsFinal(unittest.TestCase):
         self.assertFalse(eb_ais.revocation_is_final(TimeoutError("slow")))
 
 
+class TestFailureLabel(unittest.TestCase):
+    """Issues #83/#84: the status of an ApiError is recorded, nothing else."""
+
+    def test_api_error_carries_status_and_kind(self):
+        for status, want in ((401, "ApiError: HTTP 401 unauthorized"),
+                             (403, "ApiError: HTTP 403 forbidden"),
+                             (429, "ApiError: HTTP 429 rate_limited"),
+                             (502, "ApiError: HTTP 502 provider_error"),
+                             (418, "ApiError: HTTP 418 http_error")):
+            with self.subTest(status=status):
+                label = eb_ais.failure_label(eb_ais.ApiError(status, "transactions"))
+                self.assertEqual(label, want)
+                self.assertEqual(eb_ais.label_status(label), status)
+
+    def test_other_exceptions_stay_their_class_name(self):
+        self.assertEqual(eb_ais.failure_label(OSError("secret body")), "OSError")
+        self.assertEqual(eb_ais.failure_label(httpx.RateLimited("x", 5)),
+                         "RateLimited")
+
+    def test_message_never_reaches_the_label(self):
+        exc = eb_ais.ApiError(401, "transactions")
+        exc.args = ("a provider body naming an account",)
+        self.assertEqual(eb_ais.failure_label(exc), "ApiError: HTTP 401 unauthorized")
+
+    def test_a_class_that_declares_its_status_is_labelled_too(self):
+        class Wrapped(RuntimeError):
+            LABELS_STATUS = True
+
+            def __init__(self, status):
+                super().__init__("body text")
+                self.status = status
+        label = eb_ais.failure_label(Wrapped(503))
+        self.assertEqual(label, "Wrapped: HTTP 503 provider_error")
+        # Never read back as a consent's answer.
+        self.assertIsNone(eb_ais.label_status(label))
+        self.assertEqual(eb_ais.failure_label(Wrapped(None)), "Wrapped")
+
+        class Undeclared(RuntimeError):
+            status = 401
+        self.assertEqual(eb_ais.failure_label(Undeclared()), "Undeclared")
+
+    def test_out_of_range_status_falls_back_to_the_class(self):
+        exc = eb_ais.ApiError(401, "transactions")
+        exc.status = 9999
+        self.assertEqual(eb_ais.failure_label(exc), "ApiError")
+
+    def test_label_status_reads_only_its_own_shape(self):
+        for text in (None, "", "ApiError", "RateLimited (Retry-After honoured)",
+                     "ApiError: HTTP 401 unauthorized (Retry-After honoured)",
+                     "x ApiError: HTTP 401 unauthorized",
+                     "the bank stopped answering partway through pagination"):
+            with self.subTest(text=text):
+                self.assertIsNone(eb_ais.label_status(text))
+
+
 class TestAdmin(unittest.TestCase):
     def _admin(self, responses):
         admin = eb_admin.Admin(token="t")

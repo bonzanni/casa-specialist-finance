@@ -36,7 +36,7 @@ import re
 from typing import NamedTuple
 
 import apply
-import eb_ais                    # for revocation_is_final; see _revoke
+import eb_ais                    # revocation_is_final, failure_label; _revoke
 import ingest
 import provenance
 import store
@@ -517,10 +517,13 @@ def _revoke(conn, ais, old_session_id: str):
         ais.delete_session(old_session_id)
     except Exception as exc:                     # provider said no, or nothing
         final = eb_ais.revocation_is_final(exc)
-        apply.record_revocation(conn, old_session_id, revoked=final)
-        # The class name, not str(exc): a provider body may echo identifiers,
-        # nothing a tool can print may carry one.
-        return (True, None) if final else (False, type(exc).__name__)
+        # `failure_label`, not str(exc): a provider body may echo identifiers,
+        # nothing a tool can print may carry one. The status is kept (issue
+        # #84) so `consent_status` can tell a 401 from an outage later.
+        label = eb_ais.failure_label(exc)
+        apply.record_revocation(conn, old_session_id, revoked=final,
+                                failure=None if final else label)
+        return (True, None) if final else (False, label)
     apply.record_revocation(conn, old_session_id, revoked=True)
     return True, None
 

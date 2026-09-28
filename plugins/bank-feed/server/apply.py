@@ -386,13 +386,41 @@ RETIRED_STATUS = "REVOKE_PENDING"
 #: The provider refused, rate limited, or could not be reached. Same
 #: visibility, and it says WHY the row is still there.
 REVOKE_FAILED_STATUS = "REVOKE_FAILED"
+#: Closed on the OPERATOR's word, not the provider's (issue #84): the provider
+#: kept answering the withdrawal non-finally, and the operator stated on an
+#: approved `unlink_bank ... withdrawn_at_bank=true` that they withdrew the
+#: consent on the bank's own screen. `closed_at` is set like a confirmed
+#: revocation — the row leaves `consent_status` and the erasure removes it —
+#: and this status is what keeps every later reply from calling it
+#: provider-confirmed.
+OPERATOR_WITHDRAWN_STATUS = "WITHDRAWN_BY_OPERATOR"
 
 
-def record_revocation(conn, session_id: str, *, revoked: bool) -> None:
-    """Record what the PROVIDER said about the old consent.
+def revoke_failure_key(session_id: str) -> str:
+    """The meta key holding the last failed withdrawal's `failure_label`.
+    Embeds the raw session id, like `renewal_handoff|`, so every eraser
+    handles it by the same rule."""
+    return "revoke_failure|" + str(session_id)
 
-    The only thing that ever sets `closed_at` on a renewed-away session, and it
-    sets it only on `revoked=True`. `closed_at` is what hides a session from
+
+def revoke_failure(conn, session_id: str):
+    """The label `record_revocation` stored for this consent, or None."""
+    row = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (revoke_failure_key(session_id),)).fetchone()
+    return row[0] if row else None
+
+
+def record_revocation(conn, session_id: str, *, revoked: bool,
+                      failure: str | None = None,
+                      operator_withdrawn: bool = False) -> bool:
+    """Record what the PROVIDER said about the old consent — or, in exactly
+    one case, what the OPERATOR said.
+
+    The only writer of `closed_at` anywhere in this plugin. It sets it on
+    `revoked=True` (a success or a 404) and on `operator_withdrawn=True`, which
+    is honoured only for a row that is already `REVOKE_FAILED` — a withdrawal
+    was attempted, failed and was reported before — and writes
+    `OPERATOR_WITHDRAWN_STATUS` so the provenance stays readable. `closed_at` is what hides a session from
     `consent_status` (`WHERE closed_at IS NULL`) and it is the operator's whole
     view of which consents exist, so writing it for a consent we did not
     actually revoke would leave a live AIS grant at the bank that nothing in
@@ -405,18 +433,45 @@ def record_revocation(conn, session_id: str, *, revoked: bool) -> None:
     reach the bank". A later protected `unlink_bank` resolves the same
     `consent_ref` and retries.
 
+    `failure` (a `eb_ais.failure_label`, body-free) is kept in meta for
+    `consent_status` to name (issue #84). Only callers after which no erasure
+    runs pass it: `delete_all_data` empties meta BEFORE it withdraws, so a key
+    written by its withdrawal would outlive the erasure it belongs to. A
+    closing write drops the key.
+
     Idempotent, and it never reopens a session someone else already closed.
+    Returns whether a row was closed by THIS call.
     """
     if not session_id:
-        return
-    if revoked:
-        conn.execute(
-            "UPDATE sessions SET status='CLOSED', closed_at=?"
-            " WHERE session_id=? AND closed_at IS NULL", (_now(), session_id))
-    else:
-        conn.execute(
-            "UPDATE sessions SET status=? WHERE session_id=?"
-            " AND closed_at IS NULL", (REVOKE_FAILED_STATUS, session_id))
+        return False
+    if revoked or operator_withdrawn:
+        if revoked:
+            # The provider's confirmation also UPGRADES an operator-recorded
+            # close that landed first (a concurrent settlement): the stronger
+            # provenance wins, and the original close time stays.
+            cur = conn.execute(
+                "UPDATE sessions SET status='CLOSED',"
+                " closed_at=COALESCE(closed_at, ?)"
+                " WHERE session_id=? AND (closed_at IS NULL OR status=?)",
+                (_now(), session_id, OPERATOR_WITHDRAWN_STATUS))
+        else:
+            cur = conn.execute(
+                "UPDATE sessions SET status=?, closed_at=?"
+                " WHERE session_id=? AND closed_at IS NULL AND status=?",
+                (OPERATOR_WITHDRAWN_STATUS, _now(), session_id,
+                 REVOKE_FAILED_STATUS))
+        if cur.rowcount:
+            conn.execute("DELETE FROM meta WHERE key=?",
+                         (revoke_failure_key(session_id),))
+        return bool(cur.rowcount)
+    cur = conn.execute(
+        "UPDATE sessions SET status=? WHERE session_id=?"
+        " AND closed_at IS NULL", (REVOKE_FAILED_STATUS, session_id))
+    if failure and cur.rowcount:
+        conn.execute("INSERT INTO meta(key, value) VALUES (?,?)"
+                     " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     (revoke_failure_key(session_id), str(failure)))
+    return False
 
 
 def deep_fetch_complete(conn, account_id: str, session_id: str) -> bool:

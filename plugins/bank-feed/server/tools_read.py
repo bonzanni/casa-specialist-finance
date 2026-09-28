@@ -48,6 +48,7 @@ import sqlite3
 import backups
 import apply
 import bank_feed_server
+import eb_ais
 import flows
 import money
 import rules
@@ -539,8 +540,9 @@ def _freshness(c, account_ids, resource: str) -> list:
                 # actual success in its RETURN VALUE. Both are read below.
                 returned = REFRESHER(c, account_id, resource, out=res_out)
             except Exception as exc:            # noqa: BLE001 — class only
-                # Never the message: it can carry a provider body.
-                error = type(exc).__name__
+                # Never the message: it can carry a provider body. The status
+                # of an `ApiError` is ours to print (issue #83).
+                error = eb_ais.failure_label(exc)
                 # A class name is not a remedy. An exception whose class
                 # declares `operator_exit` is stating that the state it creates
                 # has a named way OUT, and that text is OURS (a constant in the
@@ -609,8 +611,13 @@ def _freshness_note(accounts, fresh) -> str:
         # one goes through `_clause_safe` and this does not.
         life = (" (the account's ledger life changed during this refresh — "
                 "restored or erased; run sync)" if f.get("life_changed") else "")
+        # The inline refresh's failure is said on BOTH branches: on the
+        # never-synced one it is the only explanation there is (issue #83).
+        failed = (" (inline refresh FAILED: %s%s)"
+                  % (f["error"], f.get("exit_hint") or "")
+                  if f["error"] else "")
         if f["age_s"] is None:
-            parts.append("%s: never synced%s" % (name, life))
+            parts.append("%s: never synced%s%s" % (name, life, failed))
             continue
         state = "fresh" if f["age_s"] <= STALENESS_S else "STALE"
         note = "%s: %s, cache age %s" % (name, state, _fmt_age(f["age_s"]))
@@ -620,9 +627,7 @@ def _freshness_note(accounts, fresh) -> str:
         if f["refreshed"] and not life:
             note += " (refreshed inline just now)"
         note += life
-        if f["error"]:
-            note += " (inline refresh FAILED: %s%s)" % (f["error"],
-                                                        f.get("exit_hint") or "")
+        note += failed
         if (f["completeness"] or "complete") != "complete":
             note += " (completeness=%s — this range is incomplete)" % f["completeness"]
         parts.append(note)

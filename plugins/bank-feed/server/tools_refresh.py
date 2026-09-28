@@ -43,6 +43,7 @@ import json
 
 import backups
 import casa_handoff
+import eb_ais
 import flows
 import httpx
 import money
@@ -156,8 +157,9 @@ def _ensure_sync_row(c, account_id: str, resource: str, incarnation) -> None:
 def _note_failure(c, account_id: str, resource: str, exc, incarnation) -> None:
     """Record the failure per resource, and the provider's own backoff.
 
-    The class name only — never the message, which can carry a provider
-    body. Every write is conditioned on `incarnation` — the token captured
+    `eb_ais.failure_label` — the class name, plus the HTTP status and its
+    fixed kind for an `ApiError` (issue #83: a week of 401s was recorded as
+    `ApiError` alone) — never the message, which can carry a provider body. Every write is conditioned on `incarnation` — the token captured
     by the SAME account read the failed refresh ran under — so a failure
     noted late cannot resurrect sync_state for an erased account, nor stamp
     the OLD run's failure onto a re-linked account's NEW life. The UPDATEs
@@ -167,7 +169,7 @@ def _note_failure(c, account_id: str, resource: str, exc, incarnation) -> None:
     _ensure_sync_row(c, account_id, resource, incarnation)
     guard = (" AND EXISTS (SELECT 1 FROM accounts WHERE account_id=?"
              " AND incarnation=?)")
-    label = type(exc).__name__
+    label = eb_ais.failure_label(exc)
     if _is_rate_limited(exc):
         wait = _retry_after_s(exc)
         label += (" (Retry-After honoured)" if _honoured(exc)
@@ -470,6 +472,7 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     # under. Never re-read later in the run: a forget-and-relink between two
     # reads is exactly what the fence exists to catch.
     incarnation = account.get("incarnation")
+    started = tools_auth._now_s()        # issue #83: orders health records
     try:
         result = _fetch_resource(c, account_id, resource, account, incarnation,
                                  out=out)
@@ -477,6 +480,12 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
     except Exception as e:  # noqa: BLE001 — recorded (guarded), then finalised
         _note_failure(c, account_id, resource, e, incarnation)
         result, exc = False, e
+    if resource == "transactions":
+        # Issue #83: the routine sync's health, per consent, fenced on the
+        # session this run captured. Only here — a link's or renewal's
+        # backfill is not a routine sync of the bound consent.
+        tools_auth.record_sync_health(c, account_id, account.get("session_id"),
+                                      exc, started)
     # THE ONE TERMINAL LIFE CHECK. Fencing the intermediate reads one at a
     # time does not hold, and each attempt left another gap:
     # `backfill_complete`'s `sync_state` row came back from a backup and read
@@ -841,6 +850,7 @@ def sync(args: dict) -> str:
         return msg
     resources = [requested] if requested else list(RESOURCES)
     lines = []
+    refused = []                    # (name, account_id) whose transactions failed
     batch_new = batch_tagged = batch_needs = 0
     for account in accounts:
         # The same handle the read tools print, through the same fence:
@@ -931,16 +941,19 @@ def sync(args: dict) -> str:
                     "DEFERRED — %s. Nothing was called and the previous cached "
                     "answer is unchanged." % tools_read._neutralized(exc)))
             except Exception as exc:             # noqa: BLE001
-                # The class name only — a provider body must never reach this
+                # `eb_ais.failure_label` only — the class, plus an ApiError's
+                # status (issue #83); a provider body must never reach this
                 # line. `NO_BALANCES_EXIT` is not a message: it is OUR literal,
                 # appended for the one failure that is permanent until the
                 # operator acts, and for no other. See the constant for why it
                 # is not printed beside every failure.
+                if resource == "transactions":
+                    refused.append((name, account_id))
                 lines.append(_account_line(
                     name, resource,
                     "FAILED (%s) — the previous cached answer is unchanged and "
                     "still labelled with its own age%s%s"
-                    % (type(exc).__name__,
+                    % (eb_ais.failure_label(exc),
                        _recorded_wait(c, account_id, resource),
                        NO_BALANCES_EXIT
                        if isinstance(exc, NoBalancesReturned) else "")))
@@ -957,6 +970,18 @@ def sync(args: dict) -> str:
                     batch_new += len(res_out.get("new_row_ids") or [])
                     batch_tagged += res_out.get("auto_tagged") or 0
                     batch_needs += res_out.get("needs_classification") or 0
+    # Issue #83: AFTER the loop, so a later bank's success in this same run
+    # counts as the cross-consent evidence. The one renderer consent_status
+    # uses, reading the record this run just wrote.
+    for name, account_id in refused:
+        session = c.execute(
+            "SELECT s.* FROM sessions s JOIN accounts a"
+            " ON a.session_id = s.session_id WHERE a.account_id=?",
+            (account_id,)).fetchone()
+        hint = (tools_auth.refusal_hint(c, account_id, dict(session))
+                if session is not None else None)
+        if hint:
+            lines.append("%s: %s" % (name, hint))
     if batch_new:
         # needs is the propagated FINAL-STATE workable count, never
         # new-minus-tagged: a parked/terminal insert is neither bucket, so

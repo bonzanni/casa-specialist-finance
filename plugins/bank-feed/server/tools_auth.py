@@ -243,7 +243,11 @@ class WorldUnverified(RuntimeError):
 
     `status` is the HTTP status the check was answered with, or None: setup
     reads it, because a 401 or 403 there is a key mismatch, not a transient
-    failure (issue #80)."""
+    failure (issue #80). `LABELS_STATUS` lets `eb_ais.failure_label` print it
+    (issue #84) — as `WorldUnverified: HTTP 503 provider_error`, so the check
+    stays named, and `label_status` never reads it as a consent's answer."""
+
+    LABELS_STATUS = True
 
     def __init__(self, message, status=None):
         super().__init__(message)
@@ -801,7 +805,10 @@ def _ais():
                 "is unchanged. This is a transient verification "
                 "failure, not a bank failure: retry when "
                 "GET /application answers." % type(exc).__name__,
+                # The transport raises a 429 as `RateLimited`, not ApiError;
+                # it is still a status the operator needs (issue #84).
                 status=exc.status if isinstance(exc, eb_ais.ApiError)
+                else 429 if isinstance(exc, httpx.RateLimited)
                 else None) from None
         _assert_world(app_id, record=record)
     return client
@@ -917,6 +924,198 @@ def _meta_set(c, key: str, value: str) -> None:
 
 def _meta_del(c, key: str) -> None:
     c.execute("DELETE FROM meta WHERE key=?", (key,))
+
+
+#: Issue #83: the health of an account's ROUTINE transaction sync, per the
+#: consent it ran under. `sync_state` could not carry it: its timestamps come
+#: from two clocks, a restore rewinds them, and a renewal's candidate backfill
+#: writes the same row. This record is written only by the routine refresh,
+#: in one clock, and lives in `meta`, which a restore keeps live — it
+#: describes the provider relationship, not ledger content.
+SYNC_HEALTH_PREFIX = "sync_health|"
+REFUSED_STATUSES = (401, 403)
+
+
+def sync_health_key(account_id: str) -> str:
+    return SYNC_HEALTH_PREFIX + str(account_id)
+
+
+def _health_record(c, account_id: str):
+    raw = _meta_get(c, sync_health_key(account_id))
+    if raw is None:
+        return None
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def sync_health(c, account_id: str):
+    """The account's record if it describes the consent the account is bound
+    to NOW, else None. Eligibility is the binding alone: `incarnation` rotates
+    on purge and restore, which change neither the consent nor its answer."""
+    record = _health_record(c, account_id)
+    if record is None:
+        return None
+    row = c.execute("SELECT session_id FROM accounts WHERE account_id=?",
+                    (account_id,)).fetchone()
+    if row is None or not row[0] or record.get("session") != row[0]:
+        return None
+    return record
+
+
+def record_sync_health(c, account_id: str, session_id, exc,
+                       started: float) -> None:
+    """Record one routine transactions refresh: `exc` None is a fetch that
+    returned, anything else a failure (`eb_ais.failure_label`, body-free).
+    `started` is `_now_s()` read before the provider was asked.
+
+    Fenced on the SESSION the refresh captured — the consent that answered —
+    and on nothing else: a purge or a restore rotates `incarnation` without
+    changing the consent or its answer, so fencing on it dropped real
+    failures. A fetch that crossed a renewal (session changed), a forget or a
+    full erasure (row gone) writes nothing.
+
+    Read, compared and written in ONE write transaction, and an observation
+    older than the one on record is dropped: the per-account claim does not
+    serialise two refreshes (a claim can expire under a slow fetch), and
+    without this a stale failure landing late overwrote a newer success.
+    """
+    if not session_id:
+        return
+    own = not c.in_transaction
+    if own:
+        c.execute("BEGIN IMMEDIATE")
+    try:
+        prior = _health_record(c, account_id)
+        same = prior is not None and prior.get("session") == session_id
+        try:
+            seen = float(prior.get("seen")) if same else None
+        except (TypeError, ValueError):
+            seen = None
+        if seen is not None and started < seen:
+            if own:
+                c.execute("COMMIT")
+            return
+        now = _utcnow_iso()
+        # `*_s` are the full-precision `_now_s()` the ordering below compares;
+        # the ISO strings are for reading only — a whole-second stamp cannot
+        # say which of two answers in one second came first.
+        now_s = _now_s()
+        if exc is None:
+            record = {"session": session_id, "seen": started, "ok_at": now,
+                      "ok_s": now_s, "fail": None}
+        else:
+            was = prior.get("fail") if same else None
+            was = was if isinstance(was, dict) else {}
+            try:
+                count = int(was.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            record = {"session": session_id, "seen": started,
+                      "ok_at": prior.get("ok_at") if same else None,
+                      "ok_s": prior.get("ok_s") if same else None,
+                      "fail": {"label": eb_ais.failure_label(exc),
+                               "first": was.get("first") or now,
+                               "last": now, "last_s": now_s,
+                               "count": count + 1}}
+        c.execute("INSERT INTO meta(key, value) SELECT ?, ? WHERE EXISTS"
+                  " (SELECT 1 FROM accounts WHERE account_id=?"
+                  " AND session_id=?)"
+                  " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (sync_health_key(account_id),
+                   json.dumps(record, sort_keys=True), account_id, session_id))
+        if own:
+            c.execute("COMMIT")
+    except BaseException:
+        if own and c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+
+
+def _refused_elsewhere(c, account_id: str, record: dict):
+    """Issue #83's cross-consent evidence: the bank of another open consent
+    whose routine sync succeeded STRICTLY AFTER this record's latest failure,
+    when that failure was a refusal (401/403). None otherwise — including
+    every failure whose status was not recorded, and every record without
+    full-precision stamps, which are never guessed. Compared on `_now_s()`
+    floats, one clock: an earlier success in the same second is not evidence
+    the credential still works."""
+    fail = record.get("fail") or {}
+    if eb_ais.label_status(fail.get("label")) not in REFUSED_STATUSES:
+        return None
+    for other in c.execute(
+            "SELECT a.account_id AS account_id, s.aspsp_name AS bank"
+            " FROM accounts a JOIN sessions s ON s.session_id = a.session_id"
+            " WHERE s.closed_at IS NULL AND a.session_id IS NOT ?"
+            " ORDER BY a.account_id", (record.get("session"),)):
+        theirs = sync_health(c, other["account_id"])
+        try:
+            later = float(theirs["ok_s"]) > float(fail["last_s"])
+        except (TypeError, ValueError, KeyError):
+            later = False
+        if later:
+            return _safe(other["bank"]) or "another bank"
+    return None
+
+
+def _health_for(c, account_id: str, session: dict):
+    """`sync_health`, and only if it is about THIS consent: the account can be
+    re-bound by a renewal between the caller's read of the consent and this
+    read, and the new consent's record must not print under the old one."""
+    record = sync_health(c, account_id)
+    if record is None or record.get("session") != session.get("session_id"):
+        return None
+    return record
+
+
+def refusal_hint(c, account_id: str, session: dict):
+    """The one rendering of the 401/403-while-another-consent-works finding,
+    for `consent_status` and `sync` alike. Nothing is closed or revoked: a
+    refused data call does not prove the consent is gone
+    (`eb_ais.revocation_is_final`)."""
+    record = _health_for(c, account_id, session)
+    if not record or not isinstance(record.get("fail"), dict):
+        return None
+    elsewhere = _refused_elsewhere(c, account_id, record)
+    if elsewhere is None:
+        return None
+    bank = _safe(session.get("aspsp_name")) or "this bank"
+    return ("The provider refused this consent's data (HTTP %d) while another "
+            "consent on the same application (%s) synced successfully after "
+            "that refusal, so the application credential itself works: "
+            "the refusal concerns this consent or this bank, not the "
+            "application. Investigate, or re-link %s "
+            "with link_bank (aspsp=%s, country=%s, psu_type=%s): a renewal "
+            "carries the history forward. Nothing here was closed or revoked."
+            % (eb_ais.label_status(record["fail"]["label"]), elsewhere, bank,
+               bank, _safe(session.get("country")),
+               _safe(session.get("psu_type"))))
+
+
+def sync_failure_lines(c, account_id: str, name: str, session: dict) -> list:
+    """What `consent_status` says under a consent about one bound account
+    whose routine transaction sync is failing. Empty when the record is
+    absent, stale, healthy or about another consent."""
+    record = _health_for(c, account_id, session)
+    fail = (record or {}).get("fail")
+    if not isinstance(fail, dict):
+        return []
+    try:
+        count = int(fail.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    lines = ["  SYNC FAILING for %s: every routine transaction sync since %s "
+             "has failed (%d attempt(s), latest %s: %s); last successful "
+             "routine sync %s."
+             % (name, _safe(fail.get("first")), count, _safe(fail.get("last")),
+                _safe(fail.get("label")),
+                _safe(record.get("ok_at")) or "not recorded")]
+    hint = refusal_hint(c, account_id, session)
+    if hint:
+        lines.append("  " + hint)
+    return lines
 
 
 def _handoff_key(session_id: str) -> str:
@@ -4088,6 +4287,15 @@ def consent_status(args: dict) -> str:
                 "%d days remaining" % value if state == LIVE else
                 "days remaining unknown",
                 ref))
+        # Issue #83: a consent can read AUTHORIZED while the provider refuses
+        # every routine sync under it. Said here, under the consent, for each
+        # account bound to it now — whatever the branches below add.
+        for acct in c.execute(
+                "SELECT account_id, name FROM accounts WHERE session_id=?"
+                " ORDER BY account_id", (s["session_id"],)).fetchall():
+            lines.extend(sync_failure_lines(
+                c, acct["account_id"],
+                _safe(acct["name"]) or acct["account_id"][:10], s))
 
         # A consent whose account set did not verify — or which a refused
         # rebinding left behind — still EXISTS at the bank. Leaving only
@@ -4190,11 +4398,22 @@ def consent_status(args: dict) -> str:
         # mints a SECOND consent. Anything not live is something the operator
         # has to deal with; only the reason is looked up, never the question.
         if status in REVOCATION_INCOMPLETE_STATUSES:
+            # Issue #84: the provider's last answer, as `failure_label` stored
+            # it (body-free), so a 401 reads differently from an outage.
+            answered = apply.revoke_failure(c, s["session_id"])
             how = ("this plugin asked the bank to revoke it and the bank did "
-                   "not confirm"
+                   "not confirm%s" % (" (last answer: %s)" % _safe(answered)
+                                      if answered else "")
                    if status == REVOKE_FAILED_STATUS else
                    "it was replaced by a renewal and the withdrawal never "
                    "ran, most likely an interrupted turn")
+            # The way out once the operator has done what these lines tell
+            # them — withdrawn it on the bank's own screen — and the provider
+            # still does not answer finally. Offered only where it applies: the
+            # flag settles a row whose withdrawal has already failed.
+            settle = (" Once you have withdrawn it there, run unlink_bank "
+                      "consent_ref=%s withdrawn_at_bank=true to record that you "
+                      "did." % ref if status == REVOKE_FAILED_STATUS else "")
             # Issue #6, and the sentence the issue is named for. "The bank very
             # likely still holds the permission" is true of a failed revocation
             # and false of an expired consent, and the renewal path reaches
@@ -4221,8 +4440,8 @@ def consent_status(args: dict) -> str:
                     "longer serves any account. Run unlink_bank consent_ref=%s "
                     "to settle it — the handle has not changed. If that keeps "
                     "failing and you want certainty, %s's own consent screen is "
-                    "the one place that can give it."
-                    % (bank, how, _ago(value), ref, bank))
+                    "the one place that can give it.%s"
+                    % (bank, how, _ago(value), ref, bank, settle))
                 continue
             if state == UNKNOWN:
                 # The pairing is what makes this necessary: the header one line
@@ -4238,8 +4457,8 @@ def consent_status(args: dict) -> str:
                     "no longer serves any account. Run unlink_bank "
                     "consent_ref=%s — the handle has not changed, so it reaches "
                     "the same consent. If it keeps failing, %s's own consent "
-                    "screen is the one place that can settle it."
-                    % (bank, how, ref, bank))
+                    "screen is the one place that can settle it.%s"
+                    % (bank, how, ref, bank, settle))
                 continue
             lines.append(
                 "  NEEDS ATTENTION: this consent at %s was not withdrawn — %s. "
@@ -4247,8 +4466,8 @@ def consent_status(args: dict) -> str:
                 "local was lost, and this consent no longer serves any "
                 "account. Run unlink_bank consent_ref=%s — the handle has not "
                 "changed, so it reaches the same consent. If it keeps failing, "
-                "withdraw it from %s's own consent screen."
-                % (bank, how, ref, bank))
+                "withdraw it from %s's own consent screen.%s"
+                % (bank, how, ref, bank, settle))
             continue
 
         if status != callbacks.LIVE_SESSION_STATUS:
@@ -4412,6 +4631,9 @@ def consent_status(args: dict) -> str:
                           "consent_ref %s, with what to do about it"
                           % _consent_ref(row["session_id"] or ""),
                 "closed": "Its consent has since been revoked",
+                "withdrawn_by_operator": "Its consent has since been recorded "
+                                         "as withdrawn at the bank by you; the "
+                                         "provider never confirmed it",
                 "live": "Its consent went live before the failure and is "
                         "linked"}[left]))
 

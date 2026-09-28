@@ -106,6 +106,45 @@ class ApiError(RuntimeError):
                          f"HTTP {self.status} ({self.kind})")
 
 
+#: `failure_label`'s shape for an `ApiError`, and the only thing
+#: `label_status` accepts. Anchored at both ends: a label is read back only
+#: when it is exactly the string this module wrote.
+_LABEL_RE = re.compile(r"ApiError: HTTP ([1-5][0-9]{2}) [a-z_]+")
+
+
+def failure_label(exc) -> str:
+    """What a failed provider call is recorded and printed as.
+
+    An `ApiError` becomes `ApiError: HTTP 401 unauthorized` — the status and
+    the fixed `error_kind` vocabulary, which is what tells an unauthorized
+    answer from a rate limit or an outage. So does any exception whose class
+    declares `LABELS_STATUS = True` and carries the status it wraps
+    (`tools_auth.WorldUnverified`, the application check, which this module
+    cannot import). Anything else stays its class name, as it always was. Neither reads `str(exc)` or `args`, so no provider body
+    can reach a ledger column or a reply through it. No parentheses: the label
+    is printed inside the callers' own `(…)`.
+    """
+    if isinstance(exc, ApiError) or getattr(type(exc), "LABELS_STATUS",
+                                            False) is True:
+        status = getattr(exc, "status", None)
+        if (isinstance(status, int) and not isinstance(status, bool)
+                and 100 <= status <= 599):
+            return "%s: HTTP %d %s" % (type(exc).__name__, status,
+                                        error_kind(status))
+    return type(exc).__name__
+
+
+def label_status(label) -> int | None:
+    """The HTTP status a `failure_label` recorded, or None.
+
+    The exact inverse of `failure_label` for an `ApiError`, and nothing else:
+    any text this module did not write that way — a class name, a note, a
+    rate-limit label with its suffix — reads as None, never as a guess.
+    """
+    m = _LABEL_RE.fullmatch(str(label or ""))
+    return int(m.group(1)) if m else None
+
+
 def revocation_is_final(exc) -> bool:
     """Does this failed `delete_session` still prove the consent is gone?
 

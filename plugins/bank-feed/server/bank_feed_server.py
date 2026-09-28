@@ -34,8 +34,16 @@ SANDBOX_BANNER = ("[SANDBOX] Disposable test world — sandbox application, "
 #: itself (no lock file exists to outlive the erasure) and `delete_all_data`
 #: holds it exclusively for its whole call. Seconds a call waits before
 #: refusing as busy; read at call time so tests can lower it.
+#:
+#: `unlink_bank` is exclusive too (issue #84). It asks the provider and then
+#: records the answer; a call alongside — another unlink, a settlement, a
+#: collection re-binding the consent's accounts, an erasure — could change
+#: the consent while the provider answers, and each such interleaving made a
+#: reply false or left a note the erasure had promised gone. Holding every
+#: other call out for its short run removes the class rather than one case.
 LOCK_WAIT_S = 30.0
-EXCLUSIVE_TOOLS = frozenset({"delete_all_data", "delete_data_keep_signins"})
+EXCLUSIVE_TOOLS = frozenset({"delete_all_data", "delete_data_keep_signins",
+                             "unlink_bank"})
 BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
         "Try again when it has finished.")
 
@@ -87,7 +95,8 @@ def _lifecycle_lock(name):
             if time.monotonic() >= deadline:
                 os.close(fd)
                 return None, BUSY % ("" if exclusive else
-                                     ", an erasure of all data")
+                                     ", an erasure of all data or a bank "
+                                     "consent withdrawal")
             time.sleep(0.05)
         except OSError as exc:
             os.close(fd)
