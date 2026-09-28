@@ -416,7 +416,9 @@ class TestExport(Base):
         columns = [r[1] for r in
                    self.raw.execute("PRAGMA table_info(transactions)")]
         expected = [c for c in columns if c not in tools_refresh.EXPORT_EXCLUDE]
-        self.assertEqual(header, expected)
+        # Issue #86 appends the row's tags and tag revision, spelled out here
+        # so the test does not move with the constant.
+        self.assertEqual(header, expected + ["tags", "tag_revision"])
         self.assertIn("review_reason", header)
         self.assertIn("state_reason", header)
 

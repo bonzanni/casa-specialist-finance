@@ -196,7 +196,7 @@ inside one `BEGIN IMMEDIATE`, condensed:
    lock.
 4. `PRAGMA bk.integrity_check`, then a schema preflight: `bk.meta.schema_version` must
    equal `store.SCHEMA_VERSION`, and every **ordinary** table's `PRAGMA table_info` (the
-   ones step 7 replaces) must match column-for-column — `sessions`, `attempts`, `meta`, the
+   ones step 7 replaces) must match column-for-column — `sessions`, `attempts`, `meta`, `tag_revisions`, the
    full-text shadow tables and `sqlite_sequence` are never compared, because they are never
    replaced either. Either failure refuses, naming the mismatch, before anything is written.
 5. Mint the restore operation id and append `restore <op> pending backup=<id>` — after
@@ -241,7 +241,10 @@ the preflight from the replacement — exactly the gap step 3 above exists to cl
 
 A consent is a fact about the bank, not about the ledger's history, and a consent
 revoked at the bank cannot be brought back by restoring rows. `backups.KEEP_LIVE_TABLES`
-— `sessions`, `attempts` and `meta` — are never taken from a backup. Per account:
+— `sessions`, `attempts`, `meta` and `tag_revisions` — are never taken from a backup.
+`tag_revisions` is there because a tag revision taken back to a backup's value could be
+issued again for a different tag set; a backup from before that table existed restores
+all the same. Per account:
 
 | Case | What happens |
 |---|---|
@@ -360,7 +363,7 @@ subsystem is never a *dangerous* one.
 
 **INV-BACKUP-002**: the restore generation is derived from the index and never from the ledger.
 
-**INV-BACKUP-003**: sessions, attempts and meta are never taken from a backup.
+**INV-BACKUP-003**: sessions, attempts, meta and tag_revisions are never taken from a backup.
 
 **INV-BACKUP-004**: no string rendered from a refresh outcome names a destructive tool.
 

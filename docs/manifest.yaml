@@ -96,9 +96,10 @@
   related: [architecture/bank-linking.md, architecture/annotations-and-rules.md]
 
 - doc: architecture/annotations-and-rules.md
-  summary: Tags, the append-only note journal, the deterministic rulebook, and the classifier split.
-  when_changing: tags, notes, note search, aggregation, the rule engine, or the classifier skill
+  summary: Tags, the tag revision, the append-only note journal, the deterministic rulebook, and the classifier split.
+  when_changing: tags, the tag revision, notes, note search, aggregation, the rule engine, or the classifier skill
   covers:
+    - plugins/bank-feed/server/store.py::_ensure_tag_revision
     - plugins/bank-feed/server/rules.py::canon_text
     - plugins/bank-feed/server/rules.py::validate_rule
     - plugins/bank-feed/server/rules.py::apply_to_rows
@@ -112,6 +113,7 @@
     - tests/test_tools_aggregate.py
     - tests/test_tools_rules.py
     - tests/test_tx_classifier.py
+    - tests/test_tag_revision.py
   related: [architecture/ingestion-and-identity.md, reference/tool-surface.md, architecture/backups-and-restore.md]
 
 - doc: architecture/backups-and-restore.md
@@ -131,7 +133,7 @@
   invariant_tests:
     INV-BACKUP-001: [tests/test_backups.py::test_lock_order_is_ledger_then_index_and_settle_requires_the_ledger_lock]
     INV-BACKUP-002: [tests/test_backups.py::test_generation_counts_distinct_committed_restore_ids]
-    INV-BACKUP-003: [tests/test_backups.py::test_sessions_attempts_and_meta_are_kept_live]
+    INV-BACKUP-003: [tests/test_backups.py::test_sessions_attempts_and_meta_are_kept_live, tests/test_tag_revision.py::test_the_count_and_revisions_are_not_rolled_back]
     INV-BACKUP-004: [tests/test_tools_refresh.py::test_no_rendered_string_in_either_module_names_a_destructive_tool]
 
 - doc: architecture/backups-erasure.md

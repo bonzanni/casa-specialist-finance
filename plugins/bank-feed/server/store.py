@@ -381,6 +381,98 @@ CREATE TABLE IF NOT EXISTS workflow_registrations (
   registered_at TEXT NOT NULL);
 """
 
+#: `meta` key of the ledger-wide tag revision counter (issue #86).
+TAG_REVISION_SEQ_KEY = "tag_revision_seq"
+#: The per-row tag revisions: `backups.KEEP_LIVE_TABLES` (never rolled back)
+#: and `tools_destructive._DATA_TABLES` (emptied with the instance id).
+TAG_REVISIONS_TABLE = "tag_revisions"
+#: The three triggers that maintain it, by name — `open_db` installs any that
+#: is missing.
+TAG_REVISION_TRIGGERS = ("trg_tag_rev_ai", "trg_tag_rev_ad", "trg_tag_rev_au")
+
+_BUMP = ("INSERT INTO meta(key, value) VALUES ('%s', '1') ON CONFLICT(key)"
+         " DO UPDATE SET value = CAST(value AS INTEGER) + 1;"
+         % TAG_REVISION_SEQ_KEY)
+
+
+def _stamp(ref: str) -> str:
+    return ("INSERT INTO tag_revisions(row_id, revision) VALUES (%s,"
+            " (SELECT CAST(value AS INTEGER) FROM meta WHERE key='%s'))"
+            " ON CONFLICT(row_id) DO UPDATE SET revision = excluded.revision;"
+            % (ref, TAG_REVISION_SEQ_KEY))
+
+
+# The tag revision (issue #86). An export consumer caches (ledger instance,
+# row_id, tag_revision) and reads an EQUAL revision as "the row's tag set is
+# unchanged", so a missed bump ships a stale classification. SQLite keeps it,
+# not the call sites: every row-level change to transaction_tags fires one of
+# these, whichever code path (or plugin version) makes it, and a no-op
+# `INSERT OR IGNORE` / skipped `UPDATE OR IGNORE` row fires nothing.
+#
+# The counter is ONE ledger-wide value in `meta`, because `meta` is the table
+# a restore never rolls back (`backups.KEEP_LIVE_TABLES`, where
+# `tag_revisions` is too): an AUTOINCREMENT would roll back with the
+# restored `sqlite_sequence` and re-issue values already exported. A restore
+# rewrites `transaction_tags` by DML, so these fire and stamp every row it
+# touches above any value ever issued. The counter and `ledger_instance` are
+# erased together (every non-whitelisted meta key goes in both total
+# erasers), so a restarted count always comes with a new instance id.
+#
+# No schema bump — that would make every existing backup unrestorable
+# (`backups.restore`); `open_db` installs these on a ledger that lacks them.
+_TAG_REVISION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tag_revisions (
+  row_id INTEGER PRIMARY KEY NOT NULL,
+  revision INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS trg_tag_rev_ai
+AFTER INSERT ON transaction_tags BEGIN
+  %(bump)s
+  %(new)s
+END;
+CREATE TRIGGER IF NOT EXISTS trg_tag_rev_ad
+AFTER DELETE ON transaction_tags BEGIN
+  %(bump)s
+  %(old)s
+END;
+CREATE TRIGGER IF NOT EXISTS trg_tag_rev_au
+AFTER UPDATE OF row_id, tag ON transaction_tags BEGIN
+  %(bump)s
+  %(old)s
+  %(new)s
+END;
+""" % {"bump": _BUMP, "old": _stamp("old.row_id"), "new": _stamp("new.row_id")}
+
+_SCHEMA += _TAG_REVISION_SCHEMA
+
+
+def _tag_revision_missing(conn: sqlite3.Connection) -> bool:
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE name IN (%s)"
+        % ", ".join("?" * (1 + len(TAG_REVISION_TRIGGERS))),
+        (TAG_REVISIONS_TABLE,) + TAG_REVISION_TRIGGERS)}
+    return len(names) != 1 + len(TAG_REVISION_TRIGGERS)
+
+
+def _ensure_tag_revision(conn: sqlite3.Connection) -> None:
+    """Install the tag revision on a ledger from before it (issue #86).
+    FAILS CLOSED: a connection handed out without the triggers would write
+    tag changes no revision records — exactly the silent failure they exist
+    for — so an install that cannot take the write lock fails the open."""
+    if not _tag_revision_missing(conn):
+        return
+    try:
+        conn.executescript("BEGIN IMMEDIATE;\n" + _TAG_REVISION_SCHEMA
+                           + "\nCOMMIT;\n")
+    except sqlite3.Error as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+        if _is_busy(exc):
+            raise StoreError(_BUSY_OPEN % "another process holds it locked"
+                             ) from None
+        raise StoreError("could not install the tag revision: %s"
+                         % type(exc).__name__) from None
+
 # Forward-only migrations: {target_version: (sql, ...)}. Anything _SCHEMA
 # cannot express idempotently (an ALTER TABLE ADD COLUMN on a table that
 # already exists) belongs here, keyed by the version it produces. The v3
@@ -1041,6 +1133,7 @@ def _open_locked(db: Path) -> sqlite3.Connection:
     elif current < SCHEMA_VERSION:
         snapshot_before_migration(db)     # before any schema change
         _migrate(conn, current)
+    _ensure_tag_revision(conn)
 
     # The ledger instance id (issue #69), minted once per database FILE: at
     # creation, or at the first open of a ledger that predates it. Only when

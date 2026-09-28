@@ -96,8 +96,14 @@ WITHDRAWAL_META_KEYS = ("setup.app_id",)
 #: structural: after a total erasure there are no workflow writes left to
 #: bind an install backup to, so unregistering every workflow is right, and
 #: the next write a workflow makes mints its own install backup afresh.
-_DATA_TABLES = ("transaction_refs", "transaction_tags", "transaction_notes",
-                "tag_rules", "transactions", "occurrence_alloc",
+#: `tag_revisions` (`store.TAG_REVISIONS_TABLE`, issue #86) comes AFTER
+#: `transaction_tags`: emptying that one fires the triggers that stamp it. It
+#: goes here and nowhere narrower, because a revision may restart only when
+#: the ledger instance id changes, which is what the meta whitelist of both
+#: total erasers does.
+_DATA_TABLES = ("transaction_refs", "transaction_tags", "tag_revisions",
+                "transaction_notes", "tag_rules", "transactions",
+                "occurrence_alloc",
                 "balances", "coverage", "sync_state", "accounts", "attempts",
                 "aspsp_capability", "aspsp_capability_retired",
                 "ref_observations", "workflow_registrations")

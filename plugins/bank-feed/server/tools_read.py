@@ -1271,7 +1271,7 @@ def get_transaction(args: dict) -> str:
         row = c.execute("SELECT * FROM transactions WHERE row_id=?",
                         (rid,)).fetchone()
         if row is None:
-            acct, tags, total, notes = None, [], 0, []
+            acct, tags, revision, total, notes = None, [], 0, 0, []
         else:
             acct = c.execute(
                 "SELECT included FROM accounts WHERE account_id=?",
@@ -1279,6 +1279,10 @@ def get_transaction(args: dict) -> str:
             tags = [t[0] for t in c.execute(
                 "SELECT tag FROM transaction_tags WHERE row_id=? ORDER BY tag",
                 (rid,))]
+            # Issue #86: the value `export_history` carries for this row.
+            rev = c.execute("SELECT revision FROM tag_revisions WHERE row_id=?",
+                            (rid,)).fetchone()
+            revision = rev[0] if rev is not None else 0
             total = c.execute(
                 "SELECT COUNT(*) FROM transaction_notes WHERE row_id=?",
                 (rid,)).fetchone()[0]
@@ -1344,6 +1348,8 @@ def get_transaction(args: dict) -> str:
     if foreign:
         lines.append("Other workflows' tags (not classifications): "
                      + ", ".join(_neutralized(t) for t in foreign))
+    lines.append("Tag revision: %d (export_history's tag_revision for this "
+                 "row; it changes whenever the row's tags do)" % revision)
     if total:
         # The journal is append-only, so a correction coexists with what it
         # corrects; the header says which one wins, for a skimming reader.
