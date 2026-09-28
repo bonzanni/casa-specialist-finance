@@ -278,7 +278,8 @@ class TestInstall(unittest.TestCase):
     def test_an_open_installs_it_on_a_ledger_from_before_it(self):
         conn = store.open_db(self.db)
         self.addCleanup(conn.close)
-        self.assertFalse(store._tag_revision_missing(conn))
+        self.assertEqual(self.installed(conn),
+                         {"tag_revisions"} | set(store.TAG_REVISION_TRIGGERS))
         conn.execute("INSERT INTO transaction_tags(row_id, tag) VALUES (7, 'x')")
         self.assertEqual(conn.execute(
             "SELECT revision FROM tag_revisions WHERE row_id=7").fetchone()[0], 1)
@@ -294,7 +295,8 @@ class TestInstall(unittest.TestCase):
         holder.execute("ROLLBACK")
         conn = store.open_db(self.db)
         self.addCleanup(conn.close)
-        self.assertFalse(store._tag_revision_missing(conn))
+        self.assertEqual(self.installed(conn),
+                         {"tag_revisions"} | set(store.TAG_REVISION_TRIGGERS))
 
     def test_a_missing_trigger_alone_is_reinstalled(self):
         raw = sqlite3.connect(self.db)
@@ -304,7 +306,24 @@ class TestInstall(unittest.TestCase):
         raw.close()
         conn = store.open_db(self.db)
         self.addCleanup(conn.close)
-        self.assertFalse(store._tag_revision_missing(conn))
+        # Read independently of `_tag_revision_missing`, which is what
+        # decides the install: a helper that saw only the table would pass
+        # its own check with the delete trigger still gone.
+        self.assertEqual(self.installed(conn),
+                         {"tag_revisions"} | set(store.TAG_REVISION_TRIGGERS))
+        conn.execute("INSERT INTO transaction_tags(row_id, tag) VALUES (7, 'x')")
+        tagged = self.revision(conn, 7)
+        conn.execute("DELETE FROM transaction_tags WHERE row_id=7")
+        self.assertGreater(self.revision(conn, 7), tagged)
+
+    def installed(self, conn):
+        return {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='tag_revisions'"
+            " OR (type='trigger' AND tbl_name='transaction_tags')")}
+
+    def revision(self, conn, rid):
+        return conn.execute("SELECT revision FROM tag_revisions WHERE row_id=?",
+                            (rid,)).fetchone()[0]
 
 
 class TestExport(RevisionBase):
