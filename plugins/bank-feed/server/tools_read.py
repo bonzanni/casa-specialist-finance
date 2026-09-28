@@ -1271,7 +1271,8 @@ def get_transaction(args: dict) -> str:
         row = c.execute("SELECT * FROM transactions WHERE row_id=?",
                         (rid,)).fetchone()
         if row is None:
-            acct, tags, revision, total, notes = None, [], 0, 0, []
+            acct, tags, revision, note_rev, total, notes = (
+                None, [], 0, 0, 0, [])
         else:
             acct = c.execute(
                 "SELECT included FROM accounts WHERE account_id=?",
@@ -1283,6 +1284,10 @@ def get_transaction(args: dict) -> str:
             rev = c.execute("SELECT revision FROM tag_revisions WHERE row_id=?",
                             (rid,)).fetchone()
             revision = rev[0] if rev is not None else 0
+            # Issue #89: likewise for the row's note journal.
+            rev = c.execute("SELECT revision FROM %s WHERE row_id=?"
+                            % store.NOTE_REVISIONS_TABLE, (rid,)).fetchone()
+            note_rev = rev[0] if rev is not None else 0
             total = c.execute(
                 "SELECT COUNT(*) FROM transaction_notes WHERE row_id=?",
                 (rid,)).fetchone()[0]
@@ -1350,6 +1355,8 @@ def get_transaction(args: dict) -> str:
                      + ", ".join(_neutralized(t) for t in foreign))
     lines.append("Tag revision: %d (export_history's tag_revision for this "
                  "row; it changes whenever the row's tags do)" % revision)
+    lines.append("Note revision: %d (export_history's note_revision for this "
+                 "row; it changes whenever the row's notes do)" % note_rev)
     if total:
         # The journal is append-only, so a correction coexists with what it
         # corrects; the header says which one wins, for a skimming reader.

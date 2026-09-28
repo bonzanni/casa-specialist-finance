@@ -1038,12 +1038,14 @@ EXPORT_EXCLUDE = {
 }
 
 
-#: The two columns an export appends after the ledger's own (issue #86):
+#: The columns an export appends after the ledger's own (issue #86):
 #: `tags` (sorted; comma-joined in CSV, a list in JSONL) and `tag_revision`,
 #: which changes whenever the row's tag set does, removals included — for one
 #: ledger instance id, an equal revision means an equal tag set. 0 is "no
 #: change recorded since the revision was installed on this ledger".
-EXPORT_TAG_COLUMNS = ("tags", "tag_revision")
+#: Issue #89 adds `note_revision`: the same contract over the row's note
+#: journal (notes themselves are not exported).
+EXPORT_TAG_COLUMNS = ("tags", "tag_revision", "note_revision")
 
 
 def _export_columns(c) -> list:
@@ -1070,7 +1072,8 @@ _EXPORT_UNLABELLED = ("The export was not written: the ledger could not "
 @register("export_history",
           "Write the full local ledger as CSV or JSONL into Casa's handoff "
           "folder and return the path. Each row carries its current tags and "
-          "a tag_revision that changes whenever its tags do. Another plugin can take the file from "
+          "a tag_revision and a note_revision that change whenever its tags or "
+          "notes do. Another plugin can take the file from "
           "that path (an accounting import, an email attachment); it is kept "
           "7 days.",
           {"type": "object",
@@ -1107,6 +1110,9 @@ def export_history(args: dict) -> str:
             tags.setdefault(rid, []).append(tag)
         revisions = dict(c.execute(
             "SELECT row_id, revision FROM %s" % store.TAG_REVISIONS_TABLE))
+        # Issue #89: the note revision, same snapshot.
+        note_revisions = dict(c.execute(
+            "SELECT row_id, revision FROM %s" % store.NOTE_REVISIONS_TABLE))
         c.execute("COMMIT")
     except BaseException:
         if c.in_transaction:
@@ -1117,6 +1123,7 @@ def export_history(args: dict) -> str:
     for row in rows:
         row["tags"] = tags.get(row["row_id"], [])
         row["tag_revision"] = revisions.get(row["row_id"], 0)
+        row["note_revision"] = note_revisions.get(row["row_id"], 0)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.StringIO(newline="")
     if fmt == "csv":
@@ -1137,8 +1144,9 @@ def export_history(args: dict) -> str:
         return "The export could not be written: %s" % exc
     return "\n".join([
         "Exported %d transaction(s) as %s, every column of the ledger except "
-        "%s, then each row's current tags and its tag_revision (it changes "
-        "whenever the row's tags do). The file is written in full — it is a file, not model context, "
+        "%s, then each row's current tags, its tag_revision and its "
+        "note_revision (they change whenever the row's tags or notes do). "
+        "The file is written in full — it is a file, not model context, "
         "so nothing is clipped or delimited, and it therefore contains "
         "bank-supplied text exactly as the bank sent it. It is in Casa's "
         "handoff folder for %d days: pass the path to the tool that needs it, "
