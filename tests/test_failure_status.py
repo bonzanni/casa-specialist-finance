@@ -234,6 +234,15 @@ class TestConsentStatusShowsAFailingSync(FailureBase):
 
 
 class TestRefusalHint(FailureBase):
+    def setUp(self):
+        super().setUp()
+        # The base freezes `_now_s` to one whole second; production reads
+        # `time.time()`. The hint orders two answers strictly, so these tests
+        # need a clock that moves — a millisecond per read, from the frozen one.
+        frozen = tools_auth._now_s
+        ticks = iter(range(1, 10 ** 6))
+        self.addCleanup(setattr, tools_auth, "_now_s", frozen)
+        tools_auth._now_s = lambda: frozen() + next(ticks) / 1000.0
     def test_a_refusal_while_another_consent_works_is_named_in_both_places(self):
         self.two_banks()
         self.refuse("acc1")
@@ -277,13 +286,55 @@ class TestRefusalHint(FailureBase):
         self.two_banks()
         self.sync_tx(account="acc2")                         # ING ok first
         self.raw.execute(
-            "UPDATE meta SET value=json_set(value, '$.ok_at',"
-            " '2000-01-01T00:00:00Z') WHERE key=?",
+            "UPDATE meta SET value=json_set(value, '$.ok_s', 1.0) WHERE key=?",
             (tools_auth.sync_health_key("acc2"),))
         self.refuse("acc1")
         self.refuse("acc2")                                  # ING fails now
         self.sync_tx(account="acc1")
         self.assertNotIn("refused this consent's data", call("consent_status"))
+
+
+class TestRefusalHintOrdering(FailureBase):
+    """Whole-second stamps cannot order two answers in one second, so the
+    evidence is compared on full-precision `_now_s()` floats, strictly."""
+
+    def at(self, t):
+        self.patch(tools_auth, "_now_s", lambda: t)
+
+    def patch(self, module, attr, value):
+        self.addCleanup(setattr, module, attr, getattr(module, attr))
+        setattr(module, attr, value)
+
+    def test_an_earlier_success_in_the_same_second_is_not_evidence(self):
+        self.two_banks()
+        exc = eb_ais.ApiError(401, "transactions")
+        self.at(1000.1)
+        tools_auth.record_sync_health(self.raw, "acc2", OTHER_SESSION, None, 1000.0)
+        self.at(1000.9)
+        tools_auth.record_sync_health(self.raw, "acc1", SESSION_ID, exc, 1000.8)
+        self.assertEqual(self.health("acc1")["fail"]["last"],
+                         self.health("acc2")["ok_at"])        # same second
+        self.assertIsNone(tools_auth.refusal_hint(
+            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
+
+    def test_an_identical_instant_is_not_evidence_either(self):
+        self.two_banks()
+        exc = eb_ais.ApiError(401, "transactions")
+        self.at(1000.5)
+        tools_auth.record_sync_health(self.raw, "acc1", SESSION_ID, exc, 1000.0)
+        tools_auth.record_sync_health(self.raw, "acc2", OTHER_SESSION, None, 1000.0)
+        self.assertIsNone(tools_auth.refusal_hint(
+            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
+
+    def test_a_later_success_in_the_same_second_is(self):
+        self.two_banks()
+        exc = eb_ais.ApiError(401, "transactions")
+        self.at(1000.1)
+        tools_auth.record_sync_health(self.raw, "acc1", SESSION_ID, exc, 1000.0)
+        self.at(1000.9)
+        tools_auth.record_sync_health(self.raw, "acc2", OTHER_SESSION, None, 1000.8)
+        self.assertIn("(ING)", tools_auth.refusal_hint(
+            self.raw, "acc1", {"aspsp_name": "Rabobank"}))
 
 
 class TestSyncHealthAndTheErasers(FailureBase):
@@ -448,6 +499,40 @@ class TestOperatorSettlement(FailureBase):
         detail = callbacks._indeterminate_detail(
             {"aspsp_name": "Rabobank"}, "a cause", "withdrawn_by_operator")
         self.assertIn("recorded as withdrawn at the bank by you", detail)
+
+    def test_a_failure_recorded_while_the_flagged_call_waits_does_not_qualify_it(self):
+        # A flagged call starts on a consent whose withdrawal has never
+        # failed; while it waits on the provider, an unflagged call alongside
+        # records REVOKE_FAILED; then the flagged call's own attempt fails too.
+        # The flag was given before any failure, so nothing may close.
+        self.session()
+        self.account()
+        raw = self.raw
+
+        class Overlapping(FakeAIS):
+            overlapped = 0
+
+            def delete_session(self, sid):
+                apply.record_revocation(raw, sid, revoked=False,
+                                        failure=HTTP_401)
+                Overlapping.overlapped += 1
+                raise eb_ais.ApiError(401, "delete_session")
+        self.ais_factory(Overlapping())
+        out = call("unlink_bank", consent_ref=self.ref(),
+                   withdrawn_at_bank=True)
+        # The interleaving really happened, and this call's own attempt was
+        # the provider's 401 — not some earlier failure of the double.
+        self.assertEqual(Overlapping.overlapped, 1)
+        self.assertIn("NOT revoked (%s)" % HTTP_401, out)
+        self.assertIn("withdrawn_at_bank was NOT applied", out)
+        row = self.session_row()
+        self.assertIsNone(row["closed_at"])
+        self.assertEqual(row["status"], apply.REVOKE_FAILED_STATUS)
+        self.assertEqual(self.bindings(), [("acc1", SESSION_ID, "uid-acc1")])
+
+    def ais_factory(self, ais):
+        self.addCleanup(setattr, tools_auth, "AIS_FACTORY", tools_auth.AIS_FACTORY)
+        tools_auth.AIS_FACTORY = lambda: ais
 
     def test_apply_refuses_to_settle_a_row_that_never_failed(self):
         self.session()

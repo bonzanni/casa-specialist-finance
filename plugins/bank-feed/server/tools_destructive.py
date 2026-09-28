@@ -267,6 +267,15 @@ def unlink_bank(args: dict) -> str:
     # it was previously unreachable because only `attempts.session_id` held it.
     quarantined = (row is not None
                    and str(row["status"] or "") == callbacks.REVIEW_REQUIRED_STATUS)
+    # THE SETTLEMENT INTERLOCK, HALF ONE (issue #84): the operator's word
+    # closes a row only if a withdrawal had ALREADY failed when THIS call
+    # started — read here, before the provider is asked. It is not redundant
+    # with `record_revocation`'s own predicate: an unflagged call running
+    # alongside can record its failure while this call waits on the provider,
+    # and that predicate, read afterwards, would then let a flag given before
+    # any failure close the consent.
+    failed_before = (row is not None
+                     and str(row["status"] or "") == apply.REVOKE_FAILED_STATUS)
     # The local session is closed ONLY when the revocation is known
     # to have happened — a success, or a 404, which is the provider stating
     # authoritatively that the session is already gone. Everything else leaves
@@ -303,12 +312,9 @@ def unlink_bank(args: dict) -> str:
         if revoked:
             apply.record_revocation(c, session_id, revoked=True)
         else:
-            # The settlement interlock (issue #84) is `record_revocation`'s:
-            # the operator's word closes a row only while it is still
-            # REVOKE_FAILED — a withdrawal had already failed and been
-            # reported before this call — and it runs before this call's own
-            # failure is recorded, so a first attempt cannot qualify itself.
-            if withdrawn:
+            # HALF TWO is `record_revocation`'s: it closes the row only while
+            # it is still open and REVOKE_FAILED, in this write transaction.
+            if withdrawn and failed_before:
                 settled = apply.record_revocation(
                     c, session_id, revoked=False, operator_withdrawn=True)
             if not settled:

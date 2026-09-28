@@ -992,9 +992,13 @@ def record_sync_health(c, account_id: str, session_id, exc,
                 c.execute("COMMIT")
             return
         now = _utcnow_iso()
+        # `*_s` are the full-precision `_now_s()` the ordering below compares;
+        # the ISO strings are for reading only — a whole-second stamp cannot
+        # say which of two answers in one second came first.
+        now_s = _now_s()
         if exc is None:
             record = {"session": session_id, "seen": started, "ok_at": now,
-                      "fail": None}
+                      "ok_s": now_s, "fail": None}
         else:
             was = prior.get("fail") if same else None
             was = was if isinstance(was, dict) else {}
@@ -1004,9 +1008,11 @@ def record_sync_health(c, account_id: str, session_id, exc,
                 count = 0
             record = {"session": session_id, "seen": started,
                       "ok_at": prior.get("ok_at") if same else None,
+                      "ok_s": prior.get("ok_s") if same else None,
                       "fail": {"label": eb_ais.failure_label(exc),
                                "first": was.get("first") or now,
-                               "last": now, "count": count + 1}}
+                               "last": now, "last_s": now_s,
+                               "count": count + 1}}
         c.execute("INSERT INTO meta(key, value) SELECT ?, ? WHERE EXISTS"
                   " (SELECT 1 FROM accounts WHERE account_id=?"
                   " AND session_id=?)"
@@ -1023,10 +1029,12 @@ def record_sync_health(c, account_id: str, session_id, exc,
 
 def _refused_elsewhere(c, account_id: str, record: dict):
     """Issue #83's cross-consent evidence: the bank of another open consent
-    whose routine sync succeeded at or after this record's latest failure,
+    whose routine sync succeeded STRICTLY AFTER this record's latest failure,
     when that failure was a refusal (401/403). None otherwise — including
-    every failure whose status was not recorded, which is never guessed.
-    Both stamps come from `_utcnow_iso`, one clock and one format."""
+    every failure whose status was not recorded, and every record without
+    full-precision stamps, which are never guessed. Compared on `_now_s()`
+    floats, one clock: an earlier success in the same second is not evidence
+    the credential still works."""
     fail = record.get("fail") or {}
     if eb_ais.label_status(fail.get("label")) not in REFUSED_STATUSES:
         return None
@@ -1036,8 +1044,11 @@ def _refused_elsewhere(c, account_id: str, record: dict):
             " WHERE s.closed_at IS NULL AND a.session_id IS NOT ?"
             " ORDER BY a.account_id", (record.get("session"),)):
         theirs = sync_health(c, other["account_id"])
-        if theirs and theirs.get("ok_at") and fail.get("last") \
-                and str(theirs["ok_at"]) >= str(fail["last"]):
+        try:
+            later = float(theirs["ok_s"]) > float(fail["last_s"])
+        except (TypeError, ValueError, KeyError):
+            later = False
+        if later:
             return _safe(other["bank"]) or "another bank"
     return None
 
@@ -1055,8 +1066,8 @@ def refusal_hint(c, account_id: str, session: dict):
         return None
     bank = _safe(session.get("aspsp_name")) or "this bank"
     return ("The provider refused this consent's data (HTTP %d) while another "
-            "consent on the same application (%s) synced successfully at or "
-            "after that refusal, so the application credential itself works: "
+            "consent on the same application (%s) synced successfully after "
+            "that refusal, so the application credential itself works: "
             "the refusal concerns this consent or this bank, not the "
             "application. Investigate, or re-link %s "
             "with link_bank (aspsp=%s, country=%s, psu_type=%s): a renewal "
