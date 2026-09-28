@@ -623,6 +623,25 @@ class TestOperatorSettlement(FailureBase):
         self.assertEqual(self.bindings(),
                          [("acc1", None, None), ("acc2", None, None)])
 
+    def test_an_account_a_renewal_moved_meanwhile_is_said_to_keep_refreshing(self):
+        self.session()
+        self.session(sid=OTHER_SESSION)
+        self.account("acc1")
+        self.account("acc2")
+        raw = self.raw
+
+        class RenewedMeanwhile(FakeAIS):
+            def delete_session(self, sid):
+                raw.execute("UPDATE accounts SET session_id=? WHERE"
+                            " account_id='acc2'", (OTHER_SESSION,))
+                raise eb_ais.ApiError(404, "delete_session")
+        self.ais_factory(RenewedMeanwhile())
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertIn("1 of the 2 accounts it served are now bound to a newer "
+                      "consent and keep refreshing", out)
+        self.assertEqual(self.bindings(), [("acc1", None, None),
+                                           ("acc2", OTHER_SESSION, "uid-acc2")])
+
     def test_a_row_erased_meanwhile_is_not_called_listed_or_live(self):
         self.failed_once()
         raw = self.raw

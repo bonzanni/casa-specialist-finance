@@ -208,6 +208,24 @@ def _reclaim(c):
     return True, _RECLAIMED
 
 
+def _bindings_after(served: int, rebound: int) -> str:
+    """What became of the accounts a closed consent served, as the write
+    transaction read them after the release: none bound to it any more, and
+    those a renewal alongside moved to its new consent still refresh."""
+    if not served:
+        return "No account was bound to it."
+    if not rebound:
+        return ("No account is bound to it any more, so nothing refreshes "
+                "those accounts until you link the bank again.")
+    if rebound == served:
+        return ("No account is bound to it any more; every account it served "
+                "is now bound to a newer consent and keeps refreshing.")
+    return ("No account is bound to it any more; %d of the %d accounts it "
+            "served are now bound to a newer consent and keep refreshing, "
+            "and nothing refreshes the others until you link the bank again."
+            % (rebound, served))
+
+
 def _already_closed(bank: str, row) -> str:
     """The reply for a consent whose row is already closed, by whichever
     writer closed it: the provider's confirmation, or the operator's own
@@ -361,6 +379,14 @@ def unlink_bank(args: dict) -> str:
             # accounts really are still bound to it.
             c.execute("UPDATE accounts SET session_id=NULL, uid=NULL"
                       " WHERE session_id=?", (session_id,))
+        # Where those accounts stand AFTER the release, in this transaction:
+        # a renewal alongside may have moved some to its new consent, and
+        # those keep refreshing — the reply must not say otherwise.
+        rebound = c.execute(
+            "SELECT COUNT(*) FROM accounts WHERE account_id IN (%s)"
+            " AND session_id IS NOT NULL AND session_id <> ?"
+            % ", ".join("?" * len(ids)), ids + [session_id]
+        ).fetchone()[0] if ids else 0
         c.execute("COMMIT")
     except Exception:
         c.execute("ROLLBACK")
@@ -387,11 +413,9 @@ def unlink_bank(args: dict) -> str:
             "%s: the provider still did not confirm the withdrawal (%s). On "
             "your statement that you withdrew it on %s's own consent screen, "
             "this consent is now recorded as WITHDRAWN BY YOU, not confirmed "
-            "by the provider. It leaves consent_status, and its accounts are "
-            "no longer bound to any consent, so nothing refreshes them until "
-            "you link the bank again. If the bank does still hold the "
-            "permission, only its own consent screen can show it now."
-            % (bank, failure, bank),
+            "by the provider. It leaves consent_status. %s If the bank does "
+            "still hold the permission, only its own consent screen can show "
+            "it now." % (bank, failure, bank, _bindings_after(len(ids), rebound)),
             "Unlink is not erase: %d transaction%s of local history survive%s "
             "and stay queryable." % (kept, "" if kept == 1 else "s",
                                      "s" if kept == 1 else ""),
@@ -450,11 +474,11 @@ def unlink_bank(args: dict) -> str:
             "consent screen, run the same call again." % bank
         ] if withdrawn else []) + [GATE_NOTE])
 
-    lines = ["%s: consent %s. Its accounts are no longer bound to any consent, "
-             "so nothing refreshes them until you link the bank again."
+    lines = ["%s: consent %s. %s"
              % (bank, "reported by the provider as already gone — treated as "
                       "revoked at the provider" if absent
-                      else "revoked at the provider")]
+                      else "revoked at the provider",
+                _bindings_after(len(ids), rebound))]
     if quarantined:
         # A successful DELETE establishes that the request succeeded; it does
         # not establish that the consent was LIVE immediately before it — and
