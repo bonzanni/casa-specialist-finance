@@ -220,8 +220,13 @@ Four rules govern `apply_plan()`:
 
 ## Money
 
-`money.py` is 49 lines and holds every rounding decision: money is integer minor units,
-never a binary float. Sums are per currency and are never converted.
+`money.py` holds every rounding decision, and the decision is that there is none: money
+is integer minor units, never a binary float. An amount string is parsed into integers
+exactly, never through a `Decimal` context, whose 28-digit precision would round a longer
+amount before any check saw it (issue #92). An amount with more decimals than its
+currency allows, or a magnitude of `MAX_MINOR` minor units or more, is refused as a
+`MoneyError`. That cap keeps every stored amount, and a `SUM` over thousands of them,
+inside SQLite's 64-bit INTEGER. Sums are per currency and are never converted.
 
 ## The schema
 

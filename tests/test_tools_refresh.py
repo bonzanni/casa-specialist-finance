@@ -993,6 +993,32 @@ class TestARunThatFindsItsOwnIncompletenessKeepsIt(Base):
         # `test_the_restore_does_not_reach_the_balances_row`.
 
 
+class TestAnAmountMoneyRefusesStoresNothing(Base):
+    """Issue #92: an amount `money.to_minor` used to round (a fraction past
+    Decimal's 28 digits) was stored rounded, and one it overflowed on escaped
+    as an ArithmeticError. Both now refuse the page, through the real ingest,
+    and the ledger keeps nothing of it."""
+
+    ROW = {"entry_reference": "R9", "booking_date": "2026-08-02",
+           "value_date": "2026-08-02", "status": "BOOK",
+           "credit_debit_indicator": "DBIT",
+           "creditor": {"name": "ACME"}, "remittance_information": ["x"]}
+
+    def setUp(self):
+        super().setUp()
+        self.account()
+
+    def test_no_rounded_or_overflowing_amount_reaches_the_ledger(self):
+        for amount in ("9.479999999999999999999999999999",
+                       "1" + "0" * 999999):
+            row = dict(self.ROW, transaction_amount={"currency": "EUR",
+                                                     "amount": amount})
+            self.ais.transactions = lambda uid, d, k=None: ([dict(row)], None)
+            out = call("sync")
+            self.assertIn("transactions: FAILED (MoneyError)", out)
+            self.assertEqual(self.count("transactions"), 0, amount[:40])
+
+
 class TestRateControl(Base):
     """The minimum control set: cooldown, backoff, single flight."""
 
