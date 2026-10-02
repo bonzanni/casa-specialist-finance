@@ -52,7 +52,13 @@ still takes a link passed as `signin_link`, so the floor below is unchanged.
 
 `tx-classifier` declares its classification workflow as a background job
 (`casa.jobs`); casa v0.321.0 is the first that reads that key, and an older one
-ignores it, so the declaration raises nothing and the floor below is unchanged.
+ignores it, so the declaration raises nothing and the floor below is unchanged. Its
+batch report passes `progressed`, which casa v0.323.0 made required and made the
+whole stuck judgment (ha-casa-app#1031); v0.321.0 and v0.322.x do not declare the
+argument and ignore it. Job mode applies only to a turn that names this job, "Classify
+transactions": a batch of another job hosted by the same specialist, for example one
+whose `sync` brings the skill in, classifies inline and never reports into that job or
+completes it.
 
 The component **requires casa >= v0.318.0**. The environment-declaration rows below
 do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest

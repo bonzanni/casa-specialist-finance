@@ -79,22 +79,36 @@ actions.
 
 casa can run this workflow as a background job ("Classify transactions"):
 the operator asks the assistant, casa opens your topic and drives one
-batch per turn until you finish. You are in a job when the turn casa
-sent you says so.
+batch per turn until you finish. You are in THIS job only when the turn
+casa sent you names it, by its title "Classify transactions" or by this
+skill, classify-transactions: the launch turn reads `You are starting
+the background job "Classify transactions" (skill
+classify-transactions)`, and each batch after it reads `Batch N of
+"Classify transactions": continue the job.`
 
-In a job, and only there:
+**Another job is not this job.** The specialist hosts other plugins'
+jobs too, and one of their batches may run `sync`, whose trailer brings
+you here inside a turn that says it is a job batch, just not this one.
+There you are outside a job (below): classify inline, and never call
+`report_job_progress` or `emit_completion`. Both act on the job that is
+running, so a report would land in its topic and a completion would end
+it.
+
+In this job, and only there:
 
 - **one batch per turn.** Do Step 0 through Step 1.5 over that batch —
   at most 25 workable rows, queue order — then report and end the turn.
   Do not drain the whole queue in one turn; casa starts the next batch
   itself.
 - **end the batch with the report**, as your last action:
-  `report_job_progress` with a one-line `summary`, `done` set to the rows
-  you have handled in this job so far, and `remaining` set to the
-  workable rows still queued — a parked row is not workable, so parking
-  one takes it out of that count. The counts are what casa's stuck guard
-  reads: three batches without `remaining` falling end the job, so count
-  from the queue rather than estimating.
+  `report_job_progress` with a one-line `summary` and `progressed`:
+  true when this batch took at least one row out of the workable queue
+  (tagged it, or parked it — a parked row is not workable), false when it
+  took none. `progressed` is what casa's stuck guard reads: three batches
+  in a row with `progressed: false` end the job. Also pass `done`, the
+  rows you have handled in this job so far, and `remaining`, the workable
+  rows still queued; they are shown to the operator, so count them from
+  the queue rather than estimating.
 - **when the workable queue is empty**, run Step 3's `apply_rules` sweep
   and then `emit_completion` with the batch-close report: rows tagged,
   rows parked for the operator, rules minted or fixed. That ends the job
@@ -109,9 +123,10 @@ In a job, and only there:
   unavailable on it: park freely and let the questions wait for a turn
   the operator started (Step 2).
 
-Outside a job — a sync trailer, a reminder pass, a conversational
-request — nothing changes: keep today's behaviour over the rows you were
-asked about, and do not call `report_job_progress`.
+Outside this job — a sync trailer, a reminder pass, a conversational
+request, or a batch of another job — nothing changes: keep today's
+behaviour over the rows you were asked about, and call neither
+`report_job_progress` nor `emit_completion`.
 
 ## Step 0 — scope the batch
 
