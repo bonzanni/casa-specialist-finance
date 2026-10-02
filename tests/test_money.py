@@ -1,5 +1,5 @@
 # tests/test_money.py
-import unittest, sys, pathlib
+import sqlite3, unittest, sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "plugins/bank-feed/server"))
 import money
 
@@ -61,6 +61,18 @@ class TestMoney(unittest.TestCase):
                        str(money.MAX_MINOR), "-" + str(money.MAX_MINOR)):
             with self.assertRaises(money.MoneyError):
                 money.to_minor(amount, "JPY" if "." not in amount else "EUR")
+
+    def test_the_largest_accepted_amount_stores_and_sums_in_sqlite(self):
+        # What the bound is FOR: SQLite's INTEGER is 64-bit, and an amount
+        # past it fails the insert, or a SUM, with an OverflowError.
+        top = money.to_minor(money.format_minor(money.MAX_MINOR - 1, "EUR"),
+                             "EUR")
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE t(a INTEGER)")
+        db.executemany("INSERT INTO t VALUES (?)", [(top,), (-top,)] * 1000)
+        db.executemany("INSERT INTO t VALUES (?)", [(top,)] * 1000)
+        self.assertEqual(db.execute("SELECT SUM(a) FROM t").fetchone()[0],
+                         1000 * top)
 
     def test_every_form_decimal_accepted_is_still_accepted(self):
         for amount, want in (("+1", 100), ("-1", -100), ("1.", 100),
