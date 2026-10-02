@@ -157,6 +157,53 @@ class TestSkill(unittest.TestCase):
         # semantics: an underscore variant.
         self.assertNotIn("awaiting_operator", body)
 
+    def _job_section(self):
+        # Whitespace-normalised, so a quoted turn that wraps still matches.
+        _, body = self._parts()
+        m = re.search(r"## Running as a Casa background job\n(.*?)\n## ",
+                      body, re.DOTALL)
+        self.assertIsNotNone(m)
+        return " ".join(m.group(1).split())
+
+    def test_job_mode_is_keyed_on_this_jobs_own_name(self):
+        # The specialist hosts other plugins' jobs, and their batches can run
+        # `sync`, whose trailer loads this skill. Job mode must key on THIS
+        # job's name, as casa's launch and batch turns spell it, or a
+        # quarterly batch reports into, and completes, the wrong job.
+        job = json.loads(MANIFEST.read_text(encoding="utf-8"))["casa"]["jobs"][0]
+        section = self._job_section()
+        self.assertIn('You are starting the background job "%s" (skill %s)'
+                      % (job["title"], job["skill"]), section)
+        self.assertIn('Batch N of "%s": continue the job.' % job["title"],
+                      section)
+        self.assertNotIn("in a job when the turn casa sent you says so",
+                         section)
+
+    def test_another_jobs_batch_neither_reports_nor_completes(self):
+        section = self._job_section()
+        other = re.search(r"\*\*Another job is not this job\.\*\*(.*?)"
+                          r"In this job, and only there:", section)
+        self.assertIsNotNone(other)
+        self.assertIn("never call `report_job_progress` or `emit_completion`",
+                      other.group(1))
+        outside = re.search(r"Outside this job (.*)$", section)
+        self.assertIsNotNone(outside)
+        self.assertIn("a batch of another job", outside.group(1))
+        self.assertIn("call neither `report_job_progress` nor "
+                      "`emit_completion`", outside.group(1))
+
+    def test_batch_report_carries_progressed(self):
+        # casa (#1031, v0.323.0) requires `progressed` and refuses a report
+        # without it; its stuck guard reads that flag, not `remaining`.
+        section = self._job_section()
+        report = re.search(r"\*\*end the batch with the report\*\*(.*?)"
+                           r"\*\*when the workable queue is empty\*\*", section)
+        self.assertIsNotNone(report)
+        self.assertIn("`report_job_progress` with a one-line `summary` and "
+                      "`progressed`", report.group(1))
+        self.assertIn("`progressed: false` end the job", report.group(1))
+        self.assertNotIn("without `remaining` falling", section)
+
 
 if __name__ == "__main__":
     unittest.main()
