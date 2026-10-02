@@ -210,20 +210,21 @@ or set up the sign-in. An assignment without a profile gives finance every Gmail
 it would any agent.
 
 Releases 0.24.0 and 0.24.1 denied those Gmail tools in the role itself, as a stopgap.
-**On an install where Gmail is assigned to finance, do these steps in this order before
-installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
+A finance engagement records the Gmail access it was opened with. One recorded before
+the read profile applied resumes unprofiled whenever Gmail is not assigned to finance at
+that moment, for example after a later unassignment, and under 0.25.0 nothing else denies
+it the writers. **Unless Gmail has never been assigned to finance, do these steps in this order
+before installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
 
 1. Update casa to 0.338.0 or later, and the Gmail plugin to 0.11.0 or later.
-2. Unassign Gmail from finance and assign it again with the profile read. Casa sets a
-   profile only on a new assignment, so an assignment made earlier stays unprofiled.
-3. Check that the assignment shows the read profile for finance.
+2. Assign Gmail to finance with the profile read: unassign it first if it is assigned now,
+   because casa sets a profile only on a new assignment. Check that the assignment shows
+   the read profile for finance.
+3. Let every open finance engagement finish, or cancel it, so that none recorded before
+   step 2 remains. An engagement opened after step 2 records the read profile and keeps it.
 
 On an older casa there are no profiles, so 0.25.0 there gives an assigned finance every
-Gmail tool. If Gmail was assigned to finance and later unassigned, an open finance
-engagement from that time still carries Gmail when it resumes. Before installing 0.25.0,
-either let finance's open engagements finish or cancel them, or do step 2 anyway, so the
-read profile applies to them too. Only where Gmail was never assigned to finance is there
-nothing to migrate.
+Gmail tool.
 
 ## Output discipline, on every read
 
