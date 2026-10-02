@@ -60,6 +60,12 @@ transactions": a batch of another job hosted by the same specialist, for example
 whose `sync` brings the skill in, classifies inline and never reports into that job or
 completes it.
 
+Finance holding Gmail read-only needs casa v0.338.0 or later. From 0.25.0 the role no
+longer denies Gmail's write tools itself: casa's read profile on the assignment does. An
+install where Gmail is assigned to finance migrates first, in the order
+[the tool surface](tool-surface.md#what-else-the-role-grants) gives. The floor below is
+unchanged, because finance works without Gmail.
+
 The component **requires casa >= v0.318.0**. The environment-declaration rows below
 do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
 outright: `link_bank` declares `delivers` (below), a member an older casa's

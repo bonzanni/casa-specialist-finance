@@ -203,11 +203,23 @@ the harness, and each is there for a named reason:
 
 `Bash`, `Write` and `Edit` are explicitly disallowed, and a test pins that.
 
-The role denies no Gmail tool. When Gmail is assigned to this specialist, assign it with
-casa's read profile (casa 0.338.0 or later, Gmail plugin 0.11.0 or later): finance can then
-search and read mail and download attachments, and casa denies it the tools that send,
-change or erase mail or set up the sign-in. An assignment without a profile gives finance
-every Gmail tool, as it would any agent.
+The role denies no Gmail tool. Finance's Gmail access is read-only only when casa's
+assignment of Gmail to finance carries the read profile. Finance can then search and read
+mail and download attachments, and casa denies it the tools that send, change or erase mail
+or set up the sign-in. An assignment without a profile gives finance every Gmail tool, as
+it would any agent.
+
+Releases 0.24.0 and 0.24.1 denied those Gmail tools in the role itself, as a stopgap.
+**On an install where Gmail is assigned to finance, do these steps in this order before
+installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
+
+1. Update casa to 0.338.0 or later, and the Gmail plugin to 0.11.0 or later.
+2. Unassign Gmail from finance and assign it again with the profile read. Casa sets a
+   profile only on a new assignment, so an assignment made earlier stays unprofiled.
+3. Check that the assignment shows the read profile for finance.
+
+On an older casa there are no profiles, so 0.25.0 there gives an assigned finance every
+Gmail tool. Where Gmail is not assigned to finance, there is nothing to migrate.
 
 ## Output discipline, on every read
 
