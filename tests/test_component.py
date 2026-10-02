@@ -1120,6 +1120,27 @@ class TestRole(unittest.TestCase):
         for banned in ("Bash", "Write", "Edit"):
             self.assertIn(banned, _yaml_list(text, "disallowed"))
 
+    def test_role_denies_every_gmail_tool_that_writes(self):
+        # Finance may hold gmail read-only. Casa grants a plugin at SERVER
+        # level, so every gmail tool is allowed unless named here. Interim:
+        # casa's plugin access profiles replace this list.
+        writers = {
+            "send_email", "reply_to_thread", "manage_email", "save_attachment",
+            "erase_gmail", "erase_gmail_data", "setup_gmail",
+            "gmail_auth_collect",
+        }
+        readers = {
+            "search_emails", "get_email", "get_thread", "list_attachments",
+            "download_attachment", "list_send_as",
+        }
+        prefix = "mcp__plugin_gmail_gmail__"
+        disallowed = _yaml_list(_role_text(), "disallowed")
+        denied = {t[len(prefix):] for t in disallowed if t.startswith(prefix)}
+        self.assertEqual(denied, writers)
+        self.assertFalse(denied & readers)
+        allowed = _yaml_list(_role_text(), "allowed")
+        self.assertFalse([t for t in allowed if t.startswith(prefix)])
+
     def test_the_role_names_no_plugin_tool_the_manifest_does_not_provide(self):
         # The other direction, and the one that rots. `allowed:` is
         # self-documentation (casa auto-grants every resolved plugin tool), so
