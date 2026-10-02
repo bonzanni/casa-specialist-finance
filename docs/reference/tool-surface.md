@@ -203,12 +203,30 @@ the harness, and each is there for a named reason:
 
 `Bash`, `Write` and `Edit` are explicitly disallowed, and a test pins that.
 
-So are eight of the fourteen tools of casa's Gmail plugin. When Gmail is assigned to this
-specialist, casa grants the whole Gmail server, so the deny list is what keeps finance
-read-only. Denied: send_email, reply_to_thread, manage_email, save_attachment, erase_gmail,
-erase_gmail_data, setup_gmail and gmail_auth_collect. Left: search_emails, get_email,
-get_thread, list_attachments, download_attachment and list_send_as. A test pins the eight, and that none of the six is denied.
-This is interim: casa's plugin access profiles replace it, and the list is removed then.
+The role denies no Gmail tool. Finance's Gmail access is read-only only when casa's
+assignment of Gmail to finance carries the read profile. Finance can then search and read
+mail and download attachments, and casa denies it the tools that send, change or erase mail
+or set up the sign-in. An assignment without a profile gives finance every Gmail tool, as
+it would any agent.
+
+Releases 0.24.0 and 0.24.1 denied those Gmail tools in the role itself, as a stopgap.
+A finance engagement records the Gmail access it was opened with. One recorded before
+the read profile applied resumes unprofiled whenever Gmail is not assigned to finance at
+that moment, for example after a later unassignment, and under 0.25.0 nothing else denies
+it the writers. **Unless Gmail has never been assigned to finance, do these steps in this order
+before installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
+
+1. Update casa to 0.340.2 or later, and the Gmail plugin to 0.11.0 or later.
+2. Assign Gmail to finance with the profile read: unassign it first if it is assigned now,
+   because casa sets a profile only on a new assignment. Check that the assignment shows
+   the read profile for finance.
+3. Let every open finance engagement finish, or cancel it, so that none recorded before
+   step 2 remains. An engagement opened after step 2 records the read profile and keeps it.
+
+Casa 0.338.0 introduced profiles, but a session that started while Gmail was withheld
+from it recorded no profile, so a later resume could get every Gmail tool. 0.340.2 records
+one in that case too, so it is the floor here. Before 0.338.0 there are no profiles, so
+0.25.0 there gives an assigned finance every Gmail tool.
 
 ## Output discipline, on every read
 
