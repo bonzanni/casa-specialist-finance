@@ -216,15 +216,17 @@ that moment, for example after a later unassignment, and under 0.25.0 nothing el
 it the writers. **Unless Gmail has never been assigned to finance, do these steps in this order
 before installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
 
-1. Update casa to 0.338.0 or later, and the Gmail plugin to 0.11.0 or later.
+1. Update casa to 0.340.2 or later, and the Gmail plugin to 0.11.0 or later.
 2. Assign Gmail to finance with the profile read: unassign it first if it is assigned now,
    because casa sets a profile only on a new assignment. Check that the assignment shows
    the read profile for finance.
 3. Let every open finance engagement finish, or cancel it, so that none recorded before
    step 2 remains. An engagement opened after step 2 records the read profile and keeps it.
 
-On an older casa there are no profiles, so 0.25.0 there gives an assigned finance every
-Gmail tool.
+Casa 0.338.0 introduced profiles, but a session that started while Gmail was withheld
+from it recorded no profile, so a later resume could get every Gmail tool. 0.340.2 records
+one in that case too, so it is the floor here. Before 0.338.0 there are no profiles, so
+0.25.0 there gives an assigned finance every Gmail tool.
 
 ## Output discipline, on every read
 

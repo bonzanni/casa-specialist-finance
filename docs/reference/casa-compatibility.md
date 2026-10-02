@@ -60,7 +60,7 @@ transactions": a batch of another job hosted by the same specialist, for example
 whose `sync` brings the skill in, classifies inline and never reports into that job or
 completes it.
 
-Finance holding Gmail read-only needs casa v0.338.0 or later. From 0.25.0 the role no
+Finance holding Gmail read-only needs casa v0.340.2 or later (profiles arrived in v0.338.0, and v0.340.2 records one even for a session Gmail was withheld from). From 0.25.0 the role no
 longer denies Gmail's write tools itself: casa's read profile on the assignment does. An
 install where Gmail is assigned to finance migrates first, in the order
 [the tool surface](tool-surface.md#what-else-the-role-grants) gives. The floor below is
