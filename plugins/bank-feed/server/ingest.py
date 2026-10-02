@@ -313,28 +313,6 @@ def exchange_rate(raw_json) -> dict:
             out["instructed_amount"] = amount
             out["instructed_currency"] = currency
     return out
-    block = raw.get("exchange_rate") if isinstance(raw, dict) else None
-    if not isinstance(block, dict):
-        return out
-    rate, unit = block.get("exchange_rate"), block.get("unit_currency")
-    if (isinstance(rate, str) and _RATE.match(rate)
-            and any(ch not in "0." for ch in rate)
-            and isinstance(unit, str) and _ISO_CURRENCY.match(unit)):
-        out["exchange_rate"], out["exchange_unit_currency"] = rate, unit
-    instructed = block.get("instructed_amount")
-    if isinstance(instructed, dict):
-        amount, currency = instructed.get("amount"), instructed.get("currency")
-        if (isinstance(amount, str) and isinstance(currency, str)
-                and _ISO_CURRENCY.match(currency)
-                and amount[:1] not in ("+", "-")):
-            try:
-                minor = money.to_minor(amount, currency)
-            except money.MoneyError:
-                minor = None
-            if minor is not None and 0 <= minor < _MAX_INSTRUCTED_MINOR:
-                out["instructed_amount"] = money.format_minor(minor, currency)
-                out["instructed_currency"] = currency
-    return out
 
 
 def _date(value: str) -> _dt.date:
