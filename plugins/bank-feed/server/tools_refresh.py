@@ -46,6 +46,7 @@ import casa_handoff
 import eb_ais
 import flows
 import httpx
+import ingest
 import money
 import rules
 import store
@@ -1047,6 +1048,12 @@ EXPORT_EXCLUDE = {
 #: journal (notes themselves are not exported).
 EXPORT_TAG_COLUMNS = ("tags", "tag_revision", "note_revision")
 
+#: Issue #91: then the provider's exchange rate for a foreign-currency
+#: payment — the four validated fields of `ingest.exchange_rate`, the only
+#: values an export takes from the excluded `raw_json`. Empty in CSV and null
+#: in JSONL for a row whose payload carries no (valid) block.
+EXPORT_APPENDED_COLUMNS = EXPORT_TAG_COLUMNS + ingest.EXCHANGE_RATE_FIELDS
+
 
 def _export_columns(c) -> list:
     columns = [row[1] for row in c.execute("PRAGMA table_info(transactions)")]
@@ -1056,7 +1063,7 @@ def _export_columns(c) -> list:
         # "considered and rejected" while excluding nothing.
         raise RuntimeError("export exclusion names no such column: %s"
                            % ", ".join(sorted(stale)))
-    clash = [name for name in EXPORT_TAG_COLUMNS if name in columns]
+    clash = [name for name in EXPORT_APPENDED_COLUMNS if name in columns]
     if clash:
         # The appended columns would silently overwrite a ledger column.
         raise RuntimeError("export column clashes with a ledger column: %s"
@@ -1073,7 +1080,9 @@ _EXPORT_UNLABELLED = ("The export was not written: the ledger could not "
           "Write the full local ledger as CSV or JSONL into Casa's handoff "
           "folder and return the path. Each row carries its current tags and "
           "a tag_revision and a note_revision that change whenever its tags or "
-          "notes do. Another plugin can take the file from "
+          "notes do, and, for a foreign-currency payment, the exchange rate "
+          "and instructed amount the provider gave. Another plugin can take "
+          "the file from "
           "that path (an accounting import, an email attachment); it is kept "
           "7 days.",
           {"type": "object",
@@ -1099,9 +1108,11 @@ def export_history(args: dict) -> str:
     try:
         ledger = store.ledger_instance(c)
         columns = _export_columns(c)
+        # `raw_json` is read only to derive the exchange-rate fields below,
+        # and never written out.
         rows = [dict(r) for r in c.execute(
-            "SELECT %s FROM transactions ORDER BY account_id, booking_date, row_id"
-            % ", ".join(columns))]
+            "SELECT %s, raw_json AS _raw FROM transactions"
+            " ORDER BY account_id, booking_date, row_id" % ", ".join(columns))]
         # Issue #86: each row's current tags and tag revision, from the same
         # snapshot, so a consumer learns every classification in one import.
         tags = {}
@@ -1124,10 +1135,12 @@ def export_history(args: dict) -> str:
         row["tags"] = tags.get(row["row_id"], [])
         row["tag_revision"] = revisions.get(row["row_id"], 0)
         row["note_revision"] = note_revisions.get(row["row_id"], 0)
+        row.update(ingest.exchange_rate(row.pop("_raw")))
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.StringIO(newline="")
     if fmt == "csv":
-        writer = csv.DictWriter(buf, fieldnames=columns + list(EXPORT_TAG_COLUMNS))
+        writer = csv.DictWriter(
+            buf, fieldnames=columns + list(EXPORT_APPENDED_COLUMNS))
         writer.writeheader()
         for row in rows:
             # The tag grammar admits no comma or whitespace, so the join is
@@ -1145,7 +1158,9 @@ def export_history(args: dict) -> str:
     return "\n".join([
         "Exported %d transaction(s) as %s, every column of the ledger except "
         "%s, then each row's current tags, its tag_revision and its "
-        "note_revision (they change whenever the row's tags or notes do). "
+        "note_revision (they change whenever the row's tags or notes do), "
+        "then the exchange rate, its unit currency and the instructed amount "
+        "and currency where the provider gave them (empty otherwise). "
         "The file is written in full — it is a file, not model context, "
         "so nothing is clipped or delimited, and it therefore contains "
         "bank-supplied text exactly as the bank sent it. It is in Casa's "

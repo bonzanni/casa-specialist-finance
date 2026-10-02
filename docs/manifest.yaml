@@ -196,9 +196,11 @@
     - plugins/bank-feed/server/tools_auth.py
     - plugins/bank-feed/server/tools_destructive.py
     - plugins/bank-feed/server/tools_refresh.py
+    - plugins/bank-feed/server/ingest.py::exchange_rate
   tests:
     - tests/test_component.py
     - tests/test_tools_read.py
+    - tests/test_exchange_rate.py
     - tests/test_tools_destructive.py
     - tests/test_server_smoke.py
   related: [architecture/overview.md, reference/configuration.md]
