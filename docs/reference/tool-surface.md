@@ -59,7 +59,7 @@ alone is enough:
 | `get_balances` | Cached balances, one selected type per account, with cache age. |
 | `balance_total` | Sum of the selected balance per account, grouped by currency. Never converted. |
 | `list_transactions` | Cached transactions for included accounts, filtered and bounded. |
-| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. |
+| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. A foreign-currency payment also shows the provider's exchange rate and instructed amount (see below). |
 | `list_tags` | Every tag in use with its transaction count. |
 | `spend_by_tag` | Signed spend per tag and currency, plus an untagged bucket. A lens, not a ledger — groups overlap. |
 | `list_rules` | The auto-tagging rulebook, one line per rule. |
@@ -77,7 +77,7 @@ alone is enough:
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
 | `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
-| `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it; the reply names the ledger instance id, and no file is written when that id cannot be recorded. Every row ends with `tags` (sorted, comma-joined in CSV, a list in JSONL) `tag_revision`, which changes whenever the row's tags do, and `note_revision`, which changes whenever the row's notes do — see `architecture/annotations-and-rules.md`. |
+| `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it; the reply names the ledger instance id, and no file is written when that id cannot be recorded. Every row ends with `tags` (sorted, comma-joined in CSV, a list in JSONL) `tag_revision`, which changes whenever the row's tags do, and `note_revision`, which changes whenever the row's notes do — see `architecture/annotations-and-rules.md`. Then the four exchange-rate fields below, empty (CSV) or null (JSONL) on a row without them. |
 | `backup` | Take a consistent copy of the whole ledger. `reason` is `weekly` or `manual`; retention keeps the 8 most recent of each. |
 | `list_backups` | The ledger instance id (a workflow's `expected_ledger`), every backup with its time, size, reason and state; the registered workflow strings; the restore events; and the restore generation. Settles any pending backup or restore first, which can append to the index — why this sits under Writing rather than Reading. |
 
@@ -209,7 +209,22 @@ the harness, and each is there for a named reason:
   truncated.
 - Provider text inside an explicit untrusted delimiter, neutralised before wrapping so a
   value cannot forge its own fence.
-- No raw provider payload ever leaves the process.
+- No raw provider payload ever leaves the process. The one exception is named and
+  validated: the exchange rate below.
+
+## The exchange rate of a foreign-currency payment
+
+A card payment in another currency carries the provider's `exchange_rate` block in the
+stored payload (issue #91). `ingest.exchange_rate` reads four fields from it and nothing
+else: `exchange_rate`, the rate as the provider wrote it (a positive decimal string,
+at most 12 integer and 20 fractional digits), `exchange_unit_currency`, the rate's
+ISO 4217 unit currency, and `instructed_amount` and `instructed_currency`, the
+instructed amount in its currency's precision. They come in two pairs, each exposed only
+when both halves validate: a rate without its unit currency does not say which way it
+converts. A payload without the block, or with a pair that does not validate, exposes
+nothing for that pair. `get_transaction` prints an `exchange rate` and an `instructed
+amount` line only when there is something to print; `export_history` always carries the
+four columns, last.
 - Freshness and excluded-account notes on aggregate reads, so a total is never quietly
   partial.
 
@@ -225,10 +240,12 @@ the harness, and each is there for a named reason:
 - `plugins/bank-feed/server/tools_auth.py`
 - `plugins/bank-feed/server/tools_destructive.py`
 - `plugins/bank-feed/server/tools_refresh.py`
+- `plugins/bank-feed/server/ingest.py::exchange_rate`
 
 **Tests**
 - `tests/test_component.py`
 - `tests/test_tools_read.py`
+- `tests/test_exchange_rate.py`
 - `tests/test_tools_destructive.py`
 - `tests/test_server_smoke.py`
 

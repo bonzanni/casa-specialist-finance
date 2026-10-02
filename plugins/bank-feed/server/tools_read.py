@@ -50,6 +50,7 @@ import apply
 import bank_feed_server
 import eb_ais
 import flows
+import ingest
 import money
 import rules
 import store
@@ -1255,7 +1256,9 @@ def list_transactions(args: dict) -> str:
 
 @register("get_transaction",
           "One cached transaction in full: every stored field except the raw "
-          "provider payload, its tags, and its note journal (latest 20).",
+          "provider payload, the exchange rate the provider gave for a "
+          "foreign-currency payment, its tags, and its note journal (latest "
+          "20).",
           {"type": "object", "properties": {"row_id": {"type": "integer"}},
            "required": ["row_id"]})
 def get_transaction(args: dict) -> str:
@@ -1315,7 +1318,8 @@ def get_transaction(args: dict) -> str:
     if r.get("state_reason"):
         state_line += " — %s" % _neutralized(r["state_reason"])
     # A NAMED projection, deliberately: `raw_json` is the unbounded raw
-    # provider payload and even `export_history` refuses to ship it;
+    # provider payload and even `export_history` refuses to ship it (only its
+    # validated exchange-rate fields leave, issue #91);
     # `identity_key`/`occurrence`/ `provider_ref` are matching internals with
     # no read-surface meaning. Fencing mirrors list_transactions
     # field-for-field.
@@ -1335,6 +1339,18 @@ def get_transaction(args: dict) -> str:
         _signed(r), _safe_currency(r.get("currency")),
         _untrusted(r.get("direction")),
         _untrusted(r.get("status")) if r.get("status") else "?"))
+    # Issue #91: printed only when the provider gave the block. Every value
+    # is validated to a decimal or an ISO 4217 shape by `ingest.exchange_rate`;
+    # neutralized anyway, like every other stored value here.
+    fx = ingest.exchange_rate(r.get("raw_json"))
+    if fx["exchange_rate"] is not None:
+        lines.append("  exchange rate %s, unit currency %s" % (
+            _neutralized(fx["exchange_rate"]),
+            _neutralized(fx["exchange_unit_currency"])))
+    if fx["instructed_amount"] is not None:
+        lines.append("  instructed amount %s %s" % (
+            _neutralized(fx["instructed_amount"]),
+            _neutralized(fx["instructed_currency"])))
     lines.append("  counterparty %s" % _untrusted(r.get("counterparty")))
     lines.append("  remittance %s" % _untrusted(r.get("remittance")))
     review = ""

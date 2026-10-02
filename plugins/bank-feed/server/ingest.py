@@ -258,6 +258,59 @@ def normalise(raw: dict, account_id: str) -> dict:
     return row
 
 
+#: The four exchange-rate fields a read surface may expose (issue #91), in
+#: export column order. Each is a validated string or None; nothing else of
+#: `raw_json` leaves the ledger.
+EXCHANGE_RATE_FIELDS = ("exchange_rate", "exchange_unit_currency",
+                        "instructed_amount", "instructed_currency")
+
+# A positive decimal with a dot separator, bounded both sides of the dot: no
+# sign, exponent, grouping or whitespace.
+_RATE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,20})?\Z")
+_ISO_CURRENCY = re.compile(r"[A-Z]{3}\Z")
+# Instructed amounts are bounded well inside what a card payment can be.
+_MAX_INSTRUCTED_MINOR = 10 ** 15
+
+
+def exchange_rate(raw_json) -> dict:
+    """The provider's `exchange_rate` block of a stored payload, validated.
+
+    Two independent pairs: the rate with its unit currency, and the instructed
+    amount with its currency. A pair is exposed only when both of its halves
+    validate — a rate without its unit currency does not say which way it
+    converts — and otherwise every field of it is None, as are all four for a
+    payload without the block. Never raises: a stored payload is provider
+    text, and a malformed one exposes nothing rather than failing a read.
+    """
+    out = dict.fromkeys(EXCHANGE_RATE_FIELDS)
+    try:
+        raw = json.loads(raw_json) if isinstance(raw_json, str) else None
+    except ValueError:
+        return out
+    block = raw.get("exchange_rate") if isinstance(raw, dict) else None
+    if not isinstance(block, dict):
+        return out
+    rate, unit = block.get("exchange_rate"), block.get("unit_currency")
+    if (isinstance(rate, str) and _RATE.match(rate)
+            and any(ch not in "0." for ch in rate)
+            and isinstance(unit, str) and _ISO_CURRENCY.match(unit)):
+        out["exchange_rate"], out["exchange_unit_currency"] = rate, unit
+    instructed = block.get("instructed_amount")
+    if isinstance(instructed, dict):
+        amount, currency = instructed.get("amount"), instructed.get("currency")
+        if (isinstance(amount, str) and isinstance(currency, str)
+                and _ISO_CURRENCY.match(currency)
+                and amount[:1] not in ("+", "-")):
+            try:
+                minor = money.to_minor(amount, currency)
+            except money.MoneyError:
+                minor = None
+            if minor is not None and 0 <= minor < _MAX_INSTRUCTED_MINOR:
+                out["instructed_amount"] = money.format_minor(minor, currency)
+                out["instructed_currency"] = currency
+    return out
+
+
 def _date(value: str) -> _dt.date:
     return _dt.date.fromisoformat(value)
 
