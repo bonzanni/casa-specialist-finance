@@ -219,7 +219,11 @@ installing 0.25.0 or later, and stay on 0.24.1 until they are done:**
 3. Check that the assignment shows the read profile for finance.
 
 On an older casa there are no profiles, so 0.25.0 there gives an assigned finance every
-Gmail tool. Where Gmail is not assigned to finance, there is nothing to migrate.
+Gmail tool. If Gmail was assigned to finance and later unassigned, an open finance
+engagement from that time still carries Gmail when it resumes. Before installing 0.25.0,
+either let finance's open engagements finish or cancel them, or do step 2 anyway, so the
+read profile applies to them too. Only where Gmail was never assigned to finance is there
+nothing to migrate.
 
 ## Output discipline, on every read
 
