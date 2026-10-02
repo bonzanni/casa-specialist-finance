@@ -203,12 +203,11 @@ the harness, and each is there for a named reason:
 
 `Bash`, `Write` and `Edit` are explicitly disallowed, and a test pins that.
 
-So are eight of the fourteen tools of casa's Gmail plugin. When Gmail is assigned to this
-specialist, casa grants the whole Gmail server, so the deny list is what keeps finance
-read-only. Denied: send_email, reply_to_thread, manage_email, save_attachment, erase_gmail,
-erase_gmail_data, setup_gmail and gmail_auth_collect. Left: search_emails, get_email,
-get_thread, list_attachments, download_attachment and list_send_as. A test pins the eight, and that none of the six is denied.
-This is interim: casa's plugin access profiles replace it, and the list is removed then.
+The role denies no Gmail tool. When Gmail is assigned to this specialist, assign it with
+casa's read profile (casa 0.338.0 or later, Gmail plugin 0.11.0 or later): finance can then
+search and read mail and download attachments, and casa denies it the tools that send,
+change or erase mail or set up the sign-in. An assignment without a profile gives finance
+every Gmail tool, as it would any agent.
 
 ## Output discipline, on every read
 
