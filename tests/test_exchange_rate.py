@@ -70,7 +70,8 @@ class TestExtraction(unittest.TestCase):
     def test_a_bad_rate_drops_the_rate_pair_and_keeps_the_instructed_pair(self):
         for rate in (1.16, "1e3", "-1.2", "+1.2", "0", "0.000", "1,16",
                      " 1.2", "1.2\n", "1.2 ", ".5", "5.", "NaN", "Infinity",
-                     "1" * 13, "1." + "1" * 21, "", None, True):
+                     "1" * 16, "1." + "1" * 21, "\u0661.5", "", None,
+                     True):
             block = dict(BLOCK, exchange_rate=rate)
             self.assertEqual(ingest.exchange_rate(stored(block)),
                              dict(FIELDS, exchange_rate=None,
@@ -90,43 +91,40 @@ class TestExtraction(unittest.TestCase):
                      {"amount": 9.48, "currency": "EUR"},
                      {"amount": "-9.48", "currency": "EUR"},
                      {"amount": "+9.48", "currency": "EUR"},
-                     {"amount": "9.481", "currency": "EUR"},
                      {"amount": "1e3", "currency": "EUR"},
                      {"amount": "9,48", "currency": "EUR"},
                      {"amount": "9.48", "currency": "eur"},
                      {"amount": "9.48", "currency": "EURO"},
-                     {"amount": "1" * 40, "currency": "EUR"},
-                     {"amount": "10000000000000", "currency": "EUR"}):
+                     {"amount": "\u0669.48", "currency": "EUR"},
+                     {"amount": "1" * 16, "currency": "EUR"},
+                     # Decimal's 28-digit context rounds this to "9.48".
+                     {"amount": "9." + "4" + "7" + "9" * 28,
+                      "currency": "EUR"},
+                     # Overflows Decimal scaling, which raised out of a read.
+                     {"amount": "1" + "0" * 999999, "currency": "EUR"}):
             block = dict(BLOCK, instructed_amount=inst)
             self.assertEqual(ingest.exchange_rate(stored(block)),
                              dict(FIELDS, instructed_amount=None,
                                   instructed_currency=None), repr(inst))
 
-    def test_the_largest_instructed_amount_in_bounds_is_kept(self):
-        block = dict(BLOCK, instructed_amount={"amount": "9999999999999.99",
-                                               "currency": "EUR"})
-        self.assertEqual(
-            ingest.exchange_rate(stored(block))["instructed_amount"],
-            "9999999999999.99")
-
-    def test_the_instructed_amount_is_printed_in_its_currency_s_precision(self):
-        for amount, currency, want in (("9.5", "EUR", "9.50"),
-                                       ("11", "USD", "11.00"),
-                                       ("11.000", "USD", "11.00"),
-                                       ("1500", "JPY", "1500"),
-                                       ("1.5", "KWD", "1.500"),
-                                       ("0", "EUR", "0.00")):
+    def test_the_instructed_amount_is_carried_verbatim(self):
+        # The provider's own string: no rounding, no re-rendering to a
+        # currency precision this plugin may not know (CLF has four).
+        for amount, currency in (("9.48", "EUR"), ("9.5", "EUR"),
+                                 ("11.000", "USD"), ("1500", "JPY"),
+                                 ("9.4812", "CLF"), ("0", "EUR"),
+                                 ("9" * 15 + "." + "9" * 20, "EUR")):
             block = dict(BLOCK, instructed_amount={"amount": amount,
                                                    "currency": currency})
             out = ingest.exchange_rate(stored(block))
             self.assertEqual((out["instructed_amount"],
                               out["instructed_currency"]),
-                             (want, currency), amount)
+                             (amount, currency), amount)
 
     def test_the_rate_is_carried_verbatim(self):
         # A decimal string: no float round trip, no trailing-zero trim.
         for rate in ("1.1608109839149589", "0.86147", "1.10", "151",
-                     "00001.5", "9" * 12 + "." + "9" * 20):
+                     "00001.5", "9" * 15 + "." + "9" * 20):
             block = dict(BLOCK, exchange_rate=rate)
             self.assertEqual(
                 ingest.exchange_rate(stored(block))["exchange_rate"], rate)
@@ -168,6 +166,22 @@ class TestGetTransaction(ExchangeRateBase):
         out = call("get_transaction", row_id=rid)
         self.assertNotIn("exchange rate", out)
         self.assertNotIn("instructed amount", out)
+
+    def test_an_oversized_instructed_amount_drops_the_pair_not_the_read(
+            self):
+        # A million-digit amount overflows Decimal scaling; neither
+        # get_transaction nor the whole-ledger export may fail on it, and the
+        # rate pair still shows.
+        block = dict(BLOCK, instructed_amount={"amount": "1" + "0" * 999999,
+                                               "currency": "EUR"})
+        rid = self.sync(payload(block))["R1"]
+        out = call("get_transaction", row_id=rid)
+        self.assertIn("exchange rate 1.1608109839149589", out)
+        self.assertNotIn("instructed amount", out)
+        rows = list(csv.DictReader(io.StringIO(self.export("csv"))))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["instructed_amount"], "")
+        self.assertEqual(rows[0]["exchange_rate"], "1.1608109839149589")
 
     def test_nothing_else_of_the_block_is_shown(self):
         block = dict(BLOCK, rate_type="SPOT",

@@ -216,10 +216,11 @@ the harness, and each is there for a named reason:
 
 A card payment in another currency carries the provider's `exchange_rate` block in the
 stored payload (issue #91). `ingest.exchange_rate` reads four fields from it and nothing
-else: `exchange_rate`, the rate as the provider wrote it (a positive decimal string,
-at most 12 integer and 20 fractional digits), `exchange_unit_currency`, the rate's
-ISO 4217 unit currency, and `instructed_amount` and `instructed_currency`, the
-instructed amount in its currency's precision. They come in two pairs, each exposed only
+else: `exchange_rate`, the rate, `exchange_unit_currency`, its ISO 4217 unit currency,
+and `instructed_amount` and `instructed_currency`. The rate and the amount are the
+provider's own strings, carried verbatim once they match an unsigned decimal of at most
+15 integer and 20 fractional digits (the rate also nonzero); they never pass through
+decimal arithmetic, which would round a long fraction to a different value. They come in two pairs, each exposed only
 when both halves validate: a rate without its unit currency does not say which way it
 converts. A payload without the block, or with a pair that does not validate, exposes
 nothing for that pair. `get_transaction` prints an `exchange rate` and an `instructed

@@ -264,12 +264,22 @@ def normalise(raw: dict, account_id: str) -> dict:
 EXCHANGE_RATE_FIELDS = ("exchange_rate", "exchange_unit_currency",
                         "instructed_amount", "instructed_currency")
 
-# A positive decimal with a dot separator, bounded both sides of the dot: no
-# sign, exponent, grouping or whitespace.
-_RATE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,20})?\Z")
+# An unsigned decimal with a dot separator, bounded both sides of the dot: no
+# sign, exponent, grouping or whitespace. Both the rate and the instructed
+# amount are matched by this and then carried VERBATIM — never through
+# Decimal arithmetic, whose context rounds a long fraction to a different
+# value and overflows on a long integer part, nor through `money`, whose
+# exponent table is not every currency's.
+_DECIMAL = re.compile(r"[0-9]{1,15}(?:\.[0-9]{1,20})?\Z")
 _ISO_CURRENCY = re.compile(r"[A-Z]{3}\Z")
-# Instructed amounts are bounded well inside what a card payment can be.
-_MAX_INSTRUCTED_MINOR = 10 ** 15
+
+
+def _decimal(value) -> bool:
+    return isinstance(value, str) and _DECIMAL.match(value) is not None
+
+
+def _currency(value) -> bool:
+    return isinstance(value, str) and _ISO_CURRENCY.match(value) is not None
 
 
 def exchange_rate(raw_json) -> dict:
@@ -279,14 +289,30 @@ def exchange_rate(raw_json) -> dict:
     amount with its currency. A pair is exposed only when both of its halves
     validate — a rate without its unit currency does not say which way it
     converts — and otherwise every field of it is None, as are all four for a
-    payload without the block. Never raises: a stored payload is provider
-    text, and a malformed one exposes nothing rather than failing a read.
+    payload without the block. Values are the provider's own strings. Never
+    raises: a stored payload is provider text, and a malformed one exposes
+    nothing rather than failing a read.
     """
     out = dict.fromkeys(EXCHANGE_RATE_FIELDS)
     try:
         raw = json.loads(raw_json) if isinstance(raw_json, str) else None
     except ValueError:
         return out
+    block = raw.get("exchange_rate") if isinstance(raw, dict) else None
+    if not isinstance(block, dict):
+        return out
+    rate, unit = block.get("exchange_rate"), block.get("unit_currency")
+    # A zero rate converts nothing; it is not a rate.
+    if (_decimal(rate) and any(ch not in "0." for ch in rate)
+            and _currency(unit)):
+        out["exchange_rate"], out["exchange_unit_currency"] = rate, unit
+    instructed = block.get("instructed_amount")
+    if isinstance(instructed, dict):
+        amount, currency = instructed.get("amount"), instructed.get("currency")
+        if _decimal(amount) and _currency(currency):
+            out["instructed_amount"] = amount
+            out["instructed_currency"] = currency
+    return out
     block = raw.get("exchange_rate") if isinstance(raw, dict) else None
     if not isinstance(block, dict):
         return out
