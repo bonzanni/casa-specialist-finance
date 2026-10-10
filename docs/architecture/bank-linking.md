@@ -110,6 +110,29 @@ origin; size caps and deadlines. It never retries. A rate-limited response is ra
 an exception carrying the parsed retry delay and no provider body, so the
 non-idempotent authorization calls are never re-sent automatically.
 
+## A consent the bank stopped honouring
+
+A consent can stop working at the bank long before its `valid_until`, and no local
+event marks it: the session row reads `AUTHORIZED` while every sync is refused. Two
+things make that visible.
+
+A failed provider call keeps Enable Banking's own error code beside the HTTP status, so
+`sync_state.last_error` and the sync reply read `ApiError: HTTP 401 unauthorized
+EXPIRED_SESSION` rather than a bare 401. `eb_ais.py` reads only the response's `error`
+field, and keeps it only when it is one of the enum's documented values
+(`ERROR_CODES`). The free-text `message` and `detail` are never read: provider text can
+reach the model through the error path.
+
+When a routine transaction sync under one consent has been refused (401 or 403) twice
+in a row, with no other failure between, `check_refused_consent()` in `tools_auth.py` makes one `GET /sessions/{id}`
+and records the status it answers on that account's routine-sync record. A status other
+than `AUTHORIZED` makes `sync` and `consent_status` say the bank needs re-linking, with
+the `link_bank` arguments that renew it. A consent already known to be gone, through any of its
+accounts, is not asked again; a successful sync of any account under that consent
+clears the finding. The session row itself is left `AUTHORIZED` on
+purpose: `link_bank` renews only a row in that status, and renewal is what carries the
+history to the new consent.
+
 ## Source & test map
 
 <!-- BEGIN SOURCEMAP -->
@@ -123,6 +146,7 @@ non-idempotent authorization calls are never re-sent automatically.
 - `plugins/bank-feed/server/eb_ais.py`
 - `plugins/bank-feed/server/httpx.py`
 - `plugins/bank-feed/server/tools_refresh.py::_refresh_resource`
+- `plugins/bank-feed/server/tools_auth.py::check_refused_consent`
 
 **Tests**
 - `tests/test_flows.py`
@@ -130,6 +154,7 @@ non-idempotent authorization calls are never re-sent automatically.
 - `tests/test_eb.py`
 - `tests/test_httpx.py`
 - `tests/test_tools_refresh.py`
+- `tests/test_consent_refused.py`
 
 **Related**
 - [`architecture/ingestion-and-identity.md`](../architecture/ingestion-and-identity.md)

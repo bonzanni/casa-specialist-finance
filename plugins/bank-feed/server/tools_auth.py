@@ -1013,19 +1013,146 @@ def record_sync_health(c, account_id: str, session_id, exc,
                 count = int(was.get("count") or 0)
             except (TypeError, ValueError):
                 count = 0
+            try:
+                refused = int(was.get("refused") or 0)
+            except (TypeError, ValueError):
+                refused = 0
+            # Issue #100: CONSECUTIVE refusals, apart from the failure count —
+            # any other failure in between restarts it.
+            refused = (refused + 1 if getattr(exc, "status", None)
+                       in REFUSED_STATUSES else 0)
             record = {"session": session_id, "seen": started,
                       "ok_at": prior.get("ok_at") if same else None,
                       "ok_s": prior.get("ok_s") if same else None,
+                      # Issue #100: what the provider said the session's status
+                      # was, carried while the failures continue; a success
+                      # starts a fresh record without it.
+                      "provider": prior.get("provider") if same else None,
                       "fail": {"label": eb_ais.failure_label(exc),
                                "first": was.get("first") or now,
                                "last": now, "last_s": now_s,
-                               "count": count + 1}}
+                               "count": count + 1, "refused": refused}}
         c.execute("INSERT INTO meta(key, value) SELECT ?, ? WHERE EXISTS"
                   " (SELECT 1 FROM accounts WHERE account_id=?"
                   " AND session_id=?)"
                   " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (sync_health_key(account_id),
                    json.dumps(record, sort_keys=True), account_id, session_id))
+        if exc is None:
+            # Issue #100: a success proves the CONSENT works, so a "gone"
+            # finding on any other account bound to it is withdrawn too (its
+            # own failure record stays).
+            for (other,) in c.execute(
+                    "SELECT account_id FROM accounts WHERE session_id=?"
+                    " AND account_id<>?", (session_id, account_id)).fetchall():
+                theirs = sync_health(c, other)
+                if theirs is not None and theirs.get("provider") is not None:
+                    theirs["provider"] = None
+                    c.execute("UPDATE meta SET value=? WHERE key=?",
+                              (json.dumps(theirs, sort_keys=True),
+                               sync_health_key(other)))
+        if own:
+            c.execute("COMMIT")
+    except BaseException:
+        if own and c.in_transaction:
+            c.execute("ROLLBACK")
+        raise
+
+
+#: Enable Banking's session statuses (`GET /sessions/{id}`). A closed
+#: vocabulary, so the provider's answer is stored and printed only when it is
+#: one of these words.
+PROVIDER_SESSION_STATUSES = frozenset({
+    "INVALID", "PENDING_AUTHORIZATION", "RETURNED_FROM_BANK", "AUTHORIZED",
+    "EXPIRED", "CLOSED", "REVOKED", "CANCELLED"})
+
+#: How many consecutive refused routine syncs before the provider is asked
+#: about the session: one refusal can be a blip, a second is a pattern.
+REFUSALS_BEFORE_CHECK = 2
+
+
+def _provider_gone(record) -> str | None:
+    """The provider's own non-live status for this record's consent, or None."""
+    provider = (record or {}).get("provider")
+    status = provider.get("status") if isinstance(provider, dict) else None
+    if isinstance(status, str) and status in PROVIDER_SESSION_STATUSES and \
+            status != callbacks.LIVE_SESSION_STATUS:
+        return status
+    return None
+
+
+def check_refused_consent(c, account_id: str, session_id) -> None:
+    """Issue #100: after a repeated refusal, ask the provider about the session.
+
+    A consent can stop working at the bank long before its `valid_until` —
+    Enable Banking answers EXPIRED_SESSION then, and says so in its FAQ — while
+    the local row reads AUTHORIZED for ever, because no local event marks it.
+    So once a routine transaction sync under this consent has been refused
+    (401/403) `REFUSALS_BEFORE_CHECK` times in a row (the record's `refused`
+    run, which any other failure restarts), this makes ONE call,
+    `GET /sessions/{id}`, and records the status it answers on the health
+    record, where `refusal_hint` names the re-link. A consent already known to
+    be gone — on this account's record or on any other account bound to it —
+    is not asked again; one still reported AUTHORIZED is asked on the next
+    refusal, since that answer can change.
+
+    `sessions.status` is deliberately NOT changed: `link_bank` finds the row
+    to RENEW through `_renewable_session`, which only matches the live status,
+    and renewal is what carries the history across to the new consent. The
+    finding lives with the failures, and a success clears it.
+
+    Best effort: any failure of the check leaves everything as it was.
+    """
+    record = sync_health(c, account_id)
+    if not record or record.get("session") != session_id:
+        return
+    fail = record.get("fail")
+    if not isinstance(fail, dict) or \
+            eb_ais.label_status(fail.get("label")) not in REFUSED_STATUSES:
+        return
+    try:
+        refused = int(fail.get("refused") or 0)
+    except (TypeError, ValueError):
+        refused = 0
+    if refused < REFUSALS_BEFORE_CHECK or _provider_gone(record):
+        return
+    # The answer is about the CONSENT: another account bound to it may
+    # already have asked, in which case its answer is reused, not re-asked.
+    known = None
+    for (other,) in c.execute(
+            "SELECT account_id FROM accounts WHERE session_id=?"
+            " AND account_id<>?", (session_id, account_id)).fetchall():
+        theirs = sync_health(c, other)
+        if _provider_gone(theirs):
+            known = theirs["provider"]
+            break
+    if known is not None:
+        status, at = known["status"], known.get("at")
+    else:
+        try:
+            answer = _ais().get_session(session_id)
+        except Exception:                        # noqa: BLE001 — best effort
+            return
+        status = answer.get("status") if isinstance(answer, dict) else None
+        at = _utcnow_iso()
+        if not isinstance(status, str) or \
+                status not in PROVIDER_SESSION_STATUSES:
+            return
+    own = not c.in_transaction
+    if own:
+        c.execute("BEGIN IMMEDIATE")
+    try:
+        current = _health_record(c, account_id)
+        # Only onto the failing record it was asked for: a success or a
+        # renewal that landed meanwhile has the last word.
+        if (current is not None and current.get("session") == session_id
+                and isinstance(current.get("fail"), dict)):
+            current["provider"] = {"status": status, "at": at}
+            c.execute("UPDATE meta SET value=? WHERE key=? AND EXISTS"
+                      " (SELECT 1 FROM accounts WHERE account_id=?"
+                      " AND session_id=?)",
+                      (json.dumps(current, sort_keys=True),
+                       sync_health_key(account_id), account_id, session_id))
         if own:
             c.execute("COMMIT")
     except BaseException:
@@ -1071,17 +1198,31 @@ def _health_for(c, account_id: str, session: dict):
 
 
 def refusal_hint(c, account_id: str, session: dict):
-    """The one rendering of the 401/403-while-another-consent-works finding,
-    for `consent_status` and `sync` alike. Nothing is closed or revoked: a
-    refused data call does not prove the consent is gone
-    (`eb_ais.revocation_is_final`)."""
+    """The one rendering of a refused consent's finding, for `consent_status`
+    and `sync` alike: the provider's own non-live session status when
+    `check_refused_consent` recorded one (issue #100), else the
+    401/403-while-another-consent-works evidence. Nothing is closed or revoked
+    either way: a refused data call does not prove the consent is gone
+    (`eb_ais.revocation_is_final`), and renewing it is what keeps the
+    history."""
     record = _health_for(c, account_id, session)
     if not record or not isinstance(record.get("fail"), dict):
         return None
+    bank = _safe(session.get("aspsp_name")) or "this bank"
+    gone = _provider_gone(record)
+    if gone:
+        # Issue #100: the provider's own word, asked after repeated refusals.
+        return ("%s NEEDS RE-LINKING: Enable Banking reports this consent as "
+                "%s (checked %s), so the bank no longer gives access, whatever "
+                "its recorded validity says, and every sync will fail until it "
+                "is renewed. Re-link with link_bank (aspsp=%s, country=%s, "
+                "psu_type=%s): a renewal carries the history forward."
+                % (bank, gone, _safe(record["provider"].get("at")), bank,
+                   _safe(session.get("country")),
+                   _safe(session.get("psu_type"))))
     elsewhere = _refused_elsewhere(c, account_id, record)
     if elsewhere is None:
         return None
-    bank = _safe(session.get("aspsp_name")) or "this bank"
     return ("The provider refused this consent's data (HTTP %d) while another "
             "consent on the same application (%s) synced successfully after "
             "that refusal, so the application credential itself works: "

@@ -5,10 +5,15 @@
 exhaustion belongs to the caller that owns the coverage interval
 (`flows.backfill`), because only that caller can say what was proved.
 
-`ApiError` carries a status and a CLASS and nothing else.
-Provider text is attacker-controllable and any exception text can reach the
-model through the server's error path, so `ApiError` deliberately has no body
-to leak and no path (which would carry a session id) in its message.
+`ApiError` carries a status, a CLASS and, when the provider sent one, Enable
+Banking's own error CODE (issue #100) — nothing else. Provider text is
+attacker-controllable and any exception text can reach the model through the
+server's error path, so `ApiError` deliberately has no body to leak and no
+path (which would carry a session id) in its message. The code is the one
+exception, and only because it is not text: it is a token from a closed
+vocabulary (`EXPIRED_SESSION`, `REVOKED_SESSION`, `ASPSP_ERROR`, ...), kept
+only when it is one of `ERROR_CODES`. The response's `message` and `detail` are free
+text and are never read.
 
 That is a claim about `ApiError`, NOT about every exception this module can
 raise. A 2xx whose body is not JSON leaves `_call` as `json.JSONDecodeError`,
@@ -94,22 +99,67 @@ def error_kind(status: int) -> str:
     return "provider_error" if status >= 500 else "http_error"
 
 
-class ApiError(RuntimeError):
-    """A status and a class. It has NO body attribute on purpose: there must
-    be nothing here for a later caller to accidentally surface."""
+#: Enable Banking's error codes (`ErrorResponse.error`, from the API
+#: reference). A closed list, not a shape: an upper-case string is still
+#: provider text, so anything not named here is dropped, never printed.
+ERROR_CODES = frozenset({
+    "ACCESS_DENIED", "ACCOUNT_DOES_NOT_EXIST", "ALREADY_AUTHORIZED",
+    "ASPSP_ACCOUNT_NOT_ACCESSIBLE", "ASPSP_ERROR", "ASPSP_TIMEOUT",
+    "ASPSP_RATE_LIMIT_EXCEEDED", "AUTHORIZATION_NOT_PROVIDED",
+    "CLOSED_SESSION", "DATE_TO_WITHOUT_DATE_FROM", "DATE_FROM_IN_FUTURE",
+    "EXPIRED_AUTHORIZATION_CODE", "EXPIRED_SESSION", "INVALID_ACCOUNT_ID",
+    "INVALID_HOST", "UNAUTHORIZED_IP", "NO_ACCOUNTS_ADDED",
+    "PAYMENT_NOT_FOUND", "PSU_HEADER_NOT_PROVIDED", "PSU_HEADER_INVALID",
+    "REDIRECT_URI_NOT_ALLOWED", "REVOKED_SESSION", "SESSION_DOES_NOT_EXIST",
+    "UNAUTHORIZED_ACCESS", "UNTRUSTED_PAYMENT_PARTY",
+    "WEBHOOK_URI_NOT_ALLOWED", "WRONG_ASPSP_PROVIDED",
+    "WRONG_AUTHORIZATION_CODE", "WRONG_DATE_INTERVAL",
+    "WRONG_CREDENTIALS_PROVIDED", "WRONG_REQUEST_PARAMETERS",
+    "WRONG_SESSION_STATUS", "WRONG_TRANSACTIONS_PERIOD",
+    "WRONG_CONTINUATION_KEY", "TRANSACTION_DOES_NOT_EXIST",
+    "PAYMENT_LIMIT_EXCEEDED", "ASPSP_PAYMENT_NOT_ACCESSIBLE",
+    "INVALID_PAYMENT", "ASPSP_PSU_ACTION_REQUIRED", "PAYMENT_NOT_FINALIZED",
+    "PAYMENT_SUBMISSION_NOT_SUPPORTED", "PAYMENT_NOT_AUTHORIZED",
+    "PAYMENT_SUBMISSION_NOT_DEFERRED"})
 
-    def __init__(self, status: int, op: str) -> None:
+
+def error_code(raw) -> str | None:
+    """Enable Banking's error code from an error response body, or None.
+
+    Issue #100: the code is what tells an expired consent (`EXPIRED_SESSION`)
+    from a revoked one or a bank outage — a 401 alone cannot. Only the `error`
+    field is read; `ApiError` keeps it only when it is one of
+    `ERROR_CODES`.
+    """
+    try:
+        body = json.loads(raw or b"")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    code = body.get("error") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+class ApiError(RuntimeError):
+    """A status, a class and the provider's error code. It has NO body
+    attribute on purpose: there must be nothing here for a later caller to
+    accidentally surface."""
+
+    def __init__(self, status: int, op: str, code: str | None = None) -> None:
         self.status = int(status)
         self.kind = error_kind(self.status)
         self.op = op
+        self.code = (code if isinstance(code, str) and code in ERROR_CODES
+                     else None)
         super().__init__(f"Enable Banking AIS {op} failed: "
-                         f"HTTP {self.status} ({self.kind})")
+                         f"HTTP {self.status} ({self.kind}"
+                         + (f", {self.code}" if self.code else "") + ")")
 
 
 #: `failure_label`'s shape for an `ApiError`, and the only thing
 #: `label_status` accepts. Anchored at both ends: a label is read back only
 #: when it is exactly the string this module wrote.
-_LABEL_RE = re.compile(r"ApiError: HTTP ([1-5][0-9]{2}) [a-z_]+")
+_LABEL_RE = re.compile(r"ApiError: HTTP ([1-5][0-9]{2}) [a-z_]+"
+                       r"(?: [A-Z][A-Z_]{2,63})?")
 
 
 def failure_label(exc) -> str:
@@ -117,7 +167,9 @@ def failure_label(exc) -> str:
 
     An `ApiError` becomes `ApiError: HTTP 401 unauthorized` — the status and
     the fixed `error_kind` vocabulary, which is what tells an unauthorized
-    answer from a rate limit or an outage. So does any exception whose class
+    answer from a rate limit or an outage — followed by Enable Banking's error
+    code when it sent one (`ApiError: HTTP 401 unauthorized EXPIRED_SESSION`,
+    issue #100). So does any exception whose class
     declares `LABELS_STATUS = True` and carries the status it wraps
     (`tools_auth.WorldUnverified`, the application check, which this module
     cannot import). Anything else stays its class name, as it always was. Neither reads `str(exc)` or `args`, so no provider body
@@ -129,8 +181,10 @@ def failure_label(exc) -> str:
         status = getattr(exc, "status", None)
         if (isinstance(status, int) and not isinstance(status, bool)
                 and 100 <= status <= 599):
-            return "%s: HTTP %d %s" % (type(exc).__name__, status,
-                                        error_kind(status))
+            label = "%s: HTTP %d %s" % (type(exc).__name__, status,
+                                         error_kind(status))
+            code = exc.code if isinstance(exc, ApiError) else None
+            return label + (" " + code if code else "")
     return type(exc).__name__
 
 
@@ -201,7 +255,8 @@ class AIS:
             headers={"Authorization": f"Bearer {self._token()}"},
             json_body=body)
         if status >= 400:
-            raise ApiError(status, op)          # `op` is a literal, never a path
+            # `op` is a literal, never a path; of the body, only the code.
+            raise ApiError(status, op, error_code(raw))
         return json.loads(raw or b"{}")
 
     def application(self) -> dict:

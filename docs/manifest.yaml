@@ -68,12 +68,14 @@
     - plugins/bank-feed/server/eb_ais.py
     - plugins/bank-feed/server/httpx.py
     - plugins/bank-feed/server/tools_refresh.py::_refresh_resource
+    - plugins/bank-feed/server/tools_auth.py::check_refused_consent
   tests:
     - tests/test_flows.py
     - tests/test_callbacks.py
     - tests/test_eb.py
     - tests/test_httpx.py
     - tests/test_tools_refresh.py
+    - tests/test_consent_refused.py
   related: [architecture/ingestion-and-identity.md, architecture/credentials.md]
 
 - doc: architecture/ingestion-and-identity.md

@@ -487,6 +487,12 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
         # backfill is not a routine sync of the bound consent.
         tools_auth.record_sync_health(c, account_id, account.get("session_id"),
                                       exc, started)
+        if exc is not None and getattr(exc, "status", None) in \
+                tools_auth.REFUSED_STATUSES:
+            # Issue #100: a repeated refusal asks the provider, once, whether
+            # the consent is still authorized at all.
+            tools_auth.check_refused_consent(c, account_id,
+                                             account.get("session_id"))
     # THE ONE TERMINAL LIFE CHECK. Fencing the intermediate reads one at a
     # time does not hold, and each attempt left another gap:
     # `backfill_complete`'s `sync_state` row came back from a backup and read
@@ -974,6 +980,7 @@ def sync(args: dict) -> str:
     # Issue #83: AFTER the loop, so a later bank's success in this same run
     # counts as the cross-consent evidence. The one renderer consent_status
     # uses, reading the record this run just wrote.
+    shown = set()
     for name, account_id in refused:
         session = c.execute(
             "SELECT s.* FROM sessions s JOIN accounts a"
@@ -981,7 +988,9 @@ def sync(args: dict) -> str:
             (account_id,)).fetchone()
         hint = (tools_auth.refusal_hint(c, account_id, dict(session))
                 if session is not None else None)
-        if hint:
+        if hint and hint not in shown:
+            # One consent's finding once, however many of its accounts failed.
+            shown.add(hint)
             lines.append("%s: %s" % (name, hint))
     if batch_new:
         # needs is the propagated FINAL-STATE workable count, never
