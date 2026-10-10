@@ -487,6 +487,12 @@ def _do_refresh(c, account_id: str, resource: str, out=None) -> bool:
         # backfill is not a routine sync of the bound consent.
         tools_auth.record_sync_health(c, account_id, account.get("session_id"),
                                       exc, started)
+        if exc is not None and getattr(exc, "status", None) in \
+                tools_auth.REFUSED_STATUSES:
+            # Issue #100: a repeated refusal asks the provider, once, whether
+            # the consent is still authorized at all.
+            tools_auth.check_refused_consent(c, account_id,
+                                             account.get("session_id"))
     # THE ONE TERMINAL LIFE CHECK. Fencing the intermediate reads one at a
     # time does not hold, and each attempt left another gap:
     # `backfill_complete`'s `sync_state` row came back from a backup and read
