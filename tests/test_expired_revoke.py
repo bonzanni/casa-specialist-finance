@@ -112,6 +112,81 @@ class TestUnlinkAnExpiredConsent(ExpiredBase):
         self.assertIsNotNone(self.row()["closed_at"])
 
 
+class TestAGoneSessionCode(ExpiredBase):
+    """Issue #106: Enable Banking refuses the DELETE of a CLOSED session with
+    HTTP 400 `CLOSED_SESSION`. The code itself names the session gone, on any
+    status; a 400 without one of those codes asks `GET /sessions/{id}`."""
+
+    def test_a_400_closed_session_is_settled_without_a_question(self):
+        self.session()
+        self.account()
+        self.ais.session_status = "AUTHORIZED"       # the code decides, not this
+        self.ais.raise_on_delete = eb_ais.ApiError(400, "delete_session",
+                                                   "CLOSED_SESSION")
+        out = call("unlink_bank", consent_ref=self.ref())
+        self.assertEqual(self.ais.session_calls, [])
+        self.assertIsNotNone(self.row()["closed_at"])
+        self.assertNotEqual(self.row()["status"],
+                            apply.OPERATOR_WITHDRAWN_STATUS)
+        self.assertIn("reported by the provider as CLOSED", out)
+        self.assertNotIn("STILL LIVE", out)
+        self.assertNotIn("NOT revoked", out)
+        self.assertNotIn("withdrawn_at_bank", out)
+        bound = self.raw.execute("SELECT session_id FROM accounts").fetchone()
+        self.assertIsNone(bound[0])
+
+    def test_every_gone_code_settles_on_any_status(self):
+        cases = [(400, "EXPIRED_SESSION", "EXPIRED"),
+                 (401, "REVOKED_SESSION", "REVOKED"),
+                 (403, "CLOSED_SESSION", "CLOSED")]
+        for status, code, word in cases:
+            with self.subTest(code=code):
+                self.raw.execute("DELETE FROM sessions")
+                self.session()
+                self.ais.session_status = "AUTHORIZED"
+                self.ais.raise_on_delete = eb_ais.ApiError(
+                    status, "delete_session", code)
+                out = call("unlink_bank", consent_ref=self.ref())
+                self.assertIn("reported by the provider as %s" % word, out)
+                self.assertIsNotNone(self.row()["closed_at"])
+
+    def test_a_400_without_a_gone_code_asks_once(self):
+        for code in (None, "WRONG_REQUEST_PARAMETERS"):
+            for word, settles in (("CLOSED", True), ("AUTHORIZED", False)):
+                with self.subTest(code=code, word=word):
+                    self.raw.execute("DELETE FROM sessions")
+                    self.session()
+                    self.ais.session_calls = []
+                    self.ais.session_status = word
+                    self.ais.raise_on_delete = eb_ais.ApiError(
+                        400, "delete_session", code)
+                    out = call("unlink_bank", consent_ref=self.ref())
+                    self.assertEqual(self.ais.session_calls, [SESSION_ID])
+                    if settles:
+                        self.assertIn("reported by the provider as CLOSED", out)
+                        self.assertIsNotNone(self.row()["closed_at"])
+                    else:
+                        self.assertIn("NOT revoked", out)
+                        self.assertIsNone(self.row()["closed_at"])
+
+    def test_the_renewal_revoke_settles_a_closed_session(self):
+        self.session()
+        self.ais.raise_on_delete = eb_ais.ApiError(400, "delete_session",
+                                                   "CLOSED_SESSION")
+        ok, label = flows._revoke(self.raw, self.ais, SESSION_ID)
+        self.assertTrue(ok)
+        self.assertIsNone(label)
+        self.assertIsNotNone(self.row()["closed_at"])
+
+    def test_the_erasers_withdrawal_pass_settles_a_closed_session(self):
+        self.session()
+        self.ais.raise_on_delete = eb_ais.ApiError(400, "delete_session",
+                                                   "CLOSED_SESSION")
+        gone, kept = tools_destructive._withdraw_open_consents(self.raw)
+        self.assertEqual([g["session_id"] for g in gone], [SESSION_ID])
+        self.assertEqual(kept, [])
+
+
 class TestTheOtherRevocationPaths(ExpiredBase):
     def test_the_renewal_revoke_settles_an_expired_session(self):
         self.session()

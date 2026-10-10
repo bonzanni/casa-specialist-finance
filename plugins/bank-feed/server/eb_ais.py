@@ -210,9 +210,10 @@ def revocation_is_final(exc) -> bool:
     Nothing else qualifies, and the distinction is the whole finding. A 429, a
     timeout, a dropped socket, a 5xx: the consent is very probably STILL LIVE
     at the bank, and treating "we could not tell" as "it is revoked" is what
-    closed the local row and erased the operator's only retry handle. A 401 or
-    a 403 does not qualify on its own either — but `revocation_settled` asks
-    the provider about the session for those two (issue #102).
+    closed the local row and erased the operator's only retry handle. A 400, a
+    401 or a 403 does not qualify on its own either — but `revocation_settled`
+    settles one whose error code names the session gone (issue #106) and asks
+    the provider about the session for the rest (issue #102).
 
     **It lives HERE, beside `ApiError` and `error_kind`, and the placement is
     load-bearing.** It is a statement about what a provider status *means*,
@@ -240,6 +241,13 @@ SESSION_STATUSES = frozenset({
 #: The statuses that say the consent no longer exists at the bank.
 SESSION_GONE_STATUSES = frozenset({"EXPIRED", "REVOKED", "CLOSED"})
 
+#: The error codes that say the same thing on a failed call, and the status
+#: word each one names. Enable Banking refuses the DELETE of a CLOSED session
+#: with HTTP 400 `CLOSED_SESSION` (issue #106).
+SESSION_GONE_CODES = {"EXPIRED_SESSION": "EXPIRED",
+                      "REVOKED_SESSION": "REVOKED",
+                      "CLOSED_SESSION": "CLOSED"}
+
 
 def session_status(ais, session_id) -> str | None:
     """The provider's own status word for a session, or None when the call
@@ -258,9 +266,12 @@ def revocation_settled(ais, session_id, exc) -> tuple[bool, str | None]:
     """Does this failed `delete_session` still prove the consent is gone, and
     on what word? `(final, status)`.
 
-    `revocation_is_final` first: a 404 is final on its own. A 401 or a 403 is
-    not, on its own — but Enable Banking refuses a DELETE that way for a
-    session it already considers EXPIRED (issue #102), so for those two it is
+    `revocation_is_final` first: a 404 is final on its own. So is an error
+    code that names the session gone (`SESSION_GONE_CODES`), whatever the
+    status: Enable Banking refuses the DELETE of a CLOSED session with a 400
+    `CLOSED_SESSION` (issue #106). A 400, a 401 or a 403 without such a code is
+    not final on its own — but Enable Banking refuses a DELETE that way for a
+    session it already considers EXPIRED (issue #102), so for those it is
     ASKED, with one `GET /sessions/{id}`: an EXPIRED, REVOKED or CLOSED answer
     is the provider stating the consent is gone, and the status is returned so
     the reply can say so. Anything else — no answer, AUTHORIZED, any other
@@ -269,7 +280,11 @@ def revocation_settled(ais, session_id, exc) -> tuple[bool, str | None]:
     """
     if revocation_is_final(exc):
         return True, None
-    if not (isinstance(exc, ApiError) and exc.status in (401, 403)):
+    if not isinstance(exc, ApiError):
+        return False, None
+    if exc.code in SESSION_GONE_CODES:
+        return True, SESSION_GONE_CODES[exc.code]
+    if exc.status not in (400, 401, 403):
         return False, None
     status = session_status(ais, session_id)
     return (True, status) if status in SESSION_GONE_STATUSES else (False, None)

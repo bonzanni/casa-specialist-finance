@@ -495,11 +495,12 @@ def _revoke(conn, ais, old_session_id: str):
     nagging, and unresolvable, because every retry can only 404 again. The
     predicate lives in `eb_ais` precisely so both callers share it: in
     `tools_auth` it would sit ABOVE this module, which cannot import it.
-    Issue #102 adds one more, through the same shared rule
-    (`eb_ais.revocation_settled`): a 401/403 on a session the provider's own
-    `GET /sessions/{id}` reports EXPIRED, REVOKED or CLOSED. Nothing else
-    qualifies: a 429, a timeout, a 5xx, any other 401 or 403 all leave the
-    grant very probably live at the bank.
+    Issues #102 and #106 add two more, through the same shared rule
+    (`eb_ais.revocation_settled`): an error code that names the session gone
+    (`CLOSED_SESSION`, `EXPIRED_SESSION`, `REVOKED_SESSION`), and a 400/401/403
+    on a session the provider's own `GET /sessions/{id}` reports EXPIRED,
+    REVOKED or CLOSED. Nothing else qualifies: a 429, a timeout, a 5xx, any
+    other 400, 401 or 403 all leave the grant very probably live at the bank.
 
     Only `Exception` is caught, so a genuine `BaseException` — a
     KeyboardInterrupt, a SystemExit — propagates untouched and the row keeps
@@ -519,8 +520,9 @@ def _revoke(conn, ais, old_session_id: str):
     try:
         ais.delete_session(old_session_id)
     except Exception as exc:                     # provider said no, or nothing
-        # Issue #102: a 401/403 asks the provider once whether the session
-        # is already EXPIRED/REVOKED/CLOSED, which is gone too.
+        # Issues #102/#106: a gone-session error code settles it; any other
+        # 400/401/403 asks the provider once whether the session is already
+        # EXPIRED/REVOKED/CLOSED, which is gone too.
         final, _status = eb_ais.revocation_settled(ais, old_session_id, exc)
         # `failure_label`, not str(exc): a provider body may echo identifiers,
         # nothing a tool can print may carry one. The status is kept (issue

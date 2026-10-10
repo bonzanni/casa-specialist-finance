@@ -325,8 +325,9 @@ def unlink_bank(args: dict) -> str:
         ais.delete_session(session_id)
         revoked = True
     except Exception as exc:                     # noqa: BLE001
-        # Issue #102: a 401/403 asks the provider once whether the session is
-        # already EXPIRED/REVOKED/CLOSED — gone, with no operator step.
+        # Issues #102/#106: a gone-session error code settles it; any other
+        # 400/401/403 asks the provider once whether the session is already
+        # EXPIRED/REVOKED/CLOSED — gone, with no operator step.
         absent, gone_as = (eb_ais.revocation_settled(ais, session_id, exc)
                            if ais is not None else (False, None))
         revoked = absent
@@ -1074,9 +1075,10 @@ def _withdraw_open_consents(c):
     in the tool whose entire purpose is erasure.
 
     The rule is the ledger's, not this module's: a consent is proven gone by a
-    success, a 404, or a 401/403 on a session the provider itself reports
-    EXPIRED, REVOKED or CLOSED (`eb_ais.revocation_settled`), and by nothing
-    else. A 429, a timeout, a 5xx, any other 401/403 all mean "we could not
+    success, a 404, an error code naming the session gone, or a 400/401/403 on
+    a session the provider itself reports EXPIRED, REVOKED or CLOSED
+    (`eb_ais.revocation_settled`), and by nothing else. A 429, a timeout, a
+    5xx, any other 400/401/403 all mean "we could not
     tell", and
     destroying a handle on "we could not tell" erases the operator's only retry
     handle.
@@ -1113,8 +1115,9 @@ def _withdraw_open_consents(c):
             ais.delete_session(row["session_id"])
             proven, failure = True, None
         except Exception as exc:             # noqa: BLE001
-            # Issue #102: the same rule as unlink_bank — a 401/403 on a
-            # session the provider reports EXPIRED/REVOKED/CLOSED is gone.
+            # Issues #102/#106: the same rule as unlink_bank — a gone-session
+            # error code, or a 400/401/403 on a session the provider reports
+            # EXPIRED/REVOKED/CLOSED, is gone.
             proven, _status = eb_ais.revocation_settled(
                 ais, row["session_id"], exc)
             # Class + status, never a body (issue #84). Printed in this reply
