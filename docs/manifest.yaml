@@ -76,6 +76,7 @@
     - tests/test_httpx.py
     - tests/test_tools_refresh.py
     - tests/test_consent_refused.py
+    - tests/test_expired_revoke.py
   related: [architecture/ingestion-and-identity.md, architecture/credentials.md]
 
 - doc: architecture/ingestion-and-identity.md

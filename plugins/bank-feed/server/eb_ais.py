@@ -211,8 +211,8 @@ def revocation_is_final(exc) -> bool:
     timeout, a dropped socket, a 5xx: the consent is very probably STILL LIVE
     at the bank, and treating "we could not tell" as "it is revoked" is what
     closed the local row and erased the operator's only retry handle. A 401 or
-    a 403 does not qualify either — those say our credential is wrong, not that
-    the consent is gone.
+    a 403 does not qualify on its own either — but `revocation_settled` asks
+    the provider about the session for those two (issue #102).
 
     **It lives HERE, beside `ApiError` and `error_kind`, and the placement is
     load-bearing.** It is a statement about what a provider status *means*,
@@ -228,6 +228,51 @@ def revocation_is_final(exc) -> bool:
     One predicate, two call sites, no second rule to drift.
     """
     return isinstance(exc, ApiError) and exc.kind == "not_found"
+
+
+#: Enable Banking's session statuses (`GET /sessions/{id}`). A closed
+#: vocabulary, so the provider's answer is used and printed only when it is
+#: one of these words.
+SESSION_STATUSES = frozenset({
+    "INVALID", "PENDING_AUTHORIZATION", "RETURNED_FROM_BANK", "AUTHORIZED",
+    "EXPIRED", "CLOSED", "REVOKED", "CANCELLED"})
+
+#: The statuses that say the consent no longer exists at the bank.
+SESSION_GONE_STATUSES = frozenset({"EXPIRED", "REVOKED", "CLOSED"})
+
+
+def session_status(ais, session_id) -> str | None:
+    """The provider's own status word for a session, or None when the call
+    fails or answers anything outside `SESSION_STATUSES`. Best effort: it
+    never raises."""
+    try:
+        answer = ais.get_session(session_id)
+    except Exception:                            # noqa: BLE001 — best effort
+        return None
+    status = answer.get("status") if isinstance(answer, dict) else None
+    return status if isinstance(status, str) and status in SESSION_STATUSES \
+        else None
+
+
+def revocation_settled(ais, session_id, exc) -> tuple[bool, str | None]:
+    """Does this failed `delete_session` still prove the consent is gone, and
+    on what word? `(final, status)`.
+
+    `revocation_is_final` first: a 404 is final on its own. A 401 or a 403 is
+    not, on its own — but Enable Banking refuses a DELETE that way for a
+    session it already considers EXPIRED (issue #102), so for those two it is
+    ASKED, with one `GET /sessions/{id}`: an EXPIRED, REVOKED or CLOSED answer
+    is the provider stating the consent is gone, and the status is returned so
+    the reply can say so. Anything else — no answer, AUTHORIZED, any other
+    failure — stays "we could not tell". The one rule for every revocation
+    path: the renewal's `flows._revoke`, `unlink_bank` and `delete_all_data`.
+    """
+    if revocation_is_final(exc):
+        return True, None
+    if not (isinstance(exc, ApiError) and exc.status in (401, 403)):
+        return False, None
+    status = session_status(ais, session_id)
+    return (True, status) if status in SESSION_GONE_STATUSES else (False, None)
 
 
 def _now() -> dt.datetime:

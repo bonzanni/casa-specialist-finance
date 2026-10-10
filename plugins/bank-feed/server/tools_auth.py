@@ -1059,12 +1059,8 @@ def record_sync_health(c, account_id: str, session_id, exc,
         raise
 
 
-#: Enable Banking's session statuses (`GET /sessions/{id}`). A closed
-#: vocabulary, so the provider's answer is stored and printed only when it is
-#: one of these words.
-PROVIDER_SESSION_STATUSES = frozenset({
-    "INVALID", "PENDING_AUTHORIZATION", "RETURNED_FROM_BANK", "AUTHORIZED",
-    "EXPIRED", "CLOSED", "REVOKED", "CANCELLED"})
+#: Enable Banking's session statuses, from the one place that reads them.
+PROVIDER_SESSION_STATUSES = eb_ais.SESSION_STATUSES
 
 #: How many consecutive refused routine syncs before the provider is asked
 #: about the session: one refusal can be a blip, a second is a pattern.
@@ -1130,13 +1126,12 @@ def check_refused_consent(c, account_id: str, session_id) -> None:
         status, at = known["status"], known.get("at")
     else:
         try:
-            answer = _ais().get_session(session_id)
+            ais = _ais()
         except Exception:                        # noqa: BLE001 — best effort
             return
-        status = answer.get("status") if isinstance(answer, dict) else None
+        status = eb_ais.session_status(ais, session_id)
         at = _utcnow_iso()
-        if not isinstance(status, str) or \
-                status not in PROVIDER_SESSION_STATUSES:
+        if status is None:
             return
     own = not c.in_transaction
     if own:

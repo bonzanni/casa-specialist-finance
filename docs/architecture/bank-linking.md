@@ -133,6 +133,12 @@ clears the finding. The session row itself is left `AUTHORIZED` on
 purpose: `link_bank` renews only a row in that status, and renewal is what carries the
 history to the new consent.
 
+The same status check settles a withdrawal. Enable Banking refuses the `DELETE` of a
+session it already considers expired with a 401, so on a 401 or 403 every revocation path
+(the renewal's, `unlink_bank` and `delete_all_data`) asks `GET /sessions/{id}` once
+through `eb_ais.revocation_settled()`. EXPIRED, REVOKED or CLOSED closes the row as gone,
+with no operator step; any other answer leaves the withdrawal unconfirmed, as before.
+
 ## Source & test map
 
 <!-- BEGIN SOURCEMAP -->
@@ -155,6 +161,7 @@ history to the new consent.
 - `tests/test_httpx.py`
 - `tests/test_tools_refresh.py`
 - `tests/test_consent_refused.py`
+- `tests/test_expired_revoke.py`
 
 **Related**
 - [`architecture/ingestion-and-identity.md`](../architecture/ingestion-and-identity.md)
