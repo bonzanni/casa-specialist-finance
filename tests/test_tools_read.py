@@ -1685,3 +1685,55 @@ class TestNeutralizeCannotRebuildAFence(unittest.TestCase):
                     out = tools_read._neutralized("x" + split + "y")
                     self.assertNotIn(delim, out)
                     self.assertEqual(len(out.splitlines()), 1)
+
+
+class TestSeenTimesCarryTheirZone(Base):
+    """Issue #108: first/last seen (and note times) were printed as stored.
+    apply.py stamps them with datetime.now(), the container's local time
+    with no zone, and the reader took 20:37 CEST for 20:37 UTC."""
+
+    def setUp(self):
+        super().setUp()
+        import os
+        import time
+        self._old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Amsterdam"
+        time.tzset()
+
+    def tearDown(self):
+        import os
+        import time
+        if self._old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._old_tz
+        time.tzset()
+        super().tearDown()
+
+    def test_get_transaction_prints_seen_and_note_times_in_utc(self):
+        self.account("a")
+        self.synced("a", "transactions")
+        self.tx("a", "ik1")
+        rid = self.conn.execute("SELECT row_id FROM transactions").fetchone()[0]
+        # A legacy local stamp, and a UTC one as other ledger stamps are.
+        self.conn.execute("UPDATE transactions SET first_seen=?, last_seen=?"
+                          " WHERE row_id=?",
+                          ("2026-10-10T20:37:00.123456",
+                           "2026-10-10T18:40:00Z", rid))
+        call("add_note", row_ids=[rid], note="checked", author="user")
+        self.conn.execute("UPDATE transaction_notes SET created_at=?",
+                          ("2026-01-15T09:05:00",))       # CET, UTC+1
+        out = call("get_transaction", row_id=rid)
+        self.assertIn("first seen 2026-10-10 18:37:00 UTC, "
+                      "last seen 2026-10-10 18:40:00 UTC", out)
+        self.assertIn("[user, 2026-01-15 08:05:00 UTC] ", out)
+
+    def test_an_unparsable_stamp_is_printed_as_stored(self):
+        self.account("a")
+        self.synced("a", "transactions")
+        self.tx("a", "ik1")
+        rid = self.conn.execute("SELECT row_id FROM transactions").fetchone()[0]
+        self.conn.execute("UPDATE transactions SET first_seen='soon',"
+                          " last_seen=NULL WHERE row_id=?", (rid,))
+        out = call("get_transaction", row_id=rid)
+        self.assertIn("first seen soon, last seen \n", out + "\n")

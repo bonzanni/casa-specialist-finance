@@ -1835,6 +1835,29 @@ class TestRateControlPrimitives(Base):
         self.assertIsNone(tools_auth.admit_refresh(
             self.raw, "acc1", "balances", automatic=True))
 
+    def test_a_local_time_attempt_stamp_is_not_read_as_future(self):
+        # Issue #108: flows.py stamps last_attempt_at with datetime.now(),
+        # the container's local time with no zone. Read as UTC, east of
+        # Greenwich it lies hours in the future and the cooldown refuses
+        # with the clock-skew message instead of counting 60 s.
+        import time
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Amsterdam"
+        time.tzset()
+        try:
+            self.account()
+            self.synced("acc1", last_attempt_at=datetime.datetime
+                        .fromtimestamp(FROZEN_NOW - 60).isoformat())
+            reason = tools_auth.admit_refresh(self.raw, "acc1", "balances",
+                                              automatic=True)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+        self.assertIn("attempted 60 s ago", reason or "")
+
     def test_an_explicit_sync_skips_our_own_cooldown(self):
         # The operator asked. Our interval protects against read-triggered
         # fan-out, not against a deliberate call.
