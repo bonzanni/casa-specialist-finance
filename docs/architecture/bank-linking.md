@@ -119,16 +119,16 @@ things make that visible.
 A failed provider call keeps Enable Banking's own error code beside the HTTP status, so
 `sync_state.last_error` and the sync reply read `ApiError: HTTP 401 unauthorized
 EXPIRED_SESSION` rather than a bare 401. `eb_ais.py` reads only the response's `error`
-field, and keeps it only when it has the shape of that enum (upper case and
-underscores). The free-text `message` and `detail` are never read: provider text can
+field, and keeps it only when it is one of the enum's documented values
+(`ERROR_CODES`). The free-text `message` and `detail` are never read: provider text can
 reach the model through the error path.
 
 When a routine transaction sync under one consent has been refused (401 or 403) twice
-in a row, `check_refused_consent()` in `tools_auth.py` makes one `GET /sessions/{id}`
+in a row, with no other failure between, `check_refused_consent()` in `tools_auth.py` makes one `GET /sessions/{id}`
 and records the status it answers on that account's routine-sync record. A status other
 than `AUTHORIZED` makes `sync` and `consent_status` say the bank needs re-linking, with
-the `link_bank` arguments that renew it. A consent already known to be gone is not asked
-again; a success clears the finding. The session row itself is left `AUTHORIZED` on
+the `link_bank` arguments that renew it. A consent already known to be gone, through any of its
+accounts, is not asked again; a success clears the finding. The session row itself is left `AUTHORIZED` on
 purpose: `link_bank` renews only a row in that status, and renewal is what carries the
 history to the new consent.
 

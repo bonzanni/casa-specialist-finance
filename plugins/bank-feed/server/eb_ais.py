@@ -12,7 +12,7 @@ server's error path, so `ApiError` deliberately has no body to leak and no
 path (which would carry a session id) in its message. The code is the one
 exception, and only because it is not text: it is a token from a closed
 vocabulary (`EXPIRED_SESSION`, `REVOKED_SESSION`, `ASPSP_ERROR`, ...), kept
-only when it has that shape. The response's `message` and `detail` are free
+only when it is one of `ERROR_CODES`. The response's `message` and `detail` are free
 text and are never read.
 
 That is a claim about `ApiError`, NOT about every exception this module can
@@ -99,10 +99,28 @@ def error_kind(status: int) -> str:
     return "provider_error" if status >= 500 else "http_error"
 
 
-#: The shape of an Enable Banking error code (`ErrorResponse.error`): upper
-#: case and underscores, as every value of that enum is. Anything else in the
-#: field is dropped, never printed.
-_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z_]{2,63}")
+#: Enable Banking's error codes (`ErrorResponse.error`, from the API
+#: reference). A closed list, not a shape: an upper-case string is still
+#: provider text, so anything not named here is dropped, never printed.
+ERROR_CODES = frozenset({
+    "ACCESS_DENIED", "ACCOUNT_DOES_NOT_EXIST", "ALREADY_AUTHORIZED",
+    "ASPSP_ACCOUNT_NOT_ACCESSIBLE", "ASPSP_ERROR", "ASPSP_TIMEOUT",
+    "ASPSP_RATE_LIMIT_EXCEEDED", "AUTHORIZATION_NOT_PROVIDED",
+    "CLOSED_SESSION", "DATE_TO_WITHOUT_DATE_FROM", "DATE_FROM_IN_FUTURE",
+    "EXPIRED_AUTHORIZATION_CODE", "EXPIRED_SESSION", "INVALID_ACCOUNT_ID",
+    "INVALID_HOST", "UNAUTHORIZED_IP", "NO_ACCOUNTS_ADDED",
+    "PAYMENT_NOT_FOUND", "PSU_HEADER_NOT_PROVIDED", "PSU_HEADER_INVALID",
+    "REDIRECT_URI_NOT_ALLOWED", "REVOKED_SESSION", "SESSION_DOES_NOT_EXIST",
+    "UNAUTHORIZED_ACCESS", "UNTRUSTED_PAYMENT_PARTY",
+    "WEBHOOK_URI_NOT_ALLOWED", "WRONG_ASPSP_PROVIDED",
+    "WRONG_AUTHORIZATION_CODE", "WRONG_DATE_INTERVAL",
+    "WRONG_CREDENTIALS_PROVIDED", "WRONG_REQUEST_PARAMETERS",
+    "WRONG_SESSION_STATUS", "WRONG_TRANSACTIONS_PERIOD",
+    "WRONG_CONTINUATION_KEY", "TRANSACTION_DOES_NOT_EXIST",
+    "PAYMENT_LIMIT_EXCEEDED", "ASPSP_PAYMENT_NOT_ACCESSIBLE",
+    "INVALID_PAYMENT", "ASPSP_PSU_ACTION_REQUIRED", "PAYMENT_NOT_FINALIZED",
+    "PAYMENT_SUBMISSION_NOT_SUPPORTED", "PAYMENT_NOT_AUTHORIZED",
+    "PAYMENT_SUBMISSION_NOT_DEFERRED"})
 
 
 def error_code(raw) -> str | None:
@@ -110,8 +128,8 @@ def error_code(raw) -> str | None:
 
     Issue #100: the code is what tells an expired consent (`EXPIRED_SESSION`)
     from a revoked one or a bank outage — a 401 alone cannot. Only the `error`
-    field is read; `ApiError` keeps it only when it is shaped like an enum
-    token.
+    field is read; `ApiError` keeps it only when it is one of
+    `ERROR_CODES`.
     """
     try:
         body = json.loads(raw or b"")
@@ -130,8 +148,8 @@ class ApiError(RuntimeError):
         self.status = int(status)
         self.kind = error_kind(self.status)
         self.op = op
-        self.code = (code if isinstance(code, str)
-                     and _ERROR_CODE_RE.fullmatch(code) else None)
+        self.code = (code if isinstance(code, str) and code in ERROR_CODES
+                     else None)
         super().__init__(f"Enable Banking AIS {op} failed: "
                          f"HTTP {self.status} ({self.kind}"
                          + (f", {self.code}" if self.code else "") + ")")

@@ -1013,6 +1013,14 @@ def record_sync_health(c, account_id: str, session_id, exc,
                 count = int(was.get("count") or 0)
             except (TypeError, ValueError):
                 count = 0
+            try:
+                refused = int(was.get("refused") or 0)
+            except (TypeError, ValueError):
+                refused = 0
+            # Issue #100: CONSECUTIVE refusals, apart from the failure count —
+            # any other failure in between restarts it.
+            refused = (refused + 1 if getattr(exc, "status", None)
+                       in REFUSED_STATUSES else 0)
             record = {"session": session_id, "seen": started,
                       "ok_at": prior.get("ok_at") if same else None,
                       "ok_s": prior.get("ok_s") if same else None,
@@ -1023,7 +1031,7 @@ def record_sync_health(c, account_id: str, session_id, exc,
                       "fail": {"label": eb_ais.failure_label(exc),
                                "first": was.get("first") or now,
                                "last": now, "last_s": now_s,
-                               "count": count + 1}}
+                               "count": count + 1, "refused": refused}}
         c.execute("INSERT INTO meta(key, value) SELECT ?, ? WHERE EXISTS"
                   " (SELECT 1 FROM accounts WHERE account_id=?"
                   " AND session_id=?)"
@@ -1054,7 +1062,7 @@ def _provider_gone(record) -> str | None:
     """The provider's own non-live status for this record's consent, or None."""
     provider = (record or {}).get("provider")
     status = provider.get("status") if isinstance(provider, dict) else None
-    if status in PROVIDER_SESSION_STATUSES and \
+    if isinstance(status, str) and status in PROVIDER_SESSION_STATUSES and \
             status != callbacks.LIVE_SESSION_STATUS:
         return status
     return None
@@ -1067,11 +1075,13 @@ def check_refused_consent(c, account_id: str, session_id) -> None:
     Enable Banking answers EXPIRED_SESSION then, and says so in its FAQ — while
     the local row reads AUTHORIZED for ever, because no local event marks it.
     So once a routine transaction sync under this consent has been refused
-    (401/403) `REFUSALS_BEFORE_CHECK` times in a row, this makes ONE call,
+    (401/403) `REFUSALS_BEFORE_CHECK` times in a row (the record's `refused`
+    run, which any other failure restarts), this makes ONE call,
     `GET /sessions/{id}`, and records the status it answers on the health
     record, where `refusal_hint` names the re-link. A consent already known to
-    be gone is not asked again; one still reported AUTHORIZED is asked on the
-    next refusal, since that answer can change.
+    be gone — on this account's record or on any other account bound to it —
+    is not asked again; one still reported AUTHORIZED is asked on the next
+    refusal, since that answer can change.
 
     `sessions.status` is deliberately NOT changed: `link_bank` finds the row
     to RENEW through `_renewable_session`, which only matches the live status,
@@ -1088,18 +1098,33 @@ def check_refused_consent(c, account_id: str, session_id) -> None:
             eb_ais.label_status(fail.get("label")) not in REFUSED_STATUSES:
         return
     try:
-        count = int(fail.get("count") or 0)
+        refused = int(fail.get("refused") or 0)
     except (TypeError, ValueError):
-        count = 0
-    if count < REFUSALS_BEFORE_CHECK or _provider_gone(record):
+        refused = 0
+    if refused < REFUSALS_BEFORE_CHECK or _provider_gone(record):
         return
-    try:
-        answer = _ais().get_session(session_id)
-    except Exception:                            # noqa: BLE001 — best effort
-        return
-    status = answer.get("status") if isinstance(answer, dict) else None
-    if status not in PROVIDER_SESSION_STATUSES:
-        return
+    # The answer is about the CONSENT: another account bound to it may
+    # already have asked, in which case its answer is reused, not re-asked.
+    known = None
+    for (other,) in c.execute(
+            "SELECT account_id FROM accounts WHERE session_id=?"
+            " AND account_id<>?", (session_id, account_id)).fetchall():
+        theirs = sync_health(c, other)
+        if _provider_gone(theirs):
+            known = theirs["provider"]
+            break
+    if known is not None:
+        status, at = known["status"], known.get("at")
+    else:
+        try:
+            answer = _ais().get_session(session_id)
+        except Exception:                        # noqa: BLE001 — best effort
+            return
+        status = answer.get("status") if isinstance(answer, dict) else None
+        at = _utcnow_iso()
+        if not isinstance(status, str) or \
+                status not in PROVIDER_SESSION_STATUSES:
+            return
     own = not c.in_transaction
     if own:
         c.execute("BEGIN IMMEDIATE")
@@ -1109,7 +1134,7 @@ def check_refused_consent(c, account_id: str, session_id) -> None:
         # renewal that landed meanwhile has the last word.
         if (current is not None and current.get("session") == session_id
                 and isinstance(current.get("fail"), dict)):
-            current["provider"] = {"status": status, "at": _utcnow_iso()}
+            current["provider"] = {"status": status, "at": at}
             c.execute("UPDATE meta SET value=? WHERE key=? AND EXISTS"
                       " (SELECT 1 FROM accounts WHERE account_id=?"
                       " AND session_id=?)",
