@@ -1038,6 +1038,19 @@ def record_sync_health(c, account_id: str, session_id, exc,
                   " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (sync_health_key(account_id),
                    json.dumps(record, sort_keys=True), account_id, session_id))
+        if exc is None:
+            # Issue #100: a success proves the CONSENT works, so a "gone"
+            # finding on any other account bound to it is withdrawn too (its
+            # own failure record stays).
+            for (other,) in c.execute(
+                    "SELECT account_id FROM accounts WHERE session_id=?"
+                    " AND account_id<>?", (session_id, account_id)).fetchall():
+                theirs = sync_health(c, other)
+                if theirs is not None and theirs.get("provider") is not None:
+                    theirs["provider"] = None
+                    c.execute("UPDATE meta SET value=? WHERE key=?",
+                              (json.dumps(theirs, sort_keys=True),
+                               sync_health_key(other)))
         if own:
             c.execute("COMMIT")
     except BaseException:

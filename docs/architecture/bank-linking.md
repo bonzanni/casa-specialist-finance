@@ -128,7 +128,8 @@ in a row, with no other failure between, `check_refused_consent()` in `tools_aut
 and records the status it answers on that account's routine-sync record. A status other
 than `AUTHORIZED` makes `sync` and `consent_status` say the bank needs re-linking, with
 the `link_bank` arguments that renew it. A consent already known to be gone, through any of its
-accounts, is not asked again; a success clears the finding. The session row itself is left `AUTHORIZED` on
+accounts, is not asked again; a successful sync of any account under that consent
+clears the finding. The session row itself is left `AUTHORIZED` on
 purpose: `link_bank` renews only a row in that status, and renewal is what carries the
 history to the new consent.
 

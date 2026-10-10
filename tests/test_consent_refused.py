@@ -265,6 +265,23 @@ class TestARefusedConsentIsChecked(RefusedBase):
         self.sync_tx()
         self.assertEqual(self.ais.session_calls, [SESSION_ID])
 
+    def test_a_success_on_another_account_of_the_consent_clears_it(self):
+        self.session()
+        self.account("acc1")
+        self.account("acc2")
+        self.refuse("acc1")
+        self.refuse("acc2")
+        self.sync_tx()
+        self.sync_tx()
+        self.assertIn("NEEDS RE-LINKING", call("consent_status"))
+        # acc1 works again and the provider says AUTHORIZED; acc2, still
+        # refused, must ask afresh rather than inherit the stale finding.
+        del self.ais.failing["uid-acc1"]
+        self.ais.session_status = "AUTHORIZED"
+        self.sync_tx()
+        self.assertEqual(len(self.ais.session_calls), 2)
+        self.assertNotIn("NEEDS RE-LINKING", call("consent_status"))
+
     def test_a_success_clears_the_finding(self):
         self.session()
         self.account()
