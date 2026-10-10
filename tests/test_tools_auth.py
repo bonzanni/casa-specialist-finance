@@ -16,6 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # _toolbase
 import apply  # noqa: E402
 import callbacks  # noqa: E402
 import eb_admin  # noqa: E402
+import eb_ais  # noqa: E402
 import bank_feed_server  # noqa: E402
 import flows  # noqa: E402
 import provenance  # noqa: E402
@@ -1195,6 +1196,29 @@ class TestRenewal(Base):
         status = call("consent_status")
         self.assertIn("NEEDS ATTENTION", status)
         self.assertIn(tools_auth._consent_ref(SESSION_ID), status)
+
+    def test_a_renewal_whose_old_consent_the_provider_closed_settles(self):
+        # Issue #106: Enable Banking answers the DELETE of a CLOSED session
+        # with HTTP 400 CLOSED_SESSION. The old consent is gone, so the reply
+        # must not say the bank still holds it, and nothing is left to unlink.
+        self._linked()
+        call("link_bank", aspsp="Rabobank", country="NL", psu_type="personal")
+
+        self.ais = FakeAIS(session_id=OTHER_SESSION_ID)
+        self.ais.raise_on_delete = eb_ais.ApiError(400, "delete_session",
+                                                   "CLOSED_SESSION")
+        out = self.collect()
+
+        self.assertIn("Renewed Rabobank", out)
+        self.assertNotIn("NOT WITHDRAWN AT THE BANK", out)
+        self.assertNotIn("still holds", out)
+        self.assertNotIn("still held", out)
+        old = dict(self.raw.execute(
+            "SELECT status, closed_at FROM sessions WHERE session_id=?",
+            (SESSION_ID,)).fetchone())
+        self.assertNotEqual(old["status"], apply.REVOKE_FAILED_STATUS)
+        self.assertIsNotNone(old["closed_at"])
+        self.assertNotIn("NEEDS ATTENTION", call("consent_status"))
 
     def test_a_renewal_whose_account_set_changed_switches_nothing(self):
         # An exact account_id match carries forward, anything else

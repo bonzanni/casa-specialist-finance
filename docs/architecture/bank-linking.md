@@ -133,11 +133,13 @@ clears the finding. The session row itself is left `AUTHORIZED` on
 purpose: `link_bank` renews only a row in that status, and renewal is what carries the
 history to the new consent.
 
-The same status check settles a withdrawal. Enable Banking refuses the `DELETE` of a
-session it already considers expired with a 401, so on a 401 or 403 every revocation path
-(the renewal's, `unlink_bank` and `delete_all_data`) asks `GET /sessions/{id}` once
-through `eb_ais.revocation_settled()`. EXPIRED, REVOKED or CLOSED closes the row as gone,
-with no operator step; any other answer leaves the withdrawal unconfirmed, as before.
+The same status check settles a withdrawal, through `eb_ais.revocation_settled()` on every
+revocation path (the renewal's, `unlink_bank` and `delete_all_data`). A failed `DELETE`
+whose error code is `EXPIRED_SESSION`, `REVOKED_SESSION` or `CLOSED_SESSION` is settled as
+gone on that code alone: Enable Banking refuses the `DELETE` of a closed session with a
+400 `CLOSED_SESSION`. A 400, 401 or 403 without one of those codes asks
+`GET /sessions/{id}` once; EXPIRED, REVOKED or CLOSED closes the row as gone, with no
+operator step. Any other answer leaves the withdrawal unconfirmed, as before.
 
 ## Source & test map
 
