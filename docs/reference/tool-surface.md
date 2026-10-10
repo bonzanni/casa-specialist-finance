@@ -59,7 +59,7 @@ alone is enough:
 | `get_balances` | Cached balances, one selected type per account, with cache age. |
 | `balance_total` | Sum of the selected balance per account, grouped by currency. Never converted. |
 | `list_transactions` | Cached transactions for included accounts, filtered and bounded. |
-| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. A foreign-currency payment also shows the provider's exchange rate and instructed amount (see below). |
+| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. A cancelled pending payment says so, and why (the bank stopped listing it, or reported it cancelled). A foreign-currency payment also shows the provider's exchange rate and instructed amount (see below). |
 | `list_tags` | Every tag in use with its transaction count. |
 | `spend_by_tag` | Signed spend per tag and currency, plus an untagged bucket. A lens, not a ledger — groups overlap. |
 | `list_rules` | The auto-tagging rulebook, one line per rule. |
@@ -76,7 +76,7 @@ alone is enough:
 | `add_rule` / `replace_rule` / `remove_rule` | Maintain the rulebook. Replace is the only edit — there is no partial rule update. A rule may be scoped to one `account` or one `account_category`, never both. |
 | `apply_rules` | Re-run the whole rulebook over stored rows. Additive and idempotent. |
 | `rename_account` | Set an account's display label. Display-only and reversible, so deliberately not protected; category and include-flag changes stay on `label_account`. |
-| `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. |
+| `sync` | Force a refresh now, regardless of cache age. Goes through the one rate-controlled funnel. Says how many pending payments the run marked cancelled. |
 | `export_history` | Write the whole local ledger into Casa's file handoff folder (kept 7 days), where another plugin can take it; the reply names the ledger instance id, and no file is written when that id cannot be recorded. Every row ends with `tags` (sorted, comma-joined in CSV, a list in JSONL) `tag_revision`, which changes whenever the row's tags do, and `note_revision`, which changes whenever the row's notes do — see `architecture/annotations-and-rules.md`. Then the four exchange-rate fields below, empty (CSV) or null (JSONL) on a row without them. |
 | `backup` | Take a consistent copy of the whole ledger. `reason` is `weekly` or `manual`; retention keeps the 8 most recent of each. |
 | `list_backups` | The ledger instance id (a workflow's `expected_ledger`), every backup with its time, size, reason and state; the registered workflow strings; the restore events; and the restore generation. Settles any pending backup or restore first, which can append to the index — why this sits under Writing rather than Reading. |

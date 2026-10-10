@@ -1096,6 +1096,17 @@ class TestHistoryOlderThanTheWindow(unittest.TestCase):
         finally:
             tools_refresh._dt = real
 
+    def _edge_without_pending_reach(self):
+        """Issue #99 pulls the routine window back over every active pending
+        row (tools_refresh._pending_reach), so a pending row can no longer sit
+        beside a neighbour just before the edge in a routine `sync`. The
+        reconcile behaviour these tests pin -- disclosure across the window
+        edge with a pending row in play -- is still reachable (a pending row
+        older than the reach, a renewal run), so they keep the pre-#99 window."""
+        self.addCleanup(setattr, tools_refresh, "_pending_reach",
+                        tools_refresh._pending_reach)
+        tools_refresh._pending_reach = lambda c, account_id: 0
+
     def _refresh(self, txs):
         """A routine refresh, with the window `sync` itself would ask for.
         Returns the date the bank was asked from."""
@@ -1342,6 +1353,7 @@ class TestHistoryOlderThanTheWindow(unittest.TestCase):
         self.assertEqual(rows, [1, 1])
 
     def test_a_flag_on_a_row_this_pass_supersedes_lands_on_its_booking(self):
+        self._edge_without_pending_reach()
         self._link([self._tx("2026-07-20", ref="R", status="PDNG"), self.ANCHOR])
         self._refresh([self._tx("2026-07-20", ref="R"),
                        self._tx("2026-07-21", ref="R"), self.ANCHOR])
@@ -1383,6 +1395,7 @@ class TestHistoryOlderThanTheWindow(unittest.TestCase):
         self.assertEqual(rows, [("2026-07-26", 1), ("2026-07-27", 1)])
 
     def test_a_booking_that_changes_content_into_a_twin_is_flagged(self):
+        self._edge_without_pending_reach()
         observe(self.conn)
         self._link([self._tx("2026-07-26", ref="B", remittance="boodschappen"),
                     self._tx("2026-07-28", ref="R", status="PDNG",
@@ -1395,6 +1408,7 @@ class TestHistoryOlderThanTheWindow(unittest.TestCase):
                                 ("2026-07-28", "BOOK", 1)])
 
     def test_a_pending_row_booked_unchanged_beside_its_neighbour_is_not_flagged(self):
+        self._edge_without_pending_reach()
         observe(self.conn)
         self._link([self._tx("2026-07-26", ref="B"),
                     self._tx("2026-07-28", ref="R", status="PDNG"),

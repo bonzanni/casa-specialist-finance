@@ -90,6 +90,7 @@
     - plugins/bank-feed/server/store.py::open_db
     - plugins/bank-feed/server/store.py::open_ledger
   tests:
+    - tests/test_cancelled_pending.py
     - tests/test_ingest.py
     - tests/test_apply.py
     - tests/test_provenance.py

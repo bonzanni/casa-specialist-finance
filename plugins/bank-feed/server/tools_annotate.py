@@ -131,8 +131,8 @@ def _normalize_row_ids(raw):
 
 def _load_row(c, row_id):
     """-> (row, refusal-or-None), enforcing the row-state table for
-    WRITES: active and vanished rows are annotatable (a tombstone is real
-    history), a superseded row refuses with a pointer at its replacement,
+    WRITES: active, vanished and cancelled rows are annotatable (a
+    tombstone or a cancelled payment is real history), a superseded row refuses with a pointer at its replacement,
     an unknown row_id refuses. Callers hold BEGIN IMMEDIATE while calling.
     """
     # bool is an int subclass: True would silently address row #1.
@@ -150,7 +150,7 @@ def _load_row(c, row_id):
         return None, ("row #%d was superseded by #%s; annotate that row "
                       "instead. %s"
                       % (rid, row["superseded_by"], backups.unchanged()))
-    if row["state"] not in ("active", "vanished"):
+    if row["state"] not in ("active", "vanished", "cancelled"):
         # An ALLOWLIST, not "anything that is not superseded": a
         # state this module has never heard of is a row whose semantics it
         # cannot vouch for — fail closed, the codebase's dominant-bug-shape
@@ -769,10 +769,12 @@ def delete_tag(args: dict) -> str:
         # state's TEXT never reaches output — only its count, as 'other'.
         # LEFT JOIN so a tag row whose transaction is somehow gone still
         # counts rather than silently vanishing from the report.
-        buckets = {"active": 0, "vanished": 0, "superseded": 0, "other": 0}
+        buckets = {"active": 0, "vanished": 0, "cancelled": 0,
+                   "superseded": 0, "other": 0}
         for state, n in c.execute(
                 "SELECT CASE WHEN t.state IN ('active','vanished',"
-                "'superseded') THEN t.state ELSE 'other' END, COUNT(*)"
+                "'cancelled','superseded') THEN t.state ELSE 'other' END,"
+                " COUNT(*)"
                 " FROM transaction_tags tt LEFT JOIN transactions t"
                 " ON t.row_id = tt.row_id WHERE tt.tag=? GROUP BY 1",
                 (tag,)):
@@ -788,7 +790,8 @@ def delete_tag(args: dict) -> str:
         c.execute("ROLLBACK")
         raise
     parts = ["%d %s" % (buckets[k], k) for k in
-             ("active", "vanished", "superseded", "other") if buckets[k]]
+             ("active", "vanished", "cancelled", "superseded", "other")
+             if buckets[k]]
     reply = ("Deleted tag %r from %d row(s) (%s). This classification is "
              "gone; there is no record of which rows carried it."
              % (tag, total, ", ".join(parts) or "none"))

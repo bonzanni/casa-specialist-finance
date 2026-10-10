@@ -24,7 +24,9 @@ Nothing else writes transactions.
 2. **Reference-less rows use windowed nearest-date matching**, not multiset equality.
 3. **A deficit tombstones only well inside an interval something licensed it to** — see
    coverage, below. Like rule 1, this rule is currently **switched off**, and
-   unconditionally so: nothing is ever tombstoned in any installation.
+   unconditionally so: no booked row is ever tombstoned in any installation. A
+   *pending* row the bank stops listing is a different claim, decided by rule 3b — see
+   "Pending payments the bank cancels", below.
 4. **Occurrence is monotonic per account and identity key, and never reused.** It is
    allocated above every occurrence ever issued, including tombstoned rows and
    occurrences no longer visible in the current pass, which is why `reconcile()` takes a
@@ -198,9 +200,46 @@ the active end of each supersession chain. `backfill` loads those chain ends by
 pointer as `chain_ends`, because a chain corrected below the window can end on a row
 older than `below` reaches. Two rows inside the window are never compared.
 
+### Pending payments the bank cancels
+
+A card payment arrives as pending (`PDNG`, `HOLD`). When the merchant cancels it, the
+bank does not send a cancelled record: it simply stops listing it. Before issue #99 such
+a row stayed pending for ever, because a pending row left that state only by being
+superseded by its booking. The row is now **kept and marked `state='cancelled'`**, as the
+bank's own app keeps it; it drops out of every total, listing and the classification
+queue (they all read `state='active'`), and `get_transaction` says why. No schema change:
+`state` has no constraint.
+
+- **Rule 3b, inferred.** A pending row that this complete fetch does not list is marked
+  cancelled with `state_reason` `pending_absent_from_fetch`, under rule 3's own guards: a
+  row matched in the plan, in an unresolved cluster, whose reference was reused, or whose
+  exact content sits in the page is never absent. It must also sit at least
+  `MATCH_WINDOW_DAYS` inside the requested start. A booked row is never touched this way.
+  The difference from rule 3 is the claim: a pending row is the bank's newest, live
+  state, not history a truncated answer could have left out, and a fetch that did not page
+  to exhaustion changes nothing at all.
+- **The window reaches it.** A routine refresh asks from the oldest active pending row,
+  less the margin, when that is further back than the usual newest-booking window, so
+  the row is re-examined until it books, is cancelled, or is older than the 90-day
+  routine default. A cancelled row keeps the window open over its date too: if
+  the bank only left the payment out of one answer and lists it again, the next refresh
+  fetches it and it comes back as a new active row (rule 4 allocates above the cancelled
+  occurrence). That is what makes a wrong inference recoverable.
+- **Explicit.** A `CNCL` or `RJCT` record is not a payment. It never enters matching,
+  is never stored on its own, and decides nothing: a pending payment is cancelled when
+  the bank no longer lists it as a payment, whether it dropped it or replaced it with a
+  `CNCL`. A `CNCL`/`RJCT` for the row's exact booking (the #59 key) only names the cause,
+  `state_reason` `cancelled_by_bank`. A bank that still lists the pending record beside
+  it is still listing the payment, and two pending payments with identical content
+  follow rule 3's doctrine: the one the bank lists is never lost, and an extra row is
+  kept and flagged `content_present_elsewhere`. A row an older release left active with a
+  `CNCL` status goes the same way as a pending one. A booked row is never cancelled.
+
+`sync` reports how many pending payments a run marked cancelled.
+
 ## Applying a plan
 
-Four rules govern `apply_plan()`:
+Five rules govern `apply_plan()`:
 
 - **A plan lands whole or not at all.** A half-applied page set would leave coverage
   attesting to rows that are not in the ledger.
@@ -210,6 +249,9 @@ Four rules govern `apply_plan()`:
   flag names a row id read at some earlier point; a row deleted underneath the plan in
   between makes that write affect nothing. Such an entry counts as nothing, rather than
   being reported as a change that did not happen.
+- **A tombstone or cancellation lands only on an active row.** A plan built before
+  another run superseded the row writes nothing to it, so a supersession is never turned
+  into a cancellation.
 - **A row is superseded once.** A supersede only lands on a row that is still active
   and has no successor; a plan that names one another run has already superseded or
   tombstoned raises `StalePlan` and rolls back whole. Otherwise the second writer
@@ -286,6 +328,7 @@ the remedy is the operator's.
 - `plugins/bank-feed/server/store.py::open_ledger`
 
 **Tests**
+- `tests/test_cancelled_pending.py`
 - `tests/test_ingest.py`
 - `tests/test_apply.py`
 - `tests/test_provenance.py`

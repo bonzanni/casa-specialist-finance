@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS balances (
   currency TEXT, reference_date TEXT, fetched_at TEXT,
   PRIMARY KEY (account_id, balance_type));
 
--- state is 'active' | 'superseded' | 'vanished'; superseded_by points a pending
+-- state is 'active' | 'superseded' | 'vanished' | 'cancelled'; superseded_by points a pending
 -- row at the booked row that replaced it. match_method is
 -- 'reference' | 'reference_corroborated' | 'windowed' | 'inserted'; the read
 -- tools disclose the counts of heuristic and needs_review rows behind a total.
