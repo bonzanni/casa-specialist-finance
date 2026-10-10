@@ -59,7 +59,7 @@ alone is enough:
 | `get_balances` | Cached balances, one selected type per account, with cache age. |
 | `balance_total` | Sum of the selected balance per account, grouped by currency. Never converted. |
 | `list_transactions` | Cached transactions for included accounts, filtered and bounded. |
-| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. A cancelled pending payment says so, and why (the bank stopped listing it, or reported it cancelled). A foreign-currency payment also shows the provider's exchange rate and instructed amount (see below). |
+| `get_transaction` | One transaction in full, minus the raw provider payload, with tags and the latest notes. A cancelled pending payment says so, and why (the bank stopped listing it, or reported it cancelled). A foreign-currency payment also shows the provider's exchange rate and instructed amount (see below). First/last seen and note times are printed in UTC. |
 | `list_tags` | Every tag in use with its transaction count. |
 | `spend_by_tag` | Signed spend per tag and currency, plus an untagged bucket. A lens, not a ledger — groups overlap. |
 | `list_rules` | The auto-tagging rulebook, one line per rule. |

@@ -422,8 +422,20 @@ def _parse_ts(text):
         except ValueError:
             return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        # A stamp without a zone was written by `datetime.now()`: the
+        # container's local time (apply.py, flows.py), not UTC (issue #108).
+        parsed = parsed.astimezone(_dt.timezone.utc)
     return parsed
+
+
+def _utc_text(text) -> str:
+    """A stored stamp as `YYYY-MM-DD HH:MM:SS UTC`, whichever clock wrote it
+    (issue #108). Unparsable text is printed as stored."""
+    parsed = _parse_ts(text)
+    if parsed is None:
+        return _neutralized(text)
+    return parsed.astimezone(_dt.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC")
 
 
 def _fmt_age(seconds) -> str:
@@ -1368,7 +1380,7 @@ def get_transaction(args: dict) -> str:
         " (confidence %s)" % _neutralized(r["match_confidence"])
         if r.get("match_confidence") is not None else "", review))
     lines.append("  first seen %s, last seen %s" % (
-        _neutralized(r.get("first_seen")), _neutralized(r.get("last_seen"))))
+        _utc_text(r.get("first_seen")), _utc_text(r.get("last_seen"))))
     # _neutralized like every other tag render site.
     own, foreign = _split_tags(tags)
     lines.append("Tags: " + (", ".join(_neutralized(t) for t in own)
@@ -1393,7 +1405,7 @@ def get_transaction(args: dict) -> str:
             # check somewhere else" is the reasoning this codebase has had
             # to retract repeatedly — neutralized too.
             lines.append("  [%s, %s] %s" % (
-                _neutralized(n["author"]), _neutralized(n["created_at"]),
+                _neutralized(n["author"]), _utc_text(n["created_at"]),
                 _untrusted_note(n["note"])))
     else:
         lines.append("Notes: none")
