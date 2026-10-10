@@ -253,10 +253,10 @@ def _already_closed(bank: str, row) -> str:
 
 @register("unlink_bank",
           "Revoke a bank consent. Stops refreshing; does NOT erase local "
-          "history. withdrawn_at_bank=true only when the operator says they "
-          "withdrew this consent on the bank's own screen after a withdrawal "
-          "here already failed: if the provider still does not confirm, the "
-          "consent is recorded as withdrawn by the operator. Protected: casa "
+          "history. withdrawn_at_bank=true only when the operator says the "
+          "bank no longer holds this consent after a withdrawal here already "
+          "failed: if the provider still does not confirm, the consent is "
+          "recorded as withdrawn by the operator. Protected: casa "
           "demands an operator grant.",
           {"type": "object",
            "properties": {"consent_ref": {"type": "string"},
@@ -319,12 +319,16 @@ def unlink_bank(args: dict) -> str:
     # history this reply says survives.
     served = [r[0] for r in c.execute(
         "SELECT account_id FROM accounts WHERE session_id=?", (session_id,))]
-    absent, failure = False, None
+    absent, failure, gone_as, ais = False, None, None, None
     try:
-        tools_auth._ais().delete_session(session_id)
+        ais = tools_auth._ais()
+        ais.delete_session(session_id)
         revoked = True
     except Exception as exc:                     # noqa: BLE001
-        absent = tools_auth.revocation_is_final(exc)
+        # Issue #102: a 401/403 asks the provider once whether the session is
+        # already EXPIRED/REVOKED/CLOSED — gone, with no operator step.
+        absent, gone_as = (eb_ais.revocation_settled(ais, session_id, exc)
+                           if ais is not None else (False, None))
         revoked = absent
         failure = eb_ais.failure_label(exc)     # class + status, never a body
 
@@ -423,11 +427,11 @@ def unlink_bank(args: dict) -> str:
         # in the reply and in the status every later reply reads.
         return "\n".join([
             "%s: the provider still did not confirm the withdrawal (%s). On "
-            "your statement that you withdrew it on %s's own consent screen, "
-            "this consent is now recorded as WITHDRAWN BY YOU, not confirmed "
-            "by the provider. It leaves consent_status. %s If the bank does "
-            "still hold the permission, only its own consent screen can show "
-            "it now." % (bank, failure, bank, _bindings_after(len(ids), rebound)),
+            "your word (withdrawn_at_bank) that %s no longer holds it, this "
+            "consent is now recorded as WITHDRAWN BY YOU, not confirmed by the "
+            "provider. It leaves consent_status. %s If the bank does still "
+            "hold the permission, only its own consent screen can show it now."
+            % (bank, failure, bank, _bindings_after(len(ids), rebound)),
             "Unlink is not erase: %d transaction%s of local history survive%s "
             "and stay queryable." % (kept, "" if kept == 1 else "s",
                                      "s" if kept == 1 else ""),
@@ -487,8 +491,10 @@ def unlink_bank(args: dict) -> str:
         ] if withdrawn else []) + [GATE_NOTE])
 
     lines = ["%s: consent %s. %s"
-             % (bank, "reported by the provider as already gone — treated as "
-                      "revoked at the provider" if absent
+             % (bank, "reported by the provider as %s, so it is already gone "
+                      "at the bank — treated as revoked" % gone_as if gone_as
+                      else "reported by the provider as already gone — treated "
+                      "as revoked at the provider" if absent
                       else "revoked at the provider",
                 _bindings_after(len(ids), rebound))]
     if quarantined:
@@ -1068,8 +1074,10 @@ def _withdraw_open_consents(c):
     in the tool whose entire purpose is erasure.
 
     The rule is the ledger's, not this module's: a consent is proven gone by a
-    success or by a 404 (`eb_ais.revocation_is_final`), and by nothing else. A
-    429, a timeout, a 5xx, a 401/403 all mean "we could not tell", and
+    success, a 404, or a 401/403 on a session the provider itself reports
+    EXPIRED, REVOKED or CLOSED (`eb_ais.revocation_settled`), and by nothing
+    else. A 429, a timeout, a 5xx, any other 401/403 all mean "we could not
+    tell", and
     destroying a handle on "we could not tell" erases the operator's only retry
     handle.
 
@@ -1105,7 +1113,10 @@ def _withdraw_open_consents(c):
             ais.delete_session(row["session_id"])
             proven, failure = True, None
         except Exception as exc:             # noqa: BLE001
-            proven = tools_auth.revocation_is_final(exc)
+            # Issue #102: the same rule as unlink_bank — a 401/403 on a
+            # session the provider reports EXPIRED/REVOKED/CLOSED is gone.
+            proven, _status = eb_ais.revocation_settled(
+                ais, row["session_id"], exc)
             # Class + status, never a body (issue #84). Printed in this reply
             # only: NOT passed to `record_revocation`, which would store it in
             # meta — and this runs after the erasure emptied meta, so the key
