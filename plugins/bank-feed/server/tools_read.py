@@ -1329,6 +1329,13 @@ def get_transaction(args: dict) -> str:
         lines.append("STATE: superseded by #%s — that row is the live one; "
                      "annotations belong there."
                      % _neutralized(r["superseded_by"]))
+    elif r["state"] == "cancelled":
+        # Issue #99: kept, as the bank app keeps it, but out of every total.
+        lines.append("STATE: cancelled — %s; kept in the ledger, not counted "
+                     "in any total or listing."
+                     % ("the bank reports this payment cancelled"
+                        if r.get("state_reason") == "cancelled_by_bank" else
+                        "the bank no longer lists this pending payment"))
     if acct is not None and not acct["included"]:
         lines.append("This account is excluded from reporting: listings and "
                      "totals do not include this row.")

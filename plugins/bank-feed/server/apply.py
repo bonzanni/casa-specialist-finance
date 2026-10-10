@@ -696,7 +696,7 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
     """
     now = _now()
     stats = {"inserted": 0, "updated": 0, "superseded": 0,
-             "tombstoned": 0, "flagged": 0,
+             "tombstoned": 0, "cancelled": 0, "flagged": 0,
              "inserted_row_ids": [], "auto_tagged": 0,
              "needs_classification": 0, "rules": {},
              "rule_skipped_overcap": 0}
@@ -958,18 +958,24 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
             # Why a row is gone is part of the record: a tombstone with no
             # stated cause is indistinguishable from one we can no longer
             # explain.
+            state = entry.get("state") or "vanished"
             cur = conn.execute(
                 "UPDATE transactions SET state=?, state_reason=?,"
                 # Scoped to this plan's account, same reasoning as the
                 # update/supersede statements above.
-                " last_seen=? WHERE row_id=? AND account_id=?",
-                (entry.get("state") or "vanished", entry.get("reason"),
-                 now, _row_id(entry), account_id))
+                " last_seen=? WHERE row_id=? AND account_id=?"
+                # Only a row that is still active: a plan built before
+                # another run superseded the row must not turn that
+                # supersession into a cancellation (issue #99). Zero rows is
+                # the honest skip, as for a deleted row.
+                " AND state='active'",
+                (state, entry.get("reason"), now, _row_id(entry), account_id))
             # A tombstone for a row that is no longer there marks nothing
             # gone, and neither does one naming another account's row_id;
             # count only what was actually written.
             if cur.rowcount:
-                stats["tombstoned"] += 1
+                stats["cancelled" if state == "cancelled"
+                      else "tombstoned"] += 1
 
         for entry in plan.flags:
             # needs_review and its reason, and nothing else — not even

@@ -366,7 +366,45 @@ def _refresh_window_days(c, account_id: str) -> int:
     # No `max(..., REFRESH_MARGIN_DAYS)` floor: the guard above already
     # returned for every negative `days`, so the floor could never bind. It was
     # dead code that read as a live safeguard.
-    return days + REFRESH_MARGIN_DAYS
+    return max(days + REFRESH_MARGIN_DAYS, _pending_reach(c, account_id))
+
+
+def _pending_reach(c, account_id: str) -> int:
+    """The window that re-examines every pending payment (issue #99).
+
+    A pending row leaves the ledger's pending state only when a fetch looks at
+    its date again: it books, the bank says CNCL/RJCT, or the bank stops
+    listing it and `ingest` marks it cancelled. So the window reaches back to
+    the oldest ACTIVE pending row, plus the margin, which puts that row exactly
+    `ingest.MATCH_WINDOW_DAYS` inside the request where rule 3b may decide.
+
+    It also reaches a cancelled row, so a payment the bank left out of ONE
+    answer is fetched again when it is listed again and comes back as an
+    active row; without this the window shrinks the moment the row is
+    cancelled and the payment stays out of the totals for good.
+
+    Only anchors whose reach fits the routine default count: a request deeper
+    than DEFAULT_WINDOW_DAYS risks the whole refresh, and a card authorisation
+    lapses in days to weeks. Dates are provider text: one that is not a
+    date, or lies in the future, anchors nothing. 0 when nothing anchors.
+    """
+    today = _dt.date.today()
+    reach = 0
+    for (value,) in c.execute(
+            "SELECT booking_date FROM transactions WHERE account_id=? AND"
+            " ((state='active' AND UPPER(TRIM(COALESCE(status,'')))"
+            # CNCL/RJCT: a row an older release left active with that status,
+            # which ingest's rule 3b cancels like a pending one.
+            " IN ('PDNG','PNDG','PENDING','HOLD','CNCL','RJCT'))"
+            " OR state='cancelled')",
+            (account_id,)):
+        try:
+            days = (today - _dt.date.fromisoformat(str(value))).days
+        except ValueError:
+            continue
+        if 0 <= days and days + REFRESH_MARGIN_DAYS <= DEFAULT_WINDOW_DAYS:
+            reach = max(reach, days + REFRESH_MARGIN_DAYS)
+    return reach
 
 
 # --------------------------------------------------------------------------
@@ -681,6 +719,7 @@ def _fetch_resource(c, account_id: str, resource: str, account: dict,
         out["needs_classification"] = int(
             result.get("needs_classification") or 0)
         out["erased"] = bool(result.get("erased"))
+        out["cancelled"] = int(result.get("cancelled") or 0)
     if floor_days < flows.BACKFILL_FLOOR_DAYS and standing is not None:
         c.execute(
             "UPDATE sync_state SET completeness=?, last_success_session=?,"
@@ -870,6 +909,15 @@ def sync(args: dict) -> str:
                 if _refresh_resource(c, account_id, resource,
                                      automatic=False, out=res_out):
                     lines.append(_account_line(name, resource, "refreshed"))
+                    if res_out.get("cancelled"):
+                        # Issue #99: say it, so a payment leaving the totals is
+                        # never a silent change.
+                        lines.append(_account_line(
+                            name, resource,
+                            "%d pending payment(s) the bank no longer lists, "
+                            "or reports cancelled, marked cancelled: kept in "
+                            "the ledger, no longer counted"
+                            % res_out["cancelled"]))
                 elif res_out.get("erased"):
                     # The life fence fired: the "INCOMPLETE … marked partial"
                     # line below would be false here — there may be no

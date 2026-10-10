@@ -34,7 +34,9 @@ Plan shape (consumed by `apply.apply_plan`):
                      both carry `needs_review` and `reason` (None unless
                      needs_review). apply MUST insert first, remember
                      local_id -> row_id, then resolve `superseded_by_local`.
-  tombstones [dict]  {"row_id", "state": "vanished", "reason"}
+  tombstones [dict]  {"row_id", "state": "vanished" | "cancelled", "reason"}
+                     -- "cancelled" is rule 3b's (issue #99), with one of the
+                     two cancellation reasons below as its state_reason
   flags      [dict]  {"row_id", "reason"} — flag needs_review, change nothing else
 
 FLAGS ARE ADDITIVE AND NEVER CLEAR `needs_review`. This is a CONTRACT, not an
@@ -69,6 +71,13 @@ and the read tools can report the breakdown by name:
   windowed_ambiguous        -- an update or insert produced by that same
                                greedy fallback rather than exact matching.
   absent_from_a_proven_interval -- rule 3's tombstone reason.
+
+Cancellation reasons (issue #99) are STATE reasons, not review reasons: they
+land in state_reason and never set needs_review.
+  pending_absent_from_fetch -- rule 3b: the bank stopped listing a pending
+                               payment inside a fetch that covers its date.
+  cancelled_by_bank         -- the same, when the bank listed a CNCL or RJCT
+                               record of that exact booking instead.
   amount_changed            -- a reference match rewrote `amount_minor` with
                                `currency` and `direction` unchanged. In practice
                                this is the corroborated arm (conf 0.7, the
@@ -166,6 +175,9 @@ _WS = re.compile(r"\s+")
 
 _PENDING = {"PDNG", "PNDG", "PENDING", "HOLD"}
 _BOOKED = {"BOOK", "BOOKED"}
+# The bank's word that a payment will not happen (Enable Banking
+# TransactionStatus CNCL "Cancelled transaction", RJCT "Rejected transaction").
+_CANCELLED = {"CNCL", "RJCT"}
 
 
 class Plan(NamedTuple):
@@ -343,6 +355,17 @@ def _is_pending(row: dict) -> bool:
 
 def _is_booked(row: dict) -> bool:
     return _status(row) in _BOOKED
+
+
+def _is_cancelled(row: dict) -> bool:
+    return _status(row) in _CANCELLED
+
+
+def _booking_key(row: dict, ident: str) -> tuple:
+    """The exact booking: content, both dates and the reference, NULL being
+    its own value (issues #59 and #99)."""
+    return (ident, row.get("booking_date"), row.get("value_date"),
+            row.get("provider_ref"))
 
 
 def _status_rank(row: dict) -> int:
@@ -655,6 +678,17 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
     """
     start, end = interval
     inserts, updates, tombstones, flags = [], [], [], []
+    # A CNCL/RJCT record is not a payment (issue #99). It never enters
+    # matching -- as a match it could only rewrite or absorb some row, and a
+    # bank that keeps listing it would insert it again on every sync -- it is
+    # never stored on its own, and it decides nothing: a pending payment is
+    # cancelled by rule 3b when the bank no longer lists it as a payment, the
+    # same whether the bank dropped it or replaced it with a CNCL. The CNCL
+    # only names the cause, by the exact booking it carries. A bank that still
+    # lists the pending record beside it is still listing the payment.
+    cancelled_keys = {_booking_key(f, identity_key(f))
+                      for f in fetched if _is_cancelled(f)}
+    fetched = [f for f in fetched if not _is_cancelled(f)]
     stored = [dict(s) for s in stored]
     below_rows = [dict(b) for b in (below or ())]
     for s in stored + below_rows:
@@ -1381,6 +1415,55 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
         if inner_start <= s["booking_date"] < inner_end:
             tombstones.append({"row_id": s["row_id"], "state": "vanished",
                                "reason": "absent_from_a_proven_interval"})
+
+    # ---- rule 3b: a pending payment the bank cancelled (issue #99) --------
+    # Rule 3 above never fires in production (flows hands it a degenerate
+    # interval: a clean response proves the rows it returned EXIST, never that
+    # an interval of HISTORY is complete). A PENDING row is a different claim:
+    # it is the bank's newest, live state, the caller's window is built to
+    # reach it (tools_refresh._pending_reach), and the caller reconciles only
+    # a fetch paged to exhaustion. The row is KEPT and marked cancelled, never
+    # deleted, and only an unmatched pending row is ever considered.
+    #
+    # Banks drop a pending payment the merchant cancels without ever sending
+    # a CNCL, so absence is the signal; a CNCL/RJCT for the row's exact
+    # booking only names the cause (cancelled_by_bank). Rule 3's own
+    # guards apply -- a row in an unresolved cluster, whose reference was
+    # reused, or whose exact content sits in the page is never absent -- and
+    # the row must sit match_window_days inside the requested start, rule 3's
+    # "well inside", so a bank filtering a pending row by another of its dates
+    # cannot leave it just outside the answer. It is recoverable: if the bank
+    # lists the payment again, the fetched row finds no active row and is
+    # inserted (rule 4 allocates above the cancelled occurrence), and the
+    # caller keeps its window open over the cancelled row so the re-listing
+    # is fetched.
+    gone = {t["row_id"] for t in tombstones}
+    inner = None
+    if window_from is not None:
+        try:
+            inner = _date(window_from) + _dt.timedelta(days=match_window_days)
+        except (TypeError, ValueError):
+            pass
+    for s in live:
+        # A row an older release left active with a CNCL/RJCT status is no
+        # payment either: it goes the same way as a pending one.
+        if (not (_is_pending(s) or _is_cancelled(s)) or s["row_id"] in gone
+                or s["row_id"] in matched_rows):
+            continue
+        if (inner is None or s["identity_key"] in unresolved
+                or s["row_id"] in ref_reused or _content_present(s)):
+            continue
+        try:
+            inside = _date(s["booking_date"]) >= inner
+        except (TypeError, ValueError):
+            inside = False                # a date we cannot read is not proof
+        if inside:
+            tombstones.append({
+                "row_id": s["row_id"], "state": "cancelled",
+                "reason": ("cancelled_by_bank"
+                           if _booking_key(s, s["identity_key"])
+                           in cancelled_keys
+                           else "pending_absent_from_fetch")})
     _disclose(window_rows, below_rows, chain_ends, window_from, fresh,
               inserts, updates, flags)
     return Plan(inserts=inserts, updates=updates, tombstones=tombstones, flags=flags)

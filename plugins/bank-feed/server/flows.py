@@ -1169,5 +1169,7 @@ def backfill(ais, conn, account: dict, session_id: str,
             "proved_to": proved_to, "shallow": shallow, "pages": pages,
             "capped": False, "completeness": "complete", "erased": False,
             "new_row_ids": stats["inserted_row_ids"],
+            # Pending payments this run marked cancelled (issue #99).
+            "cancelled": stats["cancelled"],
             "auto_tagged": stats["auto_tagged"],
             "needs_classification": stats["needs_classification"]}
