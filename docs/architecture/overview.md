@@ -32,7 +32,8 @@ workflow tags, the notes, the rule rationales — lives in bank-feed. The split 
 that the judgement calls are a prompt someone can read and change, while the
 deterministic half stays testable.
 
-Each plugin ships one skill. `bank-feed`'s **bank-accounts** skill is the operating
+Each plugin ships one working skill (bank-feed also ships **daily-sync**, the short
+procedure of its daily job, below). `bank-feed`'s **bank-accounts** skill is the operating
 manual for the tool surface — how to link a bank, what to do when a consent is expiring,
 how to read a balance honestly. `tx-classifier`'s **classify-transactions** skill is the
 classification workflow. Both are prose a model reads at runtime, so they are part of

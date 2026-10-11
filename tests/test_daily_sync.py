@@ -109,7 +109,7 @@ class TestAGoodDayIsSilent(Base):
         tools_auth._now_s = lambda: FROZEN_NOW + 86400
         tools_auth.claim_refresh(self.raw, "acc1")
         out = self.daily()
-        self.assertIn("2 deferred", out)
+        self.assertIn("1 account(s) deferred", out)
         self.assertEqual(self.ais.tx_calls, [])
         self.assertIsNone(out.result["notice"])
 
@@ -199,6 +199,21 @@ class TestABankThatNeedsTheOperatorIsNamedOnce(Base):
         self.assertEqual(len(self.notices), 2)
         self.assertEqual(self.notices[0][2], self.notices[1][2])
         self.assertIn("hasn't updated since", self.notices[0][1])
+
+    def test_a_deferred_account_adds_no_stalled_finding(self):
+        # Failing for days, then the provider asks us to wait: this run did
+        # not fail, so it says nothing about the streak.
+        self.session()
+        self.account()
+        self.ais.failing["uid-acc1"] = eb_ais.ApiError(500, "transactions")
+        self.daily()
+        self.first_failed("acc1", tools_refresh.STALLED_AFTER_S + 60)
+        self.raw.execute("UPDATE sync_state SET next_retry_after=?"
+                         " WHERE account_id='acc1'",
+                         (iso_at(FROZEN_NOW + 30 * 86400),))
+        out = self.daily()
+        self.assertIn("1 account(s) deferred", out)
+        self.assertEqual(self.notices, [])
 
     def test_nothing_is_posted_while_a_bank_is_being_relinked(self):
         self.session()

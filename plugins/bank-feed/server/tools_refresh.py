@@ -1257,7 +1257,7 @@ def _plain(text) -> str:
                    if ch not in "*_`[]~|<>#") or "your bank"
 
 
-def _daily_findings(c) -> dict:
+def _daily_findings(c, deferred=frozenset()) -> dict:
     """What needs the operator, per open consent, from this ledger alone:
     `{finding key: sentence}`. Nothing is asked of the provider here.
 
@@ -1267,7 +1267,9 @@ def _daily_findings(c) -> dict:
     without a break for `STALLED_AFTER_S` needs a look
     (`stalled:<ref>:<first failure>`). Only consents with an included account
     bound to them NOW count: an unlinked or excluded account is the
-    operator's own choice."""
+    operator's own choice. An account in `deferred` (rate control held this
+    run back) adds no stalled finding: this run did not fail, it did not
+    run."""
     found = {}
     now = tools_auth._now_s()
     for session in c.execute(
@@ -1296,7 +1298,8 @@ def _daily_findings(c) -> dict:
                     fail.get("first")).timestamp())
             except (AttributeError, TypeError, ValueError):
                 since = 0
-            if since >= STALLED_AFTER_S and stalled is None:
+            if (since >= STALLED_AFTER_S and stalled is None
+                    and account_id not in deferred):
                 stalled = (fail.get("first"), record.get("ok_at"))
         state, _days = tools_auth._expiry_state(session.get("valid_until"))
         if gone:
@@ -1332,7 +1335,8 @@ def daily_sync(args: dict):
         "SELECT a.account_id FROM accounts a JOIN sessions s"
         " ON s.session_id = a.session_id WHERE a.included = 1"
         " AND s.closed_at IS NULL ORDER BY a.account_id")]
-    refreshed = deferred = failed = 0
+    refreshed = failed = 0
+    deferred = set()
     for account_id in accounts:
         for resource in RESOURCES:
             try:
@@ -1343,13 +1347,14 @@ def daily_sync(args: dict):
                 if _refresh_resource(c, account_id, resource, automatic=False):
                     refreshed += 1
             except RateControlDeferred:
-                deferred += 1
+                deferred.add(account_id)
             except Exception:                    # noqa: BLE001 — recorded already
                 failed += 1
-    text = ("Daily sync: %d account(s), %d refresh(es) done, %d deferred, %d "
-            "failed." % (len(accounts), refreshed, deferred, failed))
+    text = ("Daily sync: %d account(s), %d refresh(es) done, %d account(s) "
+            "deferred, %d failed." % (len(accounts), refreshed, len(deferred),
+                                       failed))
     found = {} if tools_auth.authorization_in_progress(c) else \
-        _daily_findings(c)
+        _daily_findings(c, deferred)
     if not found:
         return {NOTICE_SLOT: None,
                 "text": text + " Nothing needs the operator."}

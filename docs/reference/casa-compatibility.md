@@ -148,12 +148,16 @@ plugin's non-setup tools; a malformed declaration refuses the install), refuses
 a call to any non-setup tool of a plugin without the declaration, and refuses a
 call to any tool the declaration omits. The setup tool is exempt.
 
-bank-feed declares thirty of its thirty-one non-setup tools `safe`: none returns
+bank-feed declares all but two of its non-setup tools `safe`: none returns
 a credential that another bank-feed tool could redeem, and `bank_feed_signin`
 consumes a sign-in link the operator pasted, or one it takes from its drop-off,
 and returns statuses and the redirect URI, never a live link.
 
-`link_bank` is the one `capability`. It produces the link the operator must open
+`link_bank` and `daily_sync` are the two `capability` tools. `daily_sync` delivers its
+`notice` slot as an `operator_message` (casa posts the text, headed by the specialist's
+label, in the operator's chat), keyed with casa's delivery `key` so the same notice is
+posted once (casa v0.344.39), and returns `{"notice": null, "text": ...}`, casa's
+no-post shape, when there is nothing to say. `link_bank` produces the link the operator must open
 (the bank's approval, or in production first the Enable Banking whitelist page),
 and casa v0.318.0 added the declaration that lets casa deliver such a link itself
 (ha-casa-app#1015):
