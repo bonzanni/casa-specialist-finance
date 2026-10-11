@@ -15,7 +15,7 @@
     {
       "kind": "plugin/implementation",
       "identifier": "bank-feed",
-      "digest": "sha256:aae9a99b8fcbaf50c2ecbbae55ac33973cfb76ee974b48d2592dc3610ffe4492",
+      "digest": "sha256:7667071d2edd33af32153047b6e3a7eb16109be4617f6ad8a1d60861de2a6877",
       "source": {
         "type": "bundled",
         "path": "plugins/bank-feed"

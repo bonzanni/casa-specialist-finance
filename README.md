@@ -62,7 +62,7 @@ topic; this needs casa v0.318.0 or later.
 Then ask casa's configurator for the daily sync, a job trigger on the assistant (casa
 v0.344.39 or later):
 `name: bank-sync, type: cron, schedule: "0 7 * * *", channel: telegram, job: "bank-feed:daily-sync"`.
-Every linked bank then syncs once a day without a finance conversation. The run is
+Every linked bank with an included account then syncs once a day without a finance conversation. The run is
 silent; you hear from it only when a bank needs you (its consent ended or expired, or it
 has failed to sync for three days), once, in your chat.
 

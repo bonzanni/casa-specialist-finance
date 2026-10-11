@@ -24,7 +24,9 @@ rather than guess a world. Neither is reachable unless those two are wired
 through `op://`, which nothing here asks for — the CP token is pasted and
 the mode is a plain word.
 
-**Requires casa v0.318.0 or later.** It relies on the `casa.setupProvides`
+**Requires casa v0.344.39 or later.** The daily job (`daily-sync`, issue #110)
+declares `quietWhenScheduled`, which an older casa refuses at install, and its
+notice relies on casa's delivery `key`. It also relies on the `casa.setupProvides`
 declaration and on defaulted references being shippable in a bundled plugin
 tree (casa v0.155.0, issue #4). It also relies on casa delivering the link
 `link_bank` produces (casa v0.318.0, ha-casa-app#1015): an older casa refuses

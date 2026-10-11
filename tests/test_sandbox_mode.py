@@ -23,6 +23,7 @@ import bank_feed_server  # noqa: E402
 import ebmode  # noqa: E402
 import store  # noqa: E402
 import tools_auth  # noqa: E402
+import tools_refresh  # noqa: E402,F401  (registers daily_sync)
 
 from _toolbase import (Base, FakeAIS, FakeAdmin, TEST_KEY_PEM,  # noqa: E402
                        call)

@@ -66,11 +66,14 @@ install where Gmail is assigned to finance migrates first, in the order
 [the tool surface](tool-surface.md#what-else-the-role-grants) gives. The floor below is
 unchanged, because finance works without Gmail.
 
-The component **requires casa >= v0.318.0**. The environment-declaration rows below
+The component **requires casa >= v0.344.39**. The environment-declaration rows below
 do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
 outright: `link_bank` declares `delivers` (below), a member an older casa's
 result-contract validator does not know, so it rejects the declaration as malformed
 (`result_contract_invalid`) and the plugin is excluded rather than half-loaded.
+Before v0.344.39 casa refuses the daily job's declaration the same way
+(`casa.jobs invalid`, for `quietWhenScheduled`), and the delivery `key` the daily
+notice carries is honoured from that version on.
 
 **Nothing declares that requirement as a version.** There is no version field in
 the plugin manifest and no handshake: this page and `plugins/bank-feed/README.md`
@@ -183,7 +186,8 @@ carries no reference. The values the deposit copies from casa are the
 `result_broker` rows of the table above.
 
 `tests/test_server_smoke.py` holds the declaration to the live `tools/list` of a
-launched server. The declaration is why the component's floor is casa >= v0.318.0.
+launched server. The declaration is why the component's floor was casa >= v0.318.0; the daily job
+raised it to v0.344.39.
 Under casa v0.290.0 or later, the declaration is what makes any tool but
 `setup_bank_feed` run at all.
 
