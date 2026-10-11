@@ -124,6 +124,17 @@ class DepositTests(unittest.TestCase):
             "label": "Approve at Rabobank",
             "caption": "Rabobank, NL, personal — one-time link"})
 
+    def test_a_message_deposit_posts_its_text_and_key(self):
+        # Issue #110: the daily sync's notice, keyed so casa posts it once.
+        broker = self.serve(lambda body: _json({"reference": REFERENCE}))
+        ref = casa_broker.deposit_message("notice", "Rabobank needs you.",
+                                          key="daily-sync:0123456789abcdef")
+        self.assertEqual(ref, REFERENCE)
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(broker.requests[0][2], {
+            "client": CLIENT, "slot": "notice", "value": "Rabobank needs you.",
+            "key": "daily-sync:0123456789abcdef"})
+
     def test_casas_error_code_is_the_failure_code(self):
         for code in ("bad_link", "bad_caption", "bad_label",
                      "no_call_in_flight", "no_identity", "ambiguous_call",

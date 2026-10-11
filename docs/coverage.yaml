@@ -128,6 +128,8 @@
   doc: reference/tool-surface.md
 - item: tool:sync
   doc: reference/tool-surface.md
+- item: tool:daily_sync
+  doc: reference/tool-surface.md
 - item: tool:tag_transaction
   doc: reference/tool-surface.md
 - item: tool:unlink_bank
@@ -230,6 +232,8 @@
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__sync
   doc: reference/tool-surface.md
+- item: role:mcp__plugin_bank-feed_bank-feed__daily_sync
+  doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__tag_transaction
   doc: reference/tool-surface.md
 - item: role:mcp__plugin_bank-feed_bank-feed__unlink_bank
@@ -268,6 +272,8 @@
   doc: reference/configuration.md
 - item: env:OP_SERVICE_ACCOUNT_TOKEN
   doc: reference/configuration.md
+- item: skill:plugins/bank-feed/skills/daily-sync/SKILL.md
+  doc: architecture/overview.md
 - item: skill:plugins/bank-feed/skills/bank-accounts/SKILL.md
   doc: architecture/overview.md
 - item: skill:plugins/tx-classifier/skills/classify-transactions/SKILL.md

@@ -95,12 +95,25 @@ def deposit_link(slot: str, url: str, *, label: str, caption: str) -> str:
     `unrecognized_error` when the answer carries neither a well-formed reference
     nor anything shaped like a code.
     """
+    return _deposit({"slot": slot, "value": url,
+                     "label": label, "caption": caption})
+
+
+def deposit_message(slot: str, text: str, *, key: str) -> str:
+    """Deposit `text` in an `operator_message` slot and return casa's reference
+    (issue #110). casa posts it to the operator, headed by the specialist's
+    label. `key` names the post: casa (v0.344.39+) sends a key it already
+    delivered never again and answers the original receipt instead. Raises
+    `DepositFailed` exactly as `deposit_link` does."""
+    return _deposit({"slot": slot, "value": text, "key": key})
+
+
+def _deposit(fields: dict) -> str:
     path = os.environ.get(ENV_SOCKET, "")
     client = os.environ.get(ENV_CLIENT, "")
     if not path or not client:
         raise DepositFailed("broker_env_missing")
-    body = {"client": client, "slot": slot, "value": url,
-            "label": label, "caption": caption}
+    body = dict(fields, client=client)
     conn = _UnixHTTP(path)
     try:
         conn.request("POST", DEPOSIT_ROUTE,

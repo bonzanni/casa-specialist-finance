@@ -41,9 +41,15 @@ SANDBOX_BANNER = ("[SANDBOX] Disposable test world — sandbox application, "
 #: the consent while the provider answers, and each such interleaving made a
 #: reply false or left a note the erasure had promised gone. Holding every
 #: other call out for its short run removes the class rather than one case.
+#:
+#: `daily_sync` is exclusive too (issue #110). It runs unattended, so it is
+#: the call most likely to overlap a renewal the operator is completing; a
+#: refresh of the OLD consent finishing after the renewal switched the
+#: account's binding would mark the renewed history partial. Holding the
+#: other calls out for its short run removes that interleaving.
 LOCK_WAIT_S = 30.0
 EXCLUSIVE_TOOLS = frozenset({"delete_all_data", "delete_data_keep_signins",
-                             "unlink_bank"})
+                             "unlink_bank", "daily_sync"})
 BUSY = ("Refused, nothing was done: another bank-feed call is running%s. "
         "Try again when it has finished.")
 
@@ -95,8 +101,8 @@ def _lifecycle_lock(name):
             if time.monotonic() >= deadline:
                 os.close(fd)
                 return None, BUSY % ("" if exclusive else
-                                     ", an erasure of all data or a bank "
-                                     "consent withdrawal")
+                                     ", an erasure of all data, a bank "
+                                     "consent withdrawal or the daily sync")
             time.sleep(0.05)
         except OSError as exc:
             os.close(fd)

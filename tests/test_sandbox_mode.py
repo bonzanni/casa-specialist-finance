@@ -23,6 +23,7 @@ import bank_feed_server  # noqa: E402
 import ebmode  # noqa: E402
 import store  # noqa: E402
 import tools_auth  # noqa: E402
+import tools_refresh  # noqa: E402,F401  (registers daily_sync)
 
 from _toolbase import (Base, FakeAIS, FakeAdmin, TEST_KEY_PEM,  # noqa: E402
                        call)
@@ -554,14 +555,14 @@ class TestDispatcher(SandboxBase):
             RuntimeError("boom")))
         self.assertNotIn("isError", self.dispatch_result("__stub__"))
 
-    def test_only_link_bank_is_registered_as_a_capability_tool(self):
+    def test_only_link_bank_and_daily_sync_are_capability_tools(self):
         # The manifest's resultContract and the registry must agree on which
         # tool succeeds only with a reference: a mismatch either withholds
         # every link_bank result or hides a safe tool's answers as errors.
         self.assertEqual(
             sorted(n for n, t in bank_feed_server.TOOLS.items()
                    if t.get("capability") and not n.startswith("__")),
-            ["link_bank"])
+            ["daily_sync", "link_bank"])
 
     def test_an_invalid_mode_refuses_every_tool_unbannered(self):
         ran = []

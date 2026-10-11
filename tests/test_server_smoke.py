@@ -174,14 +174,19 @@ class TestPluginManifest(unittest.TestCase):
             "casa.resultContract.tools must be exactly the live tools/list "
             "minus the setup tool: a served tool missing here is refused by "
             "casa before it runs, a declared tool nothing serves is a lie")
-        self.assertEqual(len(contract["tools"]), 35)
+        self.assertEqual(len(contract["tools"]), 36)
         for name, entry in contract["tools"].items():
-            if name == "link_bank":
+            if name in ("link_bank", "daily_sync"):
                 continue
             self.assertEqual(entry, {"result": "safe"}, name)
         self.assertEqual(contract["tools"]["link_bank"], {
             "result": "capability", "provides": ["approval_link"],
             "delivers": {"approval_link": "operator_link"}})
+        self.assertEqual(contract["tools"]["daily_sync"], {
+            "result": "capability", "provides": ["notice"],
+            "delivers": {"notice": "operator_message"}})
+        self.assertIn('\nNOTICE_SLOT = "notice"\n',
+                      (SERVER_DIR / "tools_refresh.py").read_text("utf-8"))
         # The slot the manifest declares is the field the server fills.
         self.assertIn('\nAPPROVAL_SLOT = "approval_link"\n',
                       (SERVER_DIR / "tools_auth.py").read_text("utf-8"))
