@@ -38,10 +38,12 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
+import hashlib
 import io
 import json
 
 import backups
+import casa_broker
 import casa_handoff
 import eb_ais
 import flows
@@ -1228,6 +1230,143 @@ def export_history(args: dict) -> str:
         "Ledger instance: %s" % ledger,
         "Path: %s" % out["path"],
     ])
+
+
+# --------------------------------------------------------------------------
+# the daily background sync (issue #110)
+# --------------------------------------------------------------------------
+
+#: The slot `daily_sync` deposits its notice in, delivered by casa as an
+#: `operator_message` (the manifest's `casa.resultContract`).
+NOTICE_SLOT = "notice"
+
+#: How long a routine sync must have failed without a break before the daily
+#: run tells the operator, when nothing says the consent itself is gone. Under
+#: this, a failure is transient: the next run retries it, silently.
+STALLED_AFTER_S = 3 * 86400
+
+#: The deposit seam, as `tools_auth.DEPOSIT_LINK` is for links.
+DEPOSIT_MESSAGE = casa_broker.deposit_message
+
+
+def _plain(text) -> str:
+    """A name we did not write, for a message casa renders as Markdown: one
+    line, neutralised, and without the characters that would turn it into
+    formatting."""
+    return "".join(ch for ch in tools_auth._safe(text)
+                   if ch not in "*_`[]~|<>#") or "your bank"
+
+
+def _daily_findings(c) -> dict:
+    """What needs the operator, per open consent, from this ledger alone:
+    `{finding key: sentence}`. Nothing is asked of the provider here.
+
+    A consent the provider reported gone (the #100 check, or an error code
+    naming the session gone on the latest failure) or whose recorded validity
+    has passed needs re-linking (`relink:<ref>`); a routine sync failing
+    without a break for `STALLED_AFTER_S` needs a look
+    (`stalled:<ref>:<first failure>`). Only consents with an included account
+    bound to them NOW count: an unlinked or excluded account is the
+    operator's own choice."""
+    found = {}
+    now = tools_auth._now_s()
+    for session in c.execute(
+            "SELECT * FROM sessions s WHERE s.closed_at IS NULL AND EXISTS"
+            " (SELECT 1 FROM accounts a WHERE a.session_id = s.session_id"
+            " AND a.included = 1) ORDER BY s.aspsp_name, s.session_id"):
+        session = dict(session)
+        sid = session["session_id"]
+        ref = tools_auth._consent_ref(sid)
+        bank = _plain(session.get("aspsp_name"))
+        relink = ("Ask me to re-link %s: one approval in your bank's app, and "
+                  "the history carries over." % bank)
+        gone, stalled = None, None
+        for (account_id,) in c.execute(
+                "SELECT account_id FROM accounts WHERE session_id=? AND"
+                " included=1 ORDER BY account_id", (sid,)).fetchall():
+            record = tools_auth.sync_health(c, account_id) or {}
+            fail = record.get("fail")
+            if not isinstance(fail, dict):
+                continue
+            code = eb_ais.label_code(fail.get("label"))
+            gone = gone or tools_auth._provider_gone(record) or \
+                eb_ais.SESSION_GONE_CODES.get(code)
+            try:
+                since = now - float(tools_read._parse_ts(
+                    fail.get("first")).timestamp())
+            except (AttributeError, TypeError, ValueError):
+                since = 0
+            if since >= STALLED_AFTER_S and stalled is None:
+                stalled = (fail.get("first"), record.get("ok_at"))
+        state, _days = tools_auth._expiry_state(session.get("valid_until"))
+        if gone:
+            found["relink:" + ref] = (
+                "%s stopped sharing your bank data: the bank says the "
+                "connection has ended (%s). %s" % (bank, gone, relink))
+        elif state == tools_auth.EXPIRED:
+            found["relink:" + ref] = (
+                "%s's bank connection expired, so its accounts no longer "
+                "update. %s" % (bank, relink))
+        elif stalled is not None:
+            first, ok_at = stalled
+            since_day = str(ok_at or first or "")[:10]
+            found["stalled:%s:%s" % (ref, str(first)[:19])] = (
+                "%s hasn't updated since %s: every daily sync since then has "
+                "failed. Ask me to look at the %s connection."
+                % (bank, _plain(since_day) if since_day else "several days",
+                   bank))
+    return found
+
+
+@register("daily_sync",
+          "The daily background sync, for the scheduled job 'Bank sync' "
+          "(bank-feed:daily-sync): refreshes every linked bank and, only when "
+          "a bank needs the operator (re-link, or failing for days), hands "
+          "casa one short notice to post. Takes no arguments. Outside that "
+          "job use sync.",
+          {"type": "object", "properties": {}},
+          capability=True)
+def daily_sync(args: dict):
+    c = _conn()
+    accounts = [r[0] for r in c.execute(
+        "SELECT a.account_id FROM accounts a JOIN sessions s"
+        " ON s.session_id = a.session_id WHERE a.included = 1"
+        " AND s.closed_at IS NULL ORDER BY a.account_id")]
+    refreshed = deferred = failed = 0
+    for account_id in accounts:
+        for resource in RESOURCES:
+            try:
+                # Not `automatic`: our own cooldown is read across the whole
+                # account, so the balances refresh would defer the
+                # transactions one of the same run. A provider Retry-After and
+                # the single-flight claim still bind, as for `sync`.
+                if _refresh_resource(c, account_id, resource, automatic=False):
+                    refreshed += 1
+            except RateControlDeferred:
+                deferred += 1
+            except Exception:                    # noqa: BLE001 — recorded already
+                failed += 1
+    text = ("Daily sync: %d account(s), %d refresh(es) done, %d deferred, %d "
+            "failed." % (len(accounts), refreshed, deferred, failed))
+    found = {} if tools_auth.authorization_in_progress(c) else \
+        _daily_findings(c)
+    if not found:
+        return {NOTICE_SLOT: None,
+                "text": text + " Nothing needs the operator."}
+    keys = sorted(found)
+    key = "daily-sync:" + hashlib.sha256(
+        "\n".join(keys).encode("utf-8")).hexdigest()[:16]
+    try:
+        ref = DEPOSIT_MESSAGE(
+            NOTICE_SLOT, "\n\n".join(found[k] for k in keys), key=key)
+    except casa_broker.DepositFailed as exc:
+        # Prose, so the dispatcher reports a tool error; the next run tries
+        # again under the same key.
+        return ("%s %d bank(s) need the operator, but casa did not accept the "
+                "notice (%s)." % (text, len(keys), tools_auth._safe(exc.code)))
+    return {NOTICE_SLOT: ref,
+            "text": text + " %d bank(s) need the operator: casa posts the "
+                    "notice." % len(keys)}
 
 
 # The read tools perform the inline refresh through this seam. Assigned at

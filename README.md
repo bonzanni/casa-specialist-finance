@@ -16,7 +16,7 @@ One casa **specialist component** — a role, a persona, and two bundled plugins
 
 - **`bank-feed`** — an MCP server (Python 3.11 standard library only) that owns the
   bank connection, the SQLite ledger, the annotation store, the auto-tagging rulebook,
-  and 35 tools.
+  and 37 tools.
 - **`tx-classifier`** — a skill that decides how transactions should be classified and
   works the queue the rules cannot settle. No server, no storage of its own.
 
@@ -59,6 +59,13 @@ to your Enable Banking application, and then you authorize it at your bank. Each
 link arrives from casa itself, in your chat with the assistant, never in a task
 topic; this needs casa v0.318.0 or later.
 
+Then ask casa's configurator for the daily sync, a job trigger on the assistant (casa
+v0.344.39 or later):
+`name: bank-sync, type: cron, schedule: "0 7 * * *", channel: telegram, job: "bank-feed:daily-sync"`.
+Every linked bank then syncs once a day without a finance conversation. The run is
+silent; you hear from it only when a bank needs you (its consent ended or expired, or it
+has failed to sync for three days), once, in your chat.
+
 `docs/reference/setup-flow.md` walks the whole thing; `docs/reference/configuration.md`
 is where the vault comes from and every environment variable;
 `docs/reference/sandbox-mode.md` is how to try it against a disposable test world
@@ -82,8 +89,9 @@ instead of real accounts.
 - **The backfill runs immediately, because it assumes deep history may stop being
   available minutes after authentication.** What it could not reach then, it may not be
   able to reach later without re-authorizing.
-- **No scheduling.** Neither plugin can run itself on a timer; recurring work is a casa
-  reminder you create.
+- **No scheduling of its own.** Neither plugin runs itself on a timer. The daily bank
+  sync is a casa job, `bank-feed:daily-sync`, that a job trigger on the assistant starts
+  (see Installing); any other recurring work is a casa reminder you create.
 - **Money is never converted.** Totals are per currency.
 
 ## Documentation

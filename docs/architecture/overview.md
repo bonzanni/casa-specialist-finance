@@ -40,7 +40,11 @@ the shipped behaviour rather than documentation about it.
 
 Neither plugin can schedule anything. A specialist has no turn to sleep in, so nothing
 in this repository polls or waits: continuation is always either the operator calling a
-tool again or casa's own nudge ladder delivering a callback.
+tool again or casa's own nudge ladder delivering a callback. The one recurring piece of
+work, the daily bank sync, is a casa job bank-feed declares (`bank-feed:daily-sync`,
+skill **daily-sync**, `quietWhenScheduled`), started by a job trigger on the assistant
+that the operator creates; its run calls `daily_sync`, which posts nothing unless a bank
+needs the operator (`reference/tool-surface.md`).
 
 ## The shape of a request
 

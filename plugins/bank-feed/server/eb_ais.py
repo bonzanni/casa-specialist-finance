@@ -159,7 +159,7 @@ class ApiError(RuntimeError):
 #: `label_status` accepts. Anchored at both ends: a label is read back only
 #: when it is exactly the string this module wrote.
 _LABEL_RE = re.compile(r"ApiError: HTTP ([1-5][0-9]{2}) [a-z_]+"
-                       r"(?: [A-Z][A-Z_]{2,63})?")
+                       r"(?: ([A-Z][A-Z_]{2,63}))?")
 
 
 def failure_label(exc) -> str:
@@ -197,6 +197,13 @@ def label_status(label) -> int | None:
     """
     m = _LABEL_RE.fullmatch(str(label or ""))
     return int(m.group(1)) if m else None
+
+
+def label_code(label) -> str | None:
+    """Enable Banking's error code a `failure_label` recorded, or None — read
+    back exactly as `label_status` reads the status (issue #110)."""
+    m = _LABEL_RE.fullmatch(str(label or ""))
+    return m.group(2) if m else None
 
 
 def revocation_is_final(exc) -> bool:

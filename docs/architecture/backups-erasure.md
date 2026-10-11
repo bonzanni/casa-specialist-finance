@@ -254,7 +254,8 @@ vault item created after step 2's listing, would survive a `complete` answer. So
 call (shared) and for `delete_all_data` (exclusive, for the whole call), and refuses as
 busy after `LOCK_WAIT_S`. `delete_data_keep_signins` and `unlink_bank` hold it exclusively
 too: a withdrawal records the provider's answer after asking, and a call alongside could
-change the consent in between. Every `op` child inherits the call's lock descriptor
+change the consent in between. So does `daily_sync`, the unattended run most likely to
+overlap a renewal. Every `op` child inherits the call's lock descriptor
 (`opvault.INHERIT_FDS`), so a create still running after its parent died still holds the
 lock.
 
