@@ -20,10 +20,12 @@ from ever running without the substrate.
 ## Role grants it relies on
 
 `role/role.yaml` `tools.allowed` carries `WebSearch` (evidence-ladder
-rung 3, counterparty lookups only) and
-`mcp__casa-framework__recall_memory` (rung 2, casa memory) — shipped in
-this same bundle. If a deployed role predates them, the skill degrades
-gracefully: those rungs are skipped.
+rung 3, counterparty lookups only) and casa's memory reads,
+`mcp__casa-framework__search_memory`, `…__open_memory` and
+`…__browse_memory_day` (rung 2, casa memory) — shipped in this same
+bundle. The memory reads need casa v0.347.0 or later; an older casa
+refuses the bundle at inspection. If a tool is missing from a session,
+the skill skips that rung.
 
 ## Cadence
 

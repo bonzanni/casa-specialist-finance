@@ -26,7 +26,7 @@ Everything is installed and versioned as one bundle with pinned content digests.
 
 | | |
 |---|---|
-| **casa** | v0.155.0 is the version this component is written and tested against. Nothing here declares or enforces it, and no casa source ships here — under an older casa the install fails when it reaches the behaviour that is missing. |
+| **casa** | v0.347.0 or later. The role grants casa's memory tools (`search_memory`, `browse_memory_day`, `open_memory`), which a specialist may hold from v0.347.0; an older casa refuses the install or upgrade before asking for consent, naming those grants. Nothing else declares the version, and no casa source ships here — `docs/reference/casa-compatibility.md` gives the floor and why. |
 | **Python** | 3.11. The plugin runtime uses no third-party packages at all. |
 | **An Enable Banking account** | The setup tool registers the *application* for you. Signing in to the provider's control panel to authorize that is the step it cannot do. |
 | **1Password** | A service account and a vault, both configured in casa (its `onepassword_service_account_token` and `onepassword_default_vault` app options). The plugin forges and stores its own credentials in that vault; the vault is the one thing you choose. |

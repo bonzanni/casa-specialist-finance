@@ -190,7 +190,7 @@ undeclared refuses, so removing a declaration disables the tool rather than unga
 
 ## What else the role grants
 
-The allow-list is not only this plugin's tools. Seven of its entries come from casa or
+The allow-list is not only this plugin's tools. Nine of its entries come from casa or
 the harness, and each is there for a named reason:
 
 | Grant | Why |
@@ -198,7 +198,8 @@ the harness, and each is there for a named reason:
 | `Read` | the skills read their own material |
 | `Skill` | the specialist invokes its two skills |
 | `WebSearch` | the classifier's evidence ladder, for counterparty lookups only |
-| `mcp__casa-framework__recall_memory` | the classifier's evidence ladder, one rung below the web |
+| `mcp__casa-framework__search_memory` | the classifier's evidence ladder, one rung before the web: one search of the saved conversation for a counterparty |
+| `mcp__casa-framework__open_memory`, `…__browse_memory_day` | casa's other two memory reads, granted beside search: an entry the served memory lists can be opened in place of the search; the classifier has no use for a day's browse |
 | `mcp__casa-framework__ask_user` | the one question the classifier cannot answer alone |
 | `mcp__casa-framework__get_schedule`, `…__send_media` | reporting: when to report, and sending a rendered answer |
 

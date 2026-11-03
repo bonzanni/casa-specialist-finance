@@ -160,9 +160,13 @@
   doc: reference/tool-surface.md
 - item: role:mcp__casa-framework__ask_user
   doc: reference/tool-surface.md
+- item: role:mcp__casa-framework__browse_memory_day
+  doc: reference/tool-surface.md
 - item: role:mcp__casa-framework__get_schedule
   doc: reference/tool-surface.md
-- item: role:mcp__casa-framework__recall_memory
+- item: role:mcp__casa-framework__open_memory
+  doc: reference/tool-surface.md
+- item: role:mcp__casa-framework__search_memory
   doc: reference/tool-surface.md
 - item: role:mcp__casa-framework__send_media
   doc: reference/tool-surface.md
