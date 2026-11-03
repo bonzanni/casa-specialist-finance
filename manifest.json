@@ -24,7 +24,7 @@
     {
       "kind": "plugin/implementation",
       "identifier": "tx-classifier",
-      "digest": "sha256:2c846e838acad61077fdc0150154f9bf4b07109bbfc2790fc3fe062a53d7e23d",
+      "digest": "sha256:337b956885192b72e5fd236665d289155e8a765d7429734d11f3e221cc3ff216",
       "source": {
         "type": "bundled",
         "path": "plugins/tx-classifier"
