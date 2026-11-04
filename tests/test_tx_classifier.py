@@ -90,8 +90,16 @@ class TestSkill(unittest.TestCase):
         _, body = self._parts()
         self.assertEqual([t for t in LOAD_BEARING_TOOLS
                           if t not in body], [])
-        # recall_memory is casa-framework, not bank-feed — pinned apart.
-        self.assertIn("recall_memory", body)
+        # The memory rung's tools are casa-framework, not bank-feed — pinned
+        # apart, and against the role: a name the role does not grant is a
+        # rung the specialist can never climb. recall_memory was retired in
+        # casa v0.347.0 and must not come back.
+        role = (ROOT / "role/role.yaml").read_text(encoding="utf-8")
+        for tool in ("search_memory", "open_memory"):
+            self.assertIn("`%s`" % tool, body)
+            self.assertIn("mcp__casa-framework__" + tool, role)
+        self.assertNotIn("recall_memory", body)
+        self.assertNotIn("recall_memory", role)
 
     def test_contract_seams_match_shipped_bank_feed(self):
         # Substring presence alone is false confidence: the skill must use

@@ -18,9 +18,9 @@ real casa through `$CASA_ROOT` at runtime; the suite has no such root.
 
 ## Version range
 
-The values below were taken from **casa v0.148.0**, **casa v0.155.0** and
-**casa v0.318.0** — the version each row names is the version its value was read
-from.
+The values below were taken from **casa v0.148.0**, **casa v0.155.0**,
+**casa v0.318.0** and **casa v0.347.0** — the version each row names is the version
+its value was read from.
 
 **This table is a copy, and a copy is a claim about another codebase.** Nothing
 in this commit can show that a row matches what casa actually defines — no casa
@@ -66,7 +66,21 @@ install where Gmail is assigned to finance migrates first, in the order
 [the tool surface](tool-surface.md#what-else-the-role-grants) gives. The floor below is
 unchanged, because finance works without Gmail.
 
-The component **requires casa >= v0.344.39**. The environment-declaration rows below
+The component **requires casa >= v0.347.0**. From 0.27.0 the role grants casa's three
+memory reads, `mcp__casa-framework__search_memory`,
+`mcp__casa-framework__browse_memory_day` and `mcp__casa-framework__open_memory`, in
+place of `recall_memory`, which casa v0.347.0 retired with the memory it read. casa caps
+the casa-framework tools a specialist role may grant with a fixed list
+(`SPECIALIST_CASA_TOOLS` in the table below), and v0.347.0 is the first whose list holds
+the three reads. From the previous floor, v0.344.39, through v0.346.x the list holds
+`recall_memory` instead, so such a casa refuses this role when it inspects the
+component, before any consent is asked, with an error naming the three grants; the
+installed version keeps running. The other way round, casa v0.347.0 or later loading
+finance 0.26.x or older strips its `recall_memory` grant at load with a warning, and the
+classifier runs without a memory rung. So casa moves to v0.347.0 first, then finance to
+0.27.0.
+
+The older floors still hold inside that one. The environment-declaration rows below
 do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
 outright: `link_bank` declares `delivers` (below), a member an older casa's
 result-contract validator does not know, so it rejects the declaration as malformed
@@ -76,11 +90,9 @@ Before v0.344.39 casa refuses the daily job's declaration the same way
 notice carries is honoured from that version on.
 
 **Nothing declares that requirement as a version.** There is no version field in
-the plugin manifest and no handshake: this page and `plugins/bank-feed/README.md`
-are the only places it is written down. Under a casa from v0.290.0 and before v0.318.0 the
-refusal is at install, with `result_contract_invalid`, and names no version; under
-anything older the install goes through and fails at the point the missing
-behaviour is needed, with whatever error casa raises there. Stated plainly rather
+the plugin manifest and no handshake: this page, `README.md` and the plugins' READMEs
+are the only places it is written down. Under a casa older than v0.347.0 the refusal
+is at inspection and names the memory grants, not a version. Stated plainly rather
 than left to be discovered.
 
 ## The copied values
@@ -97,6 +109,7 @@ than left to be discovered.
 | `ENV_DECLARATION_RE` | `plugin_store._DECLARABLE_ENV_NAME_RE` | v0.155.0 | The full grammar a declarable name must satisfy, not merely the prefix. This row cites a symbol NAME rather than a line on purpose: the symbol was renamed in v0.155.0 when it was split from the `${VAR}` reference scanner it had been shadowing, and citing the name meant the rename surfaced as a failing cross-check instead of a silent comparison against the wrong pattern. |
 | `MAX_ENV_DECLARATIONS` | `plugin_store._MAX_ENV_DECLARATIONS` | v0.155.0 | How many environment names one plugin may declare. Exceeding it is a refused install. |
 | `CASA_OWNED_ENV_OPTIONS` | `plugin_store.CASA_OWNED_ENV_OPTIONS` | v0.155.0 | Environment variables a plugin may REFERENCE but never supply and never declare, mapped to the app option casa exports each from. The mapping is also the remediation: the fix for a missing one is its option, never a plugin env file. |
+| `SPECIALIST_CASA_TOOLS` | `specialist_component.SPECIALIST_CASA_TOOL_ALLOWLIST` | v0.347.0 | The casa-framework tools a specialist role may grant. A role naming any other one, or the bare `mcp__casa-framework` server, is refused when casa inspects the component, before consent; v0.347.0 replaced `recall_memory` with `search_memory`, `browse_memory_day` and `open_memory`, so the role's memory grants hold only from that version. |
 | `MCP_JSON_VAR_RE` | `specialist_install._MCP_JSON_VAR_RE` | v0.155.0 | The `${VAR}` and `${VAR:-default}` interpolation syntax casa carves out of each `.mcp.json` string leaf before the marker scan. Without the carve-out a defaulted reference keeps its `${` and trips the forbidden markers, refusing a bundled plugin for syntax a standalone plugin may use freely. The named `default` group is load-bearing for expansion. |
 | `REQUIRED_REF_RE` | `plugin_env_extractor._VAR_PATTERN` | v0.155.0 | Which references count as REQUIREMENTS for the withhold gate: bare `${VAR}` only. A `${VAR:-default}` is satisfied by its own default, so withholding an install for it would be wrong. |
 | `ANY_REF_RE` | `plugin_env_extractor._ANY_VAR_PATTERN` | v0.155.0 | Both documented reference forms. Consent enumeration and the name-collision preflight use this one, so a default cannot hide a name claim. |

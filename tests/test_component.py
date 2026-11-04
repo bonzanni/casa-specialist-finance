@@ -193,6 +193,18 @@ REQUIRED_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 # Both documented forms. Consent enumeration and the ENV_NAME_COLLISION
 # preflight use this one, so a default cannot hide a name claim.
 ANY_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-[^{}]*)?\}")
+#: casa contract: specialist_component — the casa tools a specialist role may grant
+# casa's ceiling on the casa-framework tools a specialist role may name in
+# `tools.allowed` (#541). A role naming any other one, or the bare server, is
+# refused when casa inspects the component, before any consent is asked. casa
+# v0.347.0 retired `recall_memory` and admitted the three memory reads, so a
+# role written for either side of that release is refused by the other. A
+# frozenset in casa: membership is the contract, so the copy is kept sorted.
+SPECIALIST_CASA_TOOLS = sorted({
+    "query_engager", "emit_completion", "react", "ask_user",
+    "search_memory", "browse_memory_day", "open_memory", "ack_event",
+    "get_schedule", "send_media",
+})
 
 
 # The result_broker values `plugins/bank-feed/server/casa_broker.py` copies to
@@ -218,6 +230,7 @@ CASA_COPIES = {
     ("plugin_env_extractor.py", "_ANY_VAR_PATTERN"): ANY_REF_RE.pattern,
     ("plugin_callbacks.py", "MAX_EFFECTIVE_LEN"): MAX_EFFECTIVE_LEN,
     ("specialist_install.py", "_MCP_JSON_VAR_RE"): MCP_JSON_VAR_RE.pattern,
+    ("specialist_component.py", "SPECIALIST_CASA_TOOL_ALLOWLIST"): SPECIALIST_CASA_TOOLS,
     ("result_broker.py", "ENV_CLIENT"): casa_broker.ENV_CLIENT,
     ("result_broker.py", "ENV_SOCKET"): casa_broker.ENV_SOCKET,
     ("result_broker.py", "_REF_RE"): casa_broker.REFERENCE_RE.pattern,
@@ -401,6 +414,10 @@ def _resolve(node, env):
         # var is casa-owned decides whether declaring it is legal at all.
         return {_resolve(k, env): _resolve(v, env)
                 for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.Set):
+        # SPECIALIST_CASA_TOOL_ALLOWLIST is `frozenset({...})`: a set has no
+        # order, so it normalises to a sorted list.
+        return sorted(_resolve(item, env) for item in node.elts)
     if isinstance(node, ast.Name):
         return _resolve(env[node.id], env)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -1129,6 +1146,20 @@ class TestRole(unittest.TestCase):
         named = {t for t in _yaml_list(_role_text(), "allowed")
                  if t.startswith("mcp__plugin_")}
         self.assertEqual(named - declared, set())
+
+    def test_every_casa_tool_the_role_grants_is_one_a_specialist_may_hold(self):
+        # casa refuses the whole component at inspection when the role names
+        # a casa-framework tool outside its specialist ceiling, and an
+        # already-installed role loses such a grant at load. Either way the
+        # tool never reaches the specialist.
+        prefix = "mcp__casa-framework__"
+        allowed = _yaml_list(_role_text(), "allowed")
+        outside = [t for t in allowed
+                   if t == prefix[:-2] or (t.startswith(prefix)
+                       and t[len(prefix):] not in SPECIALIST_CASA_TOOLS)]
+        self.assertEqual(outside, [])
+        self.assertTrue([t for t in allowed if t.startswith(prefix)],
+                        "the role grants no casa tool at all; the check bit nothing")
 
     def test_requires_tools_names_a_tool_the_manifest_declares(self):
         # casa checks `requires.tools` against
