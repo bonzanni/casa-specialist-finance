@@ -161,6 +161,9 @@ jobs:
     # Skipped when the tag job was skipped or failed, or admitted no version.
     needs: tag
     if: needs.tag.outputs.tag != ''
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,7 +182,14 @@ jobs:
             echo "$TAG already has a release"
             exit 0
           fi
-          gh release create "$TAG" --repo "$R" --verify-tag --latest \
+          # GitHub makes every new release latest unless told otherwise; a late run
+          # for an older version must not move latest backwards.
+          current=$(gh release view --repo "$R" --json tagName --jq .tagName 2>/dev/null || true)
+          make_latest=true
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$TAG" | sort -V | tail -1)" != "$TAG" ]; then
+            make_latest=false
+          fi
+          gh release create "$TAG" --repo "$R" --verify-tag --latest="$make_latest" \
             --title "$TAG" \
             --notes "casa-specialist-finance $TAG. README.md at this tag says what it needs and how to install it." \
             || echo "create refused; checking what exists"
