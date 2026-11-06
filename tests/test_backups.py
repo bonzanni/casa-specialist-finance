@@ -273,7 +273,7 @@ class TestIndexLock(Base):
 
 
 class TestSettlementTable(Base):
-    """One row per line of the spec's settlement table."""
+    """One test per case of the settlement table."""
 
     def pending_backup(self, op_id, reason="manual", make_file=True, partial=False):
         self.settled()
@@ -1375,7 +1375,7 @@ class TestRestore(RestoreBase):
         self.assertEqual(tuple(row), ("uid-2", "s1"))
 
     def test_an_account_absent_from_the_backup_and_already_unlinked_live_is_kept_and_relinked(self):
-        # The fourth, implicit case of the spec's per-account table: absent
+        # The remaining, implicit case of the per-account handling: absent
         # from the backup AND unlinked live (no session_id). The row is
         # still never dropped by a restore, but a NULL binding is the
         # derived "needs re-link" whichever branch produced it.

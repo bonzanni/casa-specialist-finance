@@ -1,5 +1,5 @@
 # tests/test_sandbox_mode.py
-"""SANDBOX mode (sandbox-mode design, 2026-08-06): the world guard, the
+"""SANDBOX mode: the world guard, the
 mode-derived setup ladder, the credential-writer routing, and the
 dispatcher banner/refusals.
 

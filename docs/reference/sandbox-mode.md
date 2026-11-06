@@ -1,7 +1,7 @@
 # Sandbox mode
 
-This page is the operational summary the playbook and the configurator
-should read.
+This page is the operational summary for whoever runs a sandbox install, and
+for casa's configurator.
 
 ## Selecting the mode
 
@@ -64,10 +64,8 @@ answers as the mode's own application (name + environment + id); a
 `plugin-env.conf` copied from the other world's install refuses instead
 of touching it.
 
-## Playbook notes (read before writing/running plays)
+## Notes for testing against a sandbox install
 
-- **Pin the install revision to `d432db0` or later** — earlier revisions
-  have no sandbox mode.
 - **`Mock ASPSP` cannot be linked, and that is not a plugin bug.** The
   precondition is in the code: the ledger keys accounts on
   `HMAC(IBAN, currency)`, so an account the provider returns without an IBAN has
@@ -83,7 +81,7 @@ of touching it.
   production app too. Sandbox reads that shared administrative metadata; the
   world guard is what stops it ever *addressing* the production app, items or
   ledger, and that guard is in the code rather than in the assumption.
-- **Teardown** is playbook/operator-side by design: delete
+- **Teardown** is left to the operator by design: delete
   `casa-finance-sandbox` with the
   `DELETE /api/applications {"appId": …}` recipe and purge the two
   sandbox vault items. The plugin itself has no DELETE capability

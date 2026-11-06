@@ -213,10 +213,10 @@ class TestIdentityStaysConsistent(Base):
     occurrence together — in one statement — or not at all."""
 
     def test_a_correction_rewrites_identity_and_occurrence_together(self):
-        """The previous round wrote NEITHER, leaving the row carrying a key
-        that no longer hashed its own content. A later reference-less fetch of
-        the same transaction then found no cluster to match, inserted a
-        duplicate and tombstoned the original."""
+        """Writing NEITHER leaves the row carrying a key that no longer hashes
+        its own content. A later reference-less fetch of the same transaction
+        then finds no cluster to match, inserts a duplicate and tombstones the
+        original."""
         apply.apply_plan(self.conn, "acc1", ingest.reconcile(
             [], [row("2026-02-05", amount=1000, ref="R1")], IV, CAP_STABLE))
         first = self._all()[0]
@@ -290,8 +290,8 @@ class TestIdentityStaysConsistent(Base):
         self.assertEqual([r["identity_key"] for r in self._all()], ["K1", "K2"])
 
     def test_an_update_that_carries_no_identity_is_refused(self):
-        """An update missing these columns is how the invariant was lost last
-        round. It must fail loudly rather than write a partial identity."""
+        """An update missing these columns is how the invariant gets lost. It
+        must fail loudly rather than write a partial identity."""
         apply.apply_plan(self.conn, "acc1",
                          ingest.reconcile([], [row("2026-02-05")], IV, CAP_UNKNOWN))
         rid = self._all()[0]["row_id"]
@@ -1166,8 +1166,8 @@ class TestHonestCounts(Base):
     def test_a_plan_applied_under_one_account_cannot_supersede_anothers_row(self):
         """The fourth statement: supersede. A's plan still inserts its own
         booked row -- only the cross-account supersede of B's row is refused,
-        the same "skip the ghost entry, not the whole plan" composition round
-        1 established."""
+        the same "skip the ghost entry, not the whole plan" composition as
+        everywhere else."""
         apply.apply_plan(self.conn, "A", ingest.reconcile(
             [], [row("2026-02-05", status="PDNG")], IV, CAP_UNKNOWN))
         apply.apply_plan(self.conn, "B",

@@ -624,9 +624,9 @@ def silent_backfill(ais, conn, account, session_id, **kwargs):
     """`flows.backfill` as a producer that reports NEITHER signal.
 
     This is not a hypothetical: `flows.backfill`'s success path carried no
-    `capped` and no `completeness` at all until this round, so the plugin's own
-    producer emitted exactly this dict — and the guard's defaults read it as a
-    finished deep fetch.
+    `capped` and no `completeness` at all once, so the plugin's own producer
+    emitted exactly this dict — and the guard's defaults read it as a finished
+    deep fetch.
 
     The durable half is the other half of the trap. The row it writes says
     `complete`, truthfully, about an EARLIER session; a lookup that does not
@@ -731,8 +731,7 @@ class FakeCB:
     # exchange's return value and reads back only the fenced declarations in
     # `attempts.outcome`, so a double that merely recorded the calls would let
     # an exchange that declares nothing — or declares in the wrong order — pass
-    # here and fail in production. That is the exact shape of defect this round
-    # exists to stop.
+    # here and fail in production.
     def note_session(self, conn, attempt, session_id):
         self.noted.append(session_id)
         callbacks.note_session(conn, attempt, session_id)
@@ -911,8 +910,7 @@ class Base(unittest.TestCase):
         and delegates `note_session` / `declare_verified` / `declare_partial`
         to the real functions. An exchange that writes before it declares fails
         HERE exactly as it fails in production, rather than being waved through
-        by a permissive fake — which is how the last two rounds' defects
-        survived.
+        by a permissive fake, which is how such defects survive.
 
         **And it delegates the TAIL too**. `declare_verified`
         reopens the ledger STAGED, so the exchange can write but cannot make a
@@ -933,8 +931,8 @@ class Base(unittest.TestCase):
         tests drove `link_bank`, threw away the `purpose='renew'`, `account_id`
         and `expected_generation` it had just minted, and silently exercised
         the first-link branch instead. Discarding the producer's output and
-        substituting the test's own is the exact defect class this round exists
-        to eliminate, and it reappeared inside the fixture written to prevent
+        substituting the test's own is the exact defect class to eliminate, and
+        it reappeared inside the fixture written to prevent
         it. A row is synthesised only when nothing was minted.
 
         `crash=True` raises after the exchange returns and before
@@ -945,7 +943,7 @@ class Base(unittest.TestCase):
             pending = self.raw.execute(
                 "SELECT state_hash FROM attempts WHERE phase='minted'"
                 " ORDER BY rowid DESC LIMIT 1").fetchone()
-            # THE FALLBACK MUST NOT SUBSTITUTE SOMEBODY ELSE'S ATTEMPT (R4).
+            # THE FALLBACK MUST NOT SUBSTITUTE SOMEBODY ELSE'S ATTEMPT.
             # `STATE_HASH` is the "no producer ran" case and means exactly
             # that: a synthesised first-link attempt, or the re-run of one.
             # Once `link_bank` HAS minted, a bare `collect()` means "collect

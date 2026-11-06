@@ -234,7 +234,7 @@ class TestNotes(Base):
             names & {"edit_note", "delete_note", "remove_note",
                      "update_note"},
             set(), "a note-mutating tool now exists; the append-only claim "
-                   "in the spec and the schema comment no longer holds")
+                   "in the docstring and the schema comment no longer holds")
 
 
 class TestGetTransaction(Base):

@@ -94,9 +94,8 @@ def enumerate_modules(repo_root: Path) -> list[str]:
 #: Ask the running server what tools it serves, over the protocol casa uses, having
 #: launched it with the command casa launches.
 #:
-#: Four review rounds found four generations of the same defect while this was
-#: syntactic — each fix recognised the demonstrated spelling and the next round found
-#: its neighbour. Reading the registry by importing the server's modules was the same
+#: This was once syntactic, and the same defect kept returning — each fix recognised
+#: the demonstrated spelling and missed its neighbour. Reading the registry by importing the server's modules was the same
 #: mistake one level up: it REIMPLEMENTED startup, so a tool the entrypoint registered
 #: itself was invisible and a module the entrypoint never imports could change what the
 #: gate read. Choosing the entrypoint structurally was that mistake once more: casa does
@@ -526,7 +525,7 @@ def _bound_argument(call: ast.Call, param: str, positional: list[str]):
 
     Binding by NAME as well as by index matters: `read_env(name="X")` is the same
     read as `read_env("X")`, and a fix that only understood one spelling would
-    leave the other invisible — the exact shape review keeps finding.
+    leave the other invisible.
     """
     for keyword in call.keywords:
         if keyword.arg == param:

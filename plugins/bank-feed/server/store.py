@@ -287,7 +287,7 @@ CREATE TABLE IF NOT EXISTS attempts (
   session_id TEXT, outcome TEXT, expected_generation INTEGER,
   lease_owner TEXT, lease_token TEXT, lease_expiry REAL);
 
--- Operator/specialist annotations (annotation spec, 2026-08-05). Anchored to
+-- Operator/specialist annotations. Anchored to
 -- row_id: an in-place re-key keeps row_id, and apply_plan re-points both
 -- tables when a supersede lands, so an annotation follows the booked
 -- replacement. SCHEMA_VERSION 2 exists FOR these two tables: open_db runs

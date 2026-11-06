@@ -23,8 +23,8 @@ Nothing else writes transactions.
    they were observed unique. Global uniqueness is never assumed.
 2. **Reference-less rows use windowed nearest-date matching**, not multiset equality.
 3. **A deficit tombstones only well inside an interval something licensed it to** — see
-   coverage, below. Like rule 1, this rule is currently **switched off**, and
-   unconditionally so: no booked row is ever tombstoned in any installation. A
+   coverage, below. Unlike rule 1, whose trust an installation can earn, this rule is
+   **switched off**, and unconditionally so: no booked row is ever tombstoned in any installation. A
    *pending* row the bank stops listing is a different claim, decided by rule 3b — see
    "Pending payments the bank cancels", below.
 4. **Occurrence is monotonic per account and identity key, and never reused.** It is
@@ -108,8 +108,7 @@ reconciliation the same degenerate, no-licence interval, so the rule cannot fire
 nothing is tombstoned in any installation. `TOMBSTONE_LICENSED_ASPSPS` in `flows.py` is
 an empty documentary placeholder: nothing consults it, and filling it in changes
 nothing on its own. It marks where a per-bank re-listing measurement would attach if one
-were ever built — the same missing measurement, and the same missing per-installation
-observation, that leaves rule 1 inert.
+were ever built. Rule 1 has its measurement, the deep observation above; rule 3 has none.
 
 `purge` still maintains coverage, for the reason coverage exists. A purge that erased
 rows and left the interval asserting they had been observed would report the deleted

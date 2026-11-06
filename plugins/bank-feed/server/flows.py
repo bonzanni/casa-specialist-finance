@@ -540,9 +540,9 @@ def _aspsp_of(conn, account: dict) -> str:
     ACCOUNT ROW.
 
     `accounts.aspsp` is written at upsert time from the session's ASPSP name.
-    Nothing supplied it before this repair, so `provenance.capability()` was
-    always asked about `""`, always answered `DEFAULT_CAPABILITY`, and every
-    ingest silently fell back to heuristic matching — including for accounts
+    Were nothing to supply it, `provenance.capability()` would be
+    always asked about `""`, always answer `DEFAULT_CAPABILITY`, and every
+    ingest would silently fall back to heuristic matching — including for accounts
     whose capability this installation had recorded. The caller's dict is only
     a fallback for an account not yet persisted.
     """
@@ -870,8 +870,7 @@ def backfill(ais, conn, account: dict, session_id: str,
         # but the consumer defaults an absent `completeness` to "complete" — so
         # the one branch that omitted them was the one where omitting them
         # reads as success. The durable sync_state row above happens to mask it
-        # today; that is exactly the producer-to-consumer loss this round is
-        # about, and a signal that only survives by accident is not a signal.
+        # today; that is exactly a producer-to-consumer loss, and a signal that only survives by accident is not a signal.
         return {"inserted": 0, "proved_from": None, "proved_to": None,
                 "shallow": True, "pages": pages,
                 "capped": True, "completeness": "partial", "erased": False,

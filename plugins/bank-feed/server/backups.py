@@ -1817,9 +1817,8 @@ def restore(conn, paths: Paths, handle: IndexHandle, state: LedgerState,
                                      (acc["session_id"], acc["uid"], aid))
                         kept += 1
                 else:
-                    # The spec's table names three cases for an account
-                    # present in the backup; this is the fourth, implicit
-                    # one — absent from the backup AND already unlinked live
+                    # The branches above cover an account present in the
+                    # backup; this is the remaining, implicit case — absent from the backup AND already unlinked live
                     # (no session_id). The row is never dropped by a
                     # restore, but a NULL binding is the derived "needs
                     # re-link" regardless of which branch produced it.

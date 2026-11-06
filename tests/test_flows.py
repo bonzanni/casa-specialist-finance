@@ -412,7 +412,7 @@ class TestBackfill(unittest.TestCase):
         self.assertEqual(out["completeness"], self._sync()["completeness"])
 
     def test_a_capped_run_never_tombstones_a_row_from_an_unconsumed_page(self):
-        """The P0, stated as a test. Reconciliation tombstones every stored
+        """The defect, stated as a test. Reconciliation tombstones every stored
         row it cannot match inside the requested interval, so running it on a
         partial page set marks rows that merely live on page 61 as `vanished`.
         Nothing destructive may run until pagination completes; calling the
@@ -699,7 +699,7 @@ class TestBackfill(unittest.TestCase):
 
 
     def test_a_narrow_refresh_does_not_reissue_an_occurrence_it_cannot_see(self):
-        """The P0, driven through the public backfill rather than beside the
+        """The defect, driven through the public backfill rather than beside the
         allocator. A routine refresh asks for roughly the last week (`sync`
         narrows `floor_days` exactly this way), so a monthly standing order's
         earlier occurrences are NOT in the rows backfill loads. Allocating from
@@ -1027,7 +1027,7 @@ class TestDuplicateAcrossTheWindowEdge(unittest.TestCase):
             [("2026-07-27", 0), ("2026-08-03", 0)])
 
     def test_a_weekly_payment_posted_late_is_not_flagged(self):
-        # The design round's reproduction: the previous occurrence is exactly
+        # The reproduction: the previous occurrence is exactly
         # a week back and just BEFORE the window, because the bank posted this
         # week's two days late. A week is a recurrence, not a re-date.
         self._run([raw_tx("2026-07-21", amount="20.00", ref="W1")])

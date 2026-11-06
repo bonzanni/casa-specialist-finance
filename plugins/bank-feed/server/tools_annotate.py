@@ -1,8 +1,8 @@
 # plugins/bank-feed/server/tools_annotate.py
 """Annotation write tools: tags and an append-only note journal.
 
-Ordinary (non-protected) tools by design — the annotation spec states
-the tradeoff honestly: `untag_transaction` DOES delete a stored
+Ordinary (non-protected) tools by design, and the tradeoff is stated
+honestly: `untag_transaction` DOES delete a stored
 classification, but a tag is one cheap write to restore, and annotation has
 to be usable inside engagements or it is pointless. Notes are append-only;
 nothing here (or anywhere) edits or deletes a note row outside the deletion

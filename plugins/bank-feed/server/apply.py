@@ -842,10 +842,10 @@ def apply_plan(conn, account_id: str, plan, pre_apply=None) -> dict:
                                  f"op='supersede', got {op!r}")
             # The identity invariant: identity_key and occurrence are written
             # HERE, in the same statement as the content they hash -- together
-            # or not at all. Omitting them (the previous round) left rows whose
-            # stored identity disagreed with their own content, so a later
-            # reference-less fetch found no cluster, inserted a duplicate and
-            # tombstoned the original. A collision on UNIQUE (account_id,
+            # or not at all. Omitting them leaves rows whose
+            # stored identity disagrees with their own content, so a later
+            # reference-less fetch finds no cluster, inserts a duplicate and
+            # tombstones the original. A collision on UNIQUE (account_id,
             # identity_key, occurrence) raises here and rolls the whole plan
             # back; there is deliberately no retry that picks a different
             # occurrence, because reconcile already allocated above the new

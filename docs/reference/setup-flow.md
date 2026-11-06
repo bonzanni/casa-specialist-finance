@@ -212,8 +212,8 @@ them fails closed.
    inside the code, so what arrives is not what was sent — while others
    (casa-plugin-gmail, issue #19) deliver it byte-identical. The parser
    refuses visible mangling either way. The default therefore remains the
-   human ferry. What issue #11 changed
-   (2026-08-11): the operator may explicitly delegate the read, per send,
+   human ferry. What issue #11 changed:
+   the operator may explicitly delegate the read, per send,
    under the skill's ferry protocol — a defanged code is still final there,
    falling back to the manual paste. There is still no code that reads a
    mailbox; the boundary lives in the skill because the mailbox capability

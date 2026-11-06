@@ -859,7 +859,7 @@ class TestAStandingIncompletenessRecordSurvives(Base):
 
     def test_the_restore_does_not_reach_the_balances_row(self):
         # The restore names `resource='transactions'`, and that scope was held
-        # by nothing: dropping it survived the whole suite (mutation T15M-6).
+        # by nothing: dropping it survived the whole suite.
         # Unscoped, a TRANSACTIONS refresh writes the transactions record over
         # the BALANCES row — the row `tools_read._freshness_note` reads for
         # every balance answer, which would then carry a transactions cap as
