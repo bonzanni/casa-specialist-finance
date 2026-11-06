@@ -2,8 +2,8 @@
 """Refuse to ship this project's private development lineage.
 
 A reader of a public repository can verify what the code does. They cannot open
-a private design document, look up a numbered task, or find out who "sol" was
-and what a "round 4" finding said. Comments that cite those things state facts
+a private design document, look up a numbered task, or find out who a named
+reviewer was and what a numbered review round said. Comments that cite those things state facts
 this repository cannot substantiate, and they read as one person's private
 workspace regardless of whether any personal fact remains.
 

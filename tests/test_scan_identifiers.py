@@ -640,8 +640,8 @@ class NationalStructure(unittest.TestCase):
         generated from and a real published example BBAN for each country. This
         regenerates IBAN_BBAN from that notation and refuses any disagreement, so a
         character class cannot be edited -- or mis-generated -- without the evidence
-        moving with it. Review found the original change asserting these checks in a
-        commit message while shipping neither the inputs nor a way to repeat them."""
+        moving with it. A commit message asserting these checks would ship neither the
+        inputs nor a way to repeat them."""
         classes = {"n": "[0-9]", "a": "[A-Z]", "c": "[0-9A-Z]"}
         rows = 0
         for line in (ROOT / "scripts" / "iban-registry.txt").read_text().splitlines():

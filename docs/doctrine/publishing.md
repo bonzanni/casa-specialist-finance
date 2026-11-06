@@ -42,9 +42,8 @@ the site is not lineage.
 
 **INV-PUB-003** is the one no gate can enforce. It says what to do at the moment of
 writing a sentence you cannot check: stop. Not soften it, not restate it at a safe
-altitude, not attach a hedge — ask, or leave it out. Both times this repository's own
-design document broke the rule it did so by restating a number nobody re-derived,
-which is why the corpus generates every index it can rather than maintaining one by
+altitude, not attach a hedge — ask, or leave it out. The usual way to break it is to
+restate a number nobody re-derived, which is why the corpus generates every index it can rather than maintaining one by
 hand.
 
 ## How this applies to somebody else's software

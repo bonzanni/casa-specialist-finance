@@ -926,8 +926,8 @@ def _contain(conn, attempt: dict, session_id) -> bool:
 
     Called on EVERY non-live exit — the exchange raised, it declared no verdict,
     it declared one and bound nothing, or a previous collector was killed and a
-    later nudge finds `exchange_started`. It is the containment half of R3; the
-    prevention half is `_stage_ledger`, and the prevention is what makes this
+    later nudge finds `exchange_started`. It is the containment half of keeping
+    an unverified exchange off the ledger; the prevention half is `_stage_ledger`, and the prevention is what makes this
     small enough to be atomic.
 
     * `_quarantine` first, because the consent may exist at the bank without any

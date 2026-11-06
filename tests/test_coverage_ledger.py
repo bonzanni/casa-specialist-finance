@@ -304,9 +304,9 @@ class Synthetic(unittest.TestCase):
 class ToolRegistry(unittest.TestCase):
     """The tool surface is what the SERVER ANSWERS, not what its syntax suggests.
 
-    Four review rounds found four generations of the same defect in the syntactic
-    version, and a fifth in the version that read the registry by importing the
-    server's modules: importing every file REIMPLEMENTED startup, so a tool the
+    A syntactic version kept missing the next spelling of the same defect, and a
+    version that read the registry by importing the server's modules did too:
+    importing every file REIMPLEMENTED startup, so a tool the
     entrypoint registered itself was invisible and a module the entrypoint never
     imports could change what the gate read. These fixtures are therefore real
     servers, launched and asked `tools/list` over the protocol casa uses.

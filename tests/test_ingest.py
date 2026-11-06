@@ -338,8 +338,7 @@ class TestReferenceCapability(unittest.TestCase):
 
 class TestWindowedMatching(unittest.TestCase):
     def test_standing_order_does_not_erase_the_earlier_month(self):
-        """The case that breaks a multiset design, carried by two
-        spec revisions. A monthly standing order — identical amount, counterparty
+        """The case that breaks a multiset design. A monthly standing order — identical amount, counterparty
         and remittance — held as Jan/Feb/Mar and re-fetched as Feb/Mar/Apr gives
         multisets of equal size: no surplus, no deficit. A naive matcher pairs
         them off in order, rewrites all three dates and erases January."""
@@ -1510,7 +1509,7 @@ class TestMoneyBearingRewritesAreDisclosed(unittest.TestCase):
     covers neither field either, so the write reached the row only via
     `rekeyed`, which is why it would leave no trace anywhere.
 
-    Note what made this survivable for five rounds of measurement: every fuzz
+    Note what made this survivable under repeated measurement: every fuzz
     corpus used on this module inherited `row()`'s fixed `currency="EUR"` and
     `direction="DBIT"`, and a corpus that never varies a field cannot see a
     defect in it.

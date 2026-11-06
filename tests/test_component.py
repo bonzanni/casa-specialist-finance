@@ -64,7 +64,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / "plugins/bank-feed"
 PLUGIN_JSON = PLUGIN_DIR / ".claude-plugin/plugin.json"
 SKILL_MD = PLUGIN_DIR / "skills/bank-accounts/SKILL.md"
-# Second bundled plugin (a packaging decision 2026-08-05): the skill-only
+# Second bundled plugin: the skill-only
 # classifier ships in the same bundle.
 TX_PLUGIN_DIR = ROOT / "plugins/tx-classifier"
 BUNDLED_PLUGIN_DIRS = {"bank-feed": PLUGIN_DIR,
@@ -996,14 +996,13 @@ class TestPluginEnvDeclarations(unittest.TestCase):
         # sends the operator to write a plugin-env.conf line casa never
         # resolves, and reads perfectly plausibly in review.
         #
-        # THE EXEMPTION IS STRUCTURAL, and it took three review rounds to get
-        # here. Every earlier version exempted by TEXT SHAPE and was defeated
-        # by choosing a different shape:
+        # THE EXEMPTION IS STRUCTURAL. Exempting by TEXT SHAPE is defeated by
+        # choosing a different shape:
         #
-        #   r1  per physical LINE      -> split across two adjacent literals
-        #   r2  per STATEMENT          -> split across two `lines.append` calls
-        #   r3  "exact literal is OK"  -> `"%s …" % "CASA_BANKFEED_EB_APP_ID"`,
-        #                                 or `k = "…"` then interpolate `k`
+        #   per physical LINE      -> split across two adjacent literals
+        #   per STATEMENT          -> split across two `lines.append` calls
+        #   "exact literal is OK"  -> `"%s …" % "CASA_BANKFEED_EB_APP_ID"`,
+        #                             or `k = "…"` then interpolate `k`
         #
         # All three are reachable. A shape rule cannot work: the
         # author picks the shape. So the rule is now about the one PLACE the
@@ -1679,8 +1678,7 @@ class TestSkill(unittest.TestCase):
 
     def test_says_delete_all_data_now_withdraws_bank_access_for_real(self):
         # It issues a live DELETE /sessions per open consent. Without that,
-        # every operator-facing description of it written before that round
-        # says only that local data goes.
+        # an operator-facing description of it says only that local data goes.
         bullets = [b for b in self._bullets(8) if b.startswith("`delete_all_data`")]
         self.assertEqual(len(bullets), 1)
         self.assertIn("asks every bank to withdraw its consent", bullets[0])

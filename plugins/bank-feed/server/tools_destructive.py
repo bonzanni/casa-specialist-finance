@@ -1647,8 +1647,7 @@ def _erase_rows_and_copies(c, paths, erase, precheck=None):
     erased_backups, backups_warning, erase_op = None, None, None
     try:
         erase(c)
-        # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69; operator,
-        # 2026-09-27). Both erasers are ones an uninstall runs, and an erased
+        # THE LEDGER INSTANCE ID DOES NOT SURVIVE (issue #69). Both erasers are ones an uninstall runs, and an erased
         # ledger is not the same ledger emptied: a workflow bound to the old
         # id must see a different one. `erase` removed it (`ledger_instance`
         # is in neither eraser's `meta` whitelist); a new one is minted here,

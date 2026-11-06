@@ -12,7 +12,7 @@ The manifest's `.mcp.json` declares this credential as
 `CASA_BANKFEED_EB_CP_TOKEN` — that is the ONLY name production may read for
 it. `from_env()` below is the one place an `Admin` is constructed from the
 environment; a caller that instead does `Admin(os.environ["SOME_OTHER_NAME"])`
-would silently reintroduce the exact defect a previous round shipped
+would silently reintroduce a real defect
 (manifest declared `CASA_BANKFEED_EB_CP_TOKEN`, the admin client read
 `CASA_BANKFEED_EB_ADMIN_TOKEN`, so production could never populate the token
 the code actually read and tap 1 — whitelisting — could never start).

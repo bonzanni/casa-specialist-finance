@@ -774,11 +774,11 @@ def reconcile(stored: list, fetched: list, interval: tuple, capability: dict,
         the hash of its own current content. A corroborated reference match may
         change hashed content — an amount correction is the ordinary case — and
         when it does the row is RE-KEYED, which means `identity_key` and
-        `occurrence` move together, in the same update, or not at all. The
-        previous round emitted the new key and never reallocated the occurrence
-        (and apply never wrote either), so the row's stored identity disagreed
-        with its own content and a later reference-less fetch could insert a
-        duplicate and tombstone the original.
+        `occurrence` move together, in the same update, or not at all. Emitting
+        the new key without reallocating the occurrence (or apply not writing
+        either) leaves the row's stored identity disagreeing with its own
+        content, and a later reference-less fetch could insert a duplicate and
+        tombstone the original.
 
         The new occurrence is allocated above every occurrence ever issued in
         the NEW cluster (rule 4), and the row's OLD (identity_key, occurrence)

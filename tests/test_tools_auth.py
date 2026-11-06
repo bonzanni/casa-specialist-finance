@@ -773,8 +773,8 @@ class TestBackfillCompleteness(Base):
 
     Both signals must be affirmative FOR THIS SESSION. The failure this pins is
     not exotic: `flows.backfill`'s success path did not carry `capped` /
-    `completeness` at all until this round, so the plugin's own producer was
-    the one the old defaults waved through.
+    `completeness` at all once, so the plugin's own producer was the one the
+    old defaults waved through.
     """
 
     def test_neither_completeness_signal_may_be_assumed(self):
@@ -1523,8 +1523,8 @@ class TestRenewalWhenTheBankChangesTheAccountSet(Base):
 
     It is also not an exotic shape. A joint savings account opened at the same
     bank, a business sub-account, or a bank migrating a product to a new IBAN
-    all produce it, and before this round every instruction the plugin gave
-    afterwards sent the operator round the same loop.
+    all produce it, and an instruction that ignored it would send the operator
+    round the same loop.
     """
 
     def _linked(self, accounts=None):
@@ -1916,8 +1916,7 @@ class TestRateControlPrimitives(Base):
         # The age is a CONCRETE hour, deliberately not `INFLIGHT_TTL_S + 1`.
         # Deriving the fixture from the constant under test makes the test move
         # with it, so raising the TTL to a value that really would wedge an
-        # account still passes — the same fixture-blindness this round is
-        # closing everywhere else. The bound below states the property the
+        # account still passes, which is fixture-blindness. The bound below states the property the
         # number has to satisfy rather than restating the number.
         self.assertLessEqual(tools_auth.INFLIGHT_TTL_S, 3600,
                              "a single-flight claim that outlives a turn by "
@@ -3448,8 +3447,7 @@ class TestSetupCredentialRung(Base):
         self.assertIn("NOT stored", out)
         self.assertNotIn("rt-new", out)                  # never echoed
         self.assertIn("4.", out)                         # this run continues
-        # "Continues" has a MECHANISM, not just a sentence (review round
-        # 1): the proven token is primed into eb_admin, so _admin() and
+        # "Continues" has a MECHANISM, not just a sentence: the proven token is primed into eb_admin, so _admin() and
         # every later rung ride it in this process.
         import eb_admin
         self.assertIsNotNone(eb_admin._MINTER)

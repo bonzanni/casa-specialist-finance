@@ -55,7 +55,7 @@ class TestErasureStatus(DestructiveBase):
         self.assertEqual(out["erasure"], "incomplete")
 
     def test_an_unfinished_reclaim_is_incomplete(self):
-        """Design r1 (Astra): with the WAL held, a session id survives in
+        """With the WAL held, a session id survives in
         `-wal` though every row is gone — the reclaim's own verdict decides."""
         self.session()
         self.break_vacuum()
@@ -72,7 +72,7 @@ class TestErasureStatus(DestructiveBase):
         self.assertIn("WARNING", out["report"])
 
     def test_a_second_sweep_that_left_a_copy_is_incomplete(self):
-        """Diff r1 (Astra S2): a copy taken while the banks answered holds the
+        """A copy taken while the banks answered holds the
         destroyed session rows; when the second sweep cannot remove it, the
         erasure is not complete."""
         self.session()

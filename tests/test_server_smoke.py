@@ -324,7 +324,7 @@ class TestPluginManifest(unittest.TestCase):
 
 class TestPython311Compatible(unittest.TestCase):
     """The container runs Debian bookworm's Python 3.11; development happens
-    on a newer interpreter (this repair round: 3.14). 3.12+-only syntax (PEP
+    on a newer interpreter. 3.12+-only syntax (PEP
     695 type-parameter syntax, `except*`, etc.) parses cleanly and passes
     every test on the dev interpreter, then fails at IMPORT time inside the
     container -- surfacing as a dead MCP server with no failing test to point

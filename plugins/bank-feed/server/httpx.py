@@ -86,7 +86,7 @@ class Client:
                  max_bytes: int = 8 * 1024 * 1024) -> None:
         if "@" in host or "/" in host or ":" in host:
             # No {host!r} here: this branch is reached with userinfo-bearing
-            # hosts by construction (spec test), so the value is
+            # hosts by construction (a test does so), so the value is
             # credential-shaped and must never be echoed into an exception.
             raise NotAllowed("host must be a bare hostname")
         self.host = host

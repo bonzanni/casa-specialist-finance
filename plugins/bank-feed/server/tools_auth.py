@@ -2811,7 +2811,7 @@ def _bank_key(record) -> tuple:
     different case and internal spacing from the catalogue than from the
     session payload. Comparing raw strings would report drift that is not
     drift — and the obvious "fix" for that false alarm is to trust the returned
-    value, which is the exact substitution this repair removes.
+    value, which is the exact substitution this comparison exists to refuse.
     """
     return (" ".join(str(record.get("aspsp_name") or "").split()).casefold(),
             str(record.get("country") or "").strip().upper())
@@ -3179,7 +3179,7 @@ def _start_auth(c, aspsp: str, country: str, psu_type: str, purpose: str, *,
 
     An `account_id` naming an account we cannot resolve a generation for is a
     programming error, not a fence to skip: a renewal that silently minted an
-    unfenced attempt is precisely what this repair removes. It raises.
+    unfenced attempt is precisely what this must not do. It raises.
 
     The redirect URI is `entry["redirect_uri"]` — casa's own, discovered — for
     BOTH the mint and the provider call, and it is the same string
@@ -3888,7 +3888,7 @@ def _exchange(code: str, attempt: dict) -> None:
     # invisible to consent_status and unreachable by unlink_bank.
     CB.note_session(c, attempt, sid)
 
-    # ---- the returned session must be the bank we asked for (R4) ----------
+    # ---- the returned session must be the bank we asked for ---------------
     # Before verification, because everything downstream is about one bank and
     # this is the question "which bank?". A mismatch is not reconciled and not
     # trusted: the consent is left quarantined, revocable by its consent_ref,

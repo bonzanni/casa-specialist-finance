@@ -1,6 +1,5 @@
 # plugins/bank-feed/server/ebmode.py
-"""Which Enable Banking world this process lives in (sandbox-mode design,
-2026-08-06).
+"""Which Enable Banking world this process lives in.
 
 One authority, one spelling. Every mode-derived surface — the application
 name (`tools_auth`), the vault item names (`opvault`), the ledger filename

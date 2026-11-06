@@ -148,10 +148,9 @@ class WatchfulAIS(FakeAIS):
 
     The order of the two halves of `delete_all_data` is not observable from
     the outside on the success path — both halves finish, so every assertion
-    about the end state passes under either order. That is exactly why the
-    order was wrong for a round and no test noticed: the only path that
-    distinguished them was the failure path, and the test written for it
-    counted local rows.
+    about the end state passes under either order. That is exactly why a
+    wrong order can go unnoticed: the only path that distinguishes them is the
+    failure path, and a test written for it must not merely count local rows.
 
     So the double answers the ordering question directly, at the one instant
     it can be asked: how much of the local ledger was still there when the
@@ -333,8 +332,8 @@ class TestGate(DestructiveBase):
         self.assertEqual(self.ais.deleted, [])
 
     def test_no_tool_module_reads_the_undeclared_admin_token_name(self):
-        # The reader and the declaration drifted apart for a whole review
-        # round because nothing compared them.
+        # The reader and the declaration can drift apart unless something
+        # compares them.
         for name in ("tools_auth.py", "tools_destructive.py"):
             src = (SERVER_DIR / name).read_text("utf-8")
             self.assertNotIn("CASA_BANKFEED_EB_ADMIN_TOKEN", src, name)
@@ -780,7 +779,7 @@ class TestPurge(DestructiveBase):
             "SELECT booking_date FROM transactions")], ["2025-01-01"])
 
     def test_an_interval_spanning_the_cutoff_is_trimmed_to_start_at_it(self):
-        # The P0. record_coverage merges on write, so ONE interval
+        # The key case. record_coverage merges on write, so ONE interval
         # [2020, 2026) is exactly what a deep backfill leaves behind — and the
         # withdrawn purge left it completely untouched.
         self.account()
@@ -2237,7 +2236,7 @@ class TestReclaim(DestructiveBase):
         self.assertIn("reclaimed", second)
 
     def test_the_remedy_that_itself_fails_never_claims_the_reclaim(self):
-        # FOUND BY A SURVIVING MUTATION IN THIS ROUND, not by review. Flipping
+        # FOUND BY A SURVIVING MUTATION. Flipping
         # `_reclaim`'s failure branch from `return False` to `return True` was
         # killed by NOTHING across all 851 tests — because `ok` has exactly ONE
         # consumer in the plugin, `forget_local_account`'s not-found branch,

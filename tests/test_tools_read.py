@@ -929,10 +929,10 @@ class TestUnfencedFieldSweep(Base):
                           "also the join key every query filters on -- "
                           "corrupting it would silently exclude the row "
                           "rather than exercise it",
-            "uid": "must NEVER appear in output at all (spec S8.3), a "
+            "uid": "must NEVER appear in output at all, a "
                   "stricter property than fencing -- covered by "
                   "TestSecrecy, not this sweep",
-            "session_id": "must NEVER appear in output at all (spec S8.3), "
+            "session_id": "must NEVER appear in output at all, "
                           "bearer-equivalent -- covered by TestSecrecy, not "
                           "this sweep",
             "label": "OPERATOR's own text (protected label_account tool), "
@@ -974,7 +974,7 @@ class TestUnfencedFieldSweep(Base):
             "amount_minor": "INTEGER column",
             "currency": "validated by _safe_currency, not fenced -- see "
                         "TestCurrencyValidation",
-            "raw_json": "must NEVER appear in output at all (spec: no raw "
+            "raw_json": "must NEVER appear in output at all (no raw "
                        "provider payload), a stricter property than "
                        "fencing -- not selected by any tool",
             "first_seen": "timestamp written by our own code",

@@ -1089,8 +1089,8 @@ def list_transactions(args: dict) -> str:
     # ONE read transaction (WAL snapshot) around every query this answer is
     # assembled from: the count, the page, the annotation lookups, the
     # review-reason counts and the coverage holes must describe the SAME ledger
-    # state. Review reproduced a supersede landing between the count and the
-    # page on the old autocommit reads: the tool answered "Showing 0 of 1
+    # state. A supersede landing between the count and the page on autocommit
+    # reads would make the tool answer "Showing 0 of 1
     # matching rows — the rest were truncated", a false truncation and an
     # internal contradiction in one line. Formatting stays outside the
     # transaction; only reads happen inside it.
@@ -1181,8 +1181,8 @@ def list_transactions(args: dict) -> str:
         # that enforcement lives in a module this one does not import, so
         # nothing HERE stops a row that reached the ledger some other way from
         # carrying arbitrary text into this exact print site — the same
-        # "incidental, not explicit" shape as the currency finding this round
-        # closed). All three fenced, the same as counterparty/remittance.
+        # "incidental, not explicit" shape as an unvalidated currency). All three
+        # fenced, the same as counterparty/remittance.
         extra = ""
         own, foreign = _split_tags(tags_by_row.get(r["row_id"], []))
         if own:
