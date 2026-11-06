@@ -49,7 +49,8 @@ PROTOCOL_VERSION = 2
 #: of a `.collect-*` inode, or how `publish_result` constructs a result record.
 #: Both can change while all three halves keep passing. This is a
 #: BEST-AVAILABLE check, NOT a protocol version; the real fix is a dedicated
-#: callback-consumer protocol constant in casa, which casa#401 asks for.
+#: callback-consumer protocol constant in casa, which casa#401 decided on and
+#: casa does not export yet.
 EXPECTED_SCHEMAS = (
     ("callback_attempts", "SCHEMA_VERSION", 1),      # the attempt record
 )

@@ -26,12 +26,13 @@ A tool is only usable if it appears in all four of:
    required by casa v0.290.0 and later, of what each tool's result carries. A non-setup
    tool absent from it is refused by casa **before it runs**; a plugin with no
    declaration at all has every tool but its setup tool refused. Every bank-feed entry but
-   one is `{"result": "safe"}`: no tool returns a credential that another bank-feed tool
+   two is `{"result": "safe"}`: no tool returns a credential that another bank-feed tool
    could redeem through casa's escrow. `link_bank` is a `capability` that `delivers` its
    one slot, `approval_link`, as an `operator_link` (casa v0.318.0 and later): the link
    the operator must open is handed to casa, which posts it in their chat, and the result
-   carries only casa's reference. `register(..., capability=True)` marks the same tool in
-   the registry, and the dispatcher then reports anything but its JSON object as a tool
+   carries only casa's reference. `daily_sync` is a `capability` that `delivers` its one
+   slot, `notice`, as an `operator_message`. `register(..., capability=True)` marks the
+   same two tools in the registry, and the dispatcher then reports anything but its JSON object as a tool
    error. `reference/casa-compatibility.md` has the protocol.
 
 A tool missing from the third is unreachable; a name in the third that nothing registers
