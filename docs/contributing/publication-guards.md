@@ -133,20 +133,25 @@ files:
   `.github/workflows/release.yml`, which runs after both `ci` and `no account data` have
   concluded success on a push to main and pushes a lightweight tag — a ref straight to
   that commit, no tag object, no annotation, no tagger — named `v` plus the
-  MAJOR.MINOR.PATCH in `manifest.json` and nothing else: no GitHub Release, no notes. It
+  MAJOR.MINOR.PATCH in `manifest.json` and nothing else. It
   pushes with the repository's only deploy key, `release-tag`, whose private half is a
-  secret of the `release` environment that only a job running from `main` may enter; the
-  job's own token is read-only. Four rulesets on the repository hold that shape:
+  secret of the `release` environment that only a job running from `main` may enter; that
+  job's own token is read-only. Rulesets on the repository hold that shape:
   `no-tag-creation` refuses tag creation to every actor except a deploy key,
-  `no-tag-mutation` refuses moving or deleting a tag to everyone, and
-  `branch-creation-restricted` with `branch-update-restricted` keep every branch
-  creation, update, deletion and force-push to the repository admin, so the key is
-  tag-only. The boundary this rests on: every workflow on main is code that passed this
+  `no-tag-mutation` refuses moving or deleting a tag to everyone,
+  `branch-creation-restricted` and `branch-no-force-push-or-deletion` keep branch creation,
+  deletion and force-push to the repository admin, and `main-via-pull-request` lets `main`
+  change only through a pull request whose `check` and `scan` passed. The boundary this
+  rests on: every workflow on main is code that passed this
   gate, and a workflow on main that declared the environment could read the key — the
   environment limits retrieval, not use. A key copied out of a run is a compromise, and
-  the remedy is to replace the deploy key and the secret. What this does not cover: a
-  GitHub Release or its notes is a GitHub-side text surface, like an issue, and nothing
-  here creates or reads one.
+  the remedy is to replace the deploy key and the secret.
+  A second job in the same workflow publishes the GitHub release for that tag, marked
+  latest, which is what casa's `latest` resolves to. It holds no key, checks nothing out,
+  never creates a tag, and its token writes contents only because creating a release
+  needs that. A release and its notes are a GitHub-side text surface no sweep reads, so
+  the notes are fixed text in the workflow plus the validated tag name. A later commit on
+  main at the same version publishes the release if it is missing.
 - **The destination branch name**, checked before any commit enumeration. Pushing
   already-published objects under a new name introduces no commits at all, so a check
   placed after the enumeration never runs for the one case it exists for.

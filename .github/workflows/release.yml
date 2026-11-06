@@ -1,5 +1,6 @@
 # Cut the release tag for a version that reached main — the ONE route by which
-# a tag can exist in this repository.
+# a tag can exist in this repository — and publish the GitHub release casa's
+# `latest` resolves to.
 #
 # The publication posture is that nothing reaches GitHub that the sweeps have
 # not read. A tag pushed by a person carries an annotation, a tagger identity
@@ -10,12 +11,20 @@
 # which only a job running from `main` may enter; its token is read-only. What
 # this job pushes is a lightweight tag — a ref pointing straight at a commit,
 # with no tag object, no annotation and no tagger — whose name is `v` plus the
-# MAJOR.MINOR.PATCH in manifest.json, and nothing else: no GitHub Release, no
-# notes, no text read from the tree. The commit must be on main, and both `ci`
+# MAJOR.MINOR.PATCH in manifest.json, and nothing else: no text read from the
+# tree. The commit must be on main, and both `ci`
 # and `no account data` must have concluded success on it as push runs of this
 # repository. Branch rulesets keep the same key off every branch: it cannot
 # create one, `main` changes only through a pull request whose `check` and `scan`
 # passed, and no branch can be force-pushed or deleted. Its only write is a tag.
+#
+# The `release` job then publishes the GitHub release for that tag. It holds no
+# key and never enters the environment. Its token can write contents, so it checks
+# nothing out and runs nothing from the tree, and the rulesets refuse that token a
+# new tag or branch and a direct change to main. Its notes are the fixed text below
+# plus the validated tag name, so no text from the tree reaches GitHub unswept. It
+# also runs when the tag already exists, so a later commit on main at the same
+# version publishes a release that is missing.
 #
 # The boundary this rests on, stated plainly: every workflow on main is code
 # that passed the push gate, and any workflow on main that declared this
@@ -46,6 +55,8 @@ jobs:
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     environment: release
+    outputs:
+      tag: ${{ steps.admit.outputs.tag }}
     permissions:
       contents: read
       actions: read # read the other workflow's runs for this commit
@@ -62,7 +73,8 @@ jobs:
       - name: Admit the commit
         # Fail-closed: every API error is an error. The only quiet exit is
         # "the other scan has not concluded yet", which happens before any
-        # credential is touched. Sets `eligible=1` for the steps below.
+        # credential is touched. Sets `tag` for the release job, and
+        # `eligible=1` when the tag still has to be pushed.
         id: admit
         run: |
           set -euo pipefail
@@ -97,6 +109,7 @@ jobs:
           PY
           )
           TAG="v${VERSION}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           existing=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
           if [ -n "$existing" ]; then
@@ -104,7 +117,6 @@ jobs:
             exit 0
           fi
           echo "eligible=1" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Push the tag with the release deploy key
         if: steps.admit.outputs.eligible == '1'
@@ -143,3 +155,47 @@ jobs:
       - name: Remove the key
         if: always()
         run: rm -rf "$RUNNER_TEMP/release-ssh"
+
+  release:
+    name: Publish the GitHub release
+    # Skipped when the tag job was skipped or failed, or admitted no version.
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.tag.outputs.tag }}
+    steps:
+      - name: Publish the release for the tag
+        # --verify-tag: this job never creates a tag. The create result is
+        # advisory, like the tag push — the other firing may have won — so the
+        # release is re-read afterwards and must exist.
+        run: |
+          set -euo pipefail
+          R="$GITHUB_REPOSITORY"
+          if gh release view "$TAG" --repo "$R" >/dev/null 2>&1; then
+            echo "$TAG already has a release"
+            exit 0
+          fi
+          # GitHub makes every new release latest unless told otherwise; a late run
+          # for an older version must not move latest backwards.
+          # Only a confirmed "no release yet" counts as none; any other failure stops here.
+          if ! current=$(gh release view --repo "$R" --json tagName --jq .tagName 2>"$RUNNER_TEMP/lookup.err"); then
+            grep -q "release not found" "$RUNNER_TEMP/lookup.err" || { cat "$RUNNER_TEMP/lookup.err" >&2; exit 1; }
+            current=""
+          fi
+          make_latest=true
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$TAG" | sort -V | tail -1)" != "$TAG" ]; then
+            make_latest=false
+          fi
+          gh release create "$TAG" --repo "$R" --verify-tag --latest="$make_latest" \
+            --title "$TAG" \
+            --notes "casa-specialist-finance $TAG. README.md at this tag says what it needs and how to install it." \
+            || echo "create refused; checking what exists"
+          gh release view "$TAG" --repo "$R" --json tagName,isDraft \
+            --jq 'if .isDraft then error("draft") else .tagName end'

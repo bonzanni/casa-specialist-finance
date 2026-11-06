@@ -29,14 +29,20 @@ Everything is installed and versioned as one bundle with pinned content digests.
 | **casa** | v0.347.0 or later. The role grants casa's memory tools (`search_memory`, `browse_memory_day`, `open_memory`), which a specialist may hold from v0.347.0; an older casa refuses the install or upgrade before asking for consent, naming those grants. Nothing else declares the version, and no casa source ships here — `docs/reference/casa-compatibility.md` gives the floor and why. |
 | **Python** | 3.11. The plugin runtime uses no third-party packages at all. |
 | **An Enable Banking account** | The setup tool registers the *application* for you. Signing in to the provider's control panel to authorize that is the step it cannot do. |
-| **1Password** | A service account and a vault, both configured in casa (its `onepassword_service_account_token` and `onepassword_default_vault` app options). The plugin forges and stores its own credentials in that vault; the vault is the one thing you choose. |
+| **1Password** | A service account and a vault, both configured in casa (its `onepassword_service_account_token` and `onepassword_default_vault` app options); without them casa withholds `bank-feed`. The plugin forges and stores its own credentials in that vault; the vault is the one thing you choose. |
 | **A bank Enable Banking covers** | And the ability to complete strong customer authentication for the accounts you link. |
 
 ## Installing
 
+Ask casa's assistant in chat, for example: *"Install the finance specialist from
+bonzanni/casa-specialist-finance"*. Casa's configurator takes the latest published release
+and tells you what it brings, and one consent message covers the specialist, its persona
+and both plugins. Approve it and the assistant can delegate to the specialist. To update
+later, ask the assistant to upgrade the finance specialist; it asks for consent the same way.
+
 This repository is the component, not an installer: casa installs and versions it, and
-casa's configurator wires the credentials setup provisions. Once it is installed, run
-the setup tool. It is argument-free and idempotent — re-run it any time:
+casa's configurator wires the credentials setup provisions. Once it is installed, ask the
+specialist to run its setup tool. It is argument-free and idempotent — re-run it any time:
 
 ```
 setup_bank_feed
@@ -57,10 +63,9 @@ references it needs wired rather than reporting success.
 Then link a bank with `link_bank`. That takes two approvals: the account is added
 to your Enable Banking application, and then you authorize it at your bank. Each
 link arrives from casa itself, in your chat with the assistant, never in a task
-topic; this needs casa v0.318.0 or later.
+topic.
 
-Then ask casa's configurator for the daily sync, a job trigger on the assistant (casa
-v0.344.39 or later):
+Then ask casa's configurator for the daily sync, a job trigger on the assistant:
 `name: bank-sync, type: cron, schedule: "0 7 * * *", channel: telegram, job: "bank-feed:daily-sync"`.
 Every linked bank with an included account then syncs once a day without a finance conversation. The run is
 silent; you hear from it only when a bank needs you (its consent ended or expired, or it
@@ -74,13 +79,13 @@ instead of real accounts.
 ## Scope limits, stated up front
 
 - **Read-only account information.** No payments, no transfers, no standing orders.
-- **Transaction identity is currently heuristic.** Where a bank supplies stable
-  transaction references, the code can use them as identity — but that path depends on
-  a per-installation capability record, and **none ships**. In every installation today
-  matching falls back to windowed nearest-date heuristics. This is deliberate: an
-  earlier version shipped one household's measurements as every installation's
-  defaults, which is worse. Earning that trust locally is designed and not built, and
-  is tracked as [issue #1](https://github.com/bonzanni/casa-specialist-finance/issues/1).
+- **Transaction identity starts out heuristic, and references have to earn their way in.**
+  Where a bank supplies stable transaction references, the code can use them as identity,
+  but only for an account this installation has measured itself: a deep read at linking or
+  renewal showing at least 100 distinct referenced transactions over 180 days with no reuse.
+  No such evidence ships, because an earlier version shipped one household's measurements
+  as every installation's defaults, which is worse. Until an account earns it, and for any
+  bank that cannot show it, matching uses windowed nearest-date heuristics.
   `docs/architecture/ingestion-and-identity.md` explains what this costs.
 - **"Paged to exhaustion" is not "we have everything."** The ledger records which date
   ranges it has actually observed, so it can distinguish "this range was read" from

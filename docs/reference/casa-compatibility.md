@@ -34,38 +34,6 @@ compared against the real symbol. Without a checkout, the suite checks only that
 the copies and this table agree with each other — which catches drift between
 them, and nothing about casa.
 
-`bank-feed` declares `delete_all_data` as its eraser (`casa.eraseTool`); casa
-v0.329.0 is the first that reads that key and offers to erase the data at uninstall.
-An older one ignores it, so the floor below is unchanged by it.
-
-It also declares `delete_data_keep_signins` as its data-only eraser
-(`casa.eraseDataOnlyTool`). casa v0.331.0 is the first that reads that key and offers
-"Erase data, keep sign-ins" at uninstall (ha-casa-app#1067). An older one reads the
-`casa` keys it knows one by one and ignores this one. The tool is then an ordinary
-protected tool, and the floor below is unchanged.
-
-`bank-feed` declares a sign-in drop-off (`casa.dropOffs: ["signin_link"]`);
-casa v0.330.0 is the first that reads that key and gives the assistant
-`vault_drop_off`, which stores a sign-in link there instead of in a delegation
-brief (ha-casa-app#1047). An older one ignores the key, and `bank_feed_signin`
-still takes a link passed as `signin_link`, so the floor below is unchanged.
-
-`tx-classifier` declares its classification workflow as a background job
-(`casa.jobs`); casa v0.321.0 is the first that reads that key, and an older one
-ignores it, so the declaration raises nothing and the floor below is unchanged. Its
-batch report passes `progressed`, which casa v0.323.0 made required and made the
-whole stuck judgment (ha-casa-app#1031); v0.321.0 and v0.322.x do not declare the
-argument and ignore it. Job mode applies only to a turn that names this job, "Classify
-transactions": a batch of another job hosted by the same specialist, for example one
-whose `sync` brings the skill in, classifies inline and never reports into that job or
-completes it.
-
-Finance holding Gmail read-only needs casa v0.340.2 or later (profiles arrived in v0.338.0, and v0.340.2 records one even for a session Gmail was withheld from). From 0.25.0 the role no
-longer denies Gmail's write tools itself: casa's read profile on the assignment does. An
-install where Gmail is assigned to finance migrates first, in the order
-[the tool surface](tool-surface.md#what-else-the-role-grants) gives. The floor below is
-unchanged, because finance works without Gmail.
-
 The component **requires casa >= v0.347.0**. From 0.27.0 the role grants casa's three
 memory reads, `mcp__casa-framework__search_memory`,
 `mcp__casa-framework__browse_memory_day` and `mcp__casa-framework__open_memory`, in
@@ -80,14 +48,20 @@ finance 0.26.x or older strips its `recall_memory` grant at load with a warning,
 classifier runs without a memory rung. So casa moves to v0.347.0 first, then finance to
 0.27.0.
 
-The older floors still hold inside that one. The environment-declaration rows below
-do not exist before v0.155.0, and before v0.318.0 casa refuses bank-feed's manifest
-outright: `link_bank` declares `delivers` (below), a member an older casa's
-result-contract validator does not know, so it rejects the declaration as malformed
-(`result_contract_invalid`) and the plugin is excluded rather than half-loaded.
-Before v0.344.39 casa refuses the daily job's declaration the same way
-(`casa.jobs invalid`, for `quietWhenScheduled`), and the delivery `key` the daily
-notice carries is honoured from that version on.
+Everything else this component declares reached casa before that floor, so any casa
+that accepts the role reads it: the erasers (`casa.eraseTool`, `casa.eraseDataOnlyTool`),
+the sign-in drop-off (`casa.dropOffs`, which gives the assistant `vault_drop_off`), and
+the background jobs (`casa.jobs`).
+
+Job mode applies only to a turn that names the classifier's job, "Classify
+transactions": a batch of another job hosted by the same specialist, for example one
+whose `sync` brings the skill in, classifies inline and never reports into that job or
+completes it.
+
+The role denies no Gmail tool: finance holds Gmail read-only through casa's read profile
+on the assignment. An install where Gmail is assigned to finance migrates first, in the
+order [the tool surface](tool-surface.md#what-else-the-role-grants) gives. Finance works
+without Gmail.
 
 **Nothing declares that requirement as a version.** There is no version field in
 the plugin manifest and no handshake: this page, `README.md` and the plugins' READMEs
@@ -145,8 +119,8 @@ shaped as it is:
   surface it calls, and the one TTL constant it copies. That is a
   best-available check, not a version handshake: the hold semantics of a
   `.collect-*` inode and the construction of a result record can both change
-  while all three halves keep passing. A dedicated protocol constant is asked
-  for in casa's own issue tracker (`casa#401`).
+  while all three halves keep passing. A dedicated protocol constant was decided on in
+  casa's own issue tracker (`casa#401`), but casa does not export one yet.
 
 `RESULT_TTL_S` is the only casa constant `callbacks.py` duplicates, and it is
 derived from the gate's own tuple rather than written out twice, so the copy
@@ -175,8 +149,7 @@ label, in the operator's chat), keyed with casa's delivery `key` so the same not
 posted once (casa v0.344.39), and returns `{"notice": null, "text": ...}`, casa's
 no-post shape, when there is nothing to say. `link_bank` produces the link the operator must open
 (the bank's approval, or in production first the Enable Banking whitelist page),
-and casa v0.318.0 added the declaration that lets casa deliver such a link itself
-(ha-casa-app#1015):
+and this declaration has casa deliver that link itself:
 
 ```json
 "link_bank": {"result": "capability", "provides": ["approval_link"],
@@ -199,8 +172,7 @@ carries no reference. The values the deposit copies from casa are the
 `result_broker` rows of the table above.
 
 `tests/test_server_smoke.py` holds the declaration to the live `tools/list` of a
-launched server. The declaration is why the component's floor was casa >= v0.318.0; the daily job
-raised it to v0.344.39.
+launched server.
 Under casa v0.290.0 or later, the declaration is what makes any tool but
 `setup_bank_feed` run at all.
 
@@ -213,10 +185,8 @@ file. `plugins/bank-feed/server/casa_handoff.py` is casa's `casa_handoff.py`
 defaulting to `/data/handoff`, and publishes under `bank-feed/`. The folder
 keeps a file for 7 days and refuses a new one when full; it never evicts one.
 
-That is the one tool that needs **casa >= v0.326.0**; the component's floor for
-everything else is unchanged. Under an older casa the folder does not exist:
-`publish` raises `handoff_unavailable`, and `export_history` answers that the
-export could not be written, naming the reason, and returns no path.
+When the folder is missing or full, `publish` raises and `export_history` answers
+that the export could not be written, naming the reason, and returns no path.
 
 ## How this stays true
 
