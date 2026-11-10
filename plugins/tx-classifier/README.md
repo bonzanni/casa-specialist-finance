@@ -17,6 +17,14 @@ always present by construction (same bundle), and the role's existing
 `requires: {plugins: [bank-feed], ...}` launch gate keeps the specialist
 from ever running without the substrate.
 
+## The background job
+
+The manifest declares one casa job, "Classify transactions", which the
+assistant can start. It needs **casa v0.355.0 or later**: the job is one
+long session that works the queue in chunks of 25 rows, posts a progress
+line after each and completes when the workable queue is empty. An older
+casa refuses the declaration, which carries no batch fields.
+
 ## Role grants it relies on
 
 `role/role.yaml` `tools.allowed` carries `WebSearch` (evidence-ladder

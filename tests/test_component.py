@@ -205,6 +205,15 @@ SPECIALIST_CASA_TOOLS = sorted({
     "search_memory", "browse_memory_day", "open_memory", "ack_event",
     "get_schedule", "send_media",
 })
+#: casa contract: plugin_store — the fields a background job may declare
+# casa v0.355.0 runs a background job as one long session and removed the
+# batch fields (`batches`, `turnsPerBatch`, `session`). The check is strict: a
+# `casa.jobs` entry carrying any field outside this set is `jobs_invalid`, and
+# the plugin is refused at install or excluded once installed. A set in casa,
+# so the copy is kept sorted.
+JOB_FIELDS = sorted({
+    "name", "skill", "title", "summary", "host", "quietWhenScheduled",
+})
 
 
 # The result_broker values `plugins/bank-feed/server/casa_broker.py` copies to
@@ -231,6 +240,7 @@ CASA_COPIES = {
     ("plugin_callbacks.py", "MAX_EFFECTIVE_LEN"): MAX_EFFECTIVE_LEN,
     ("specialist_install.py", "_MCP_JSON_VAR_RE"): MCP_JSON_VAR_RE.pattern,
     ("specialist_component.py", "SPECIALIST_CASA_TOOL_ALLOWLIST"): SPECIALIST_CASA_TOOLS,
+    ("plugin_store.py", "_JOB_FIELDS"): JOB_FIELDS,
     ("result_broker.py", "ENV_CLIENT"): casa_broker.ENV_CLIENT,
     ("result_broker.py", "ENV_SOCKET"): casa_broker.ENV_SOCKET,
     ("result_broker.py", "_REF_RE"): casa_broker.REFERENCE_RE.pattern,
@@ -539,6 +549,19 @@ class TestManifestDependency(unittest.TestCase):
                 {"type": "bundled",
                  "path": "plugins/%s" % dep["identifier"]})
             self.assertRegex(dep["digest"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_every_declared_job_carries_only_fields_casa_accepts(self):
+        # One stray field refuses the whole plugin, not just the job. Both
+        # bundled plugins declare a job.
+        declared = 0
+        for name, tree in sorted(BUNDLED_PLUGIN_DIRS.items()):
+            man = json.loads((tree / ".claude-plugin/plugin.json")
+                             .read_text(encoding="utf-8"))
+            for job in man.get("casa", {}).get("jobs", []):
+                declared += 1
+                self.assertEqual(sorted(set(job) - set(JOB_FIELDS)), [],
+                                 "%s job %s" % (name, job.get("name")))
+        self.assertEqual(declared, 2)
 
     def test_the_pinned_digest_is_the_digest_of_the_tree_it_points_at(self):
         # `specialist_install.py:497` computes `"sha256:" + content_checksum(

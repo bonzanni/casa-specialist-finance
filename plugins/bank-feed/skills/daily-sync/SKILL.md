@@ -11,14 +11,13 @@ This job runs once a day, usually started by a schedule and unseen. Its whole wo
 tool call; the tool decides whether the operator needs to hear anything and hands that
 notice to Casa itself.
 
-On the launch turn, acknowledge in one line and do nothing else.
-
-On a batch turn:
+The job is one turn:
 
 1. Call `daily_sync` once, with no arguments.
-2. Call `report_job_progress` with a one-line summary taken from the tool's `text`
-   (or its error) and `progressed=true`.
-3. Call `emit_completion` with `status="ok"` and that same line as its `text`.
+2. Call `emit_completion` with `status="ok"` and, as its `text`, one line taken from the
+   tool's `text` (or its error). If `emit_completion` is refused because a message has not
+   reached you yet, read the message that arrives, then call `emit_completion` again. Do
+   not call `daily_sync` again.
 
 Then end the turn without writing anything. Do not retry the sync, call `sync`, start a
 re-link or write to the operator: a failed sync is retried by tomorrow's run, and a bank
