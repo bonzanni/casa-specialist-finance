@@ -24,7 +24,6 @@
     "jobs": [
       {"name": "daily-sync", "skill": "daily-sync", "title": "Bank sync",
        "summary": "Syncs every linked bank; speaks only when a bank needs the operator",
-       "batches": 2, "turnsPerBatch": 8, "session": "fresh",
        "host": "specialist", "quietWhenScheduled": true}
     ],
     "resultContract": {

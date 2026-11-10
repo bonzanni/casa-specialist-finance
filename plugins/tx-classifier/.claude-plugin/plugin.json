@@ -8,9 +8,7 @@
       "name": "classify-transactions",
       "skill": "classify-transactions",
       "title": "Classify transactions",
-      "summary": "Tag untagged transactions in batches, park the ones that need the operator, keep the rulebook current",
-      "batches": "unlimited",
-      "turnsPerBatch": 30
+      "summary": "Tag untagged transactions, park the ones that need the operator, keep the rulebook current"
     }]
   }
 }

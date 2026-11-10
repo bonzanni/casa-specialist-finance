@@ -136,12 +136,14 @@ machine the classifier owns. Rules cannot mint them.
 
 `tx-classifier` is a skill, and nothing else: no server, no storage, no MCP
 configuration. Its manifest declares one casa key, `casa.jobs`, naming that skill as
-the background job "Classify transactions" (unlimited batches, 30 turns each): from
-casa v0.321.0 the assistant can start it, and casa then drives one batch per turn in
-the specialist's own topic until the workable queue is empty. A casa before v0.321.0
-ignores the declaration and the workflow runs as it always has. It is bundled as a dependency of the same component, so `bank-feed` is
-always present by construction, and the role's launch gate refuses to start the
-specialist without it.
+the background job "Classify transactions": the assistant can start it, and the job
+is then one long session in the specialist's own topic, working the queue in chunks of
+25 rows with a progress line after each, until the workable queue is empty and the
+skill completes it. The declaration carries only the fields casa v0.355.0 accepts
+(`JOB_FIELDS` in [the compatibility contract](../reference/casa-compatibility.md)).
+It is bundled as a dependency of the same component, so `bank-feed` is always present
+by construction, and the role's launch gate refuses to start the specialist without
+it.
 
 What the classifier does with bank-feed's primitives:
 

@@ -24,10 +24,11 @@ rather than guess a world. Neither is reachable unless those two are wired
 through `op://`, which nothing here asks for — the CP token is pasted and
 the mode is a plain word.
 
-**Requires casa v0.347.0 or later**, the floor of the finance specialist this
-plugin ships in: the role grants casa's memory tools, which an older casa refuses
-at install (`docs/reference/casa-compatibility.md`). Within that floor, the daily
-job (`daily-sync`, issue #110) declares `quietWhenScheduled`, and its notice
+**Requires casa v0.355.0 or later**, the floor of the finance specialist this
+plugin ships in (`docs/reference/casa-compatibility.md`). The daily job
+(`daily-sync`, issue #110) uses the job declaration casa v0.355.0 introduced, with
+no batch fields, which an older casa refuses; the job is one turn that calls
+`daily_sync` and completes. It declares `quietWhenScheduled`, and its notice
 relies on casa's delivery `key`. It also relies on the `casa.setupProvides`
 declaration and on defaulted references being shippable in a bundled plugin
 tree (casa v0.155.0, issue #4). It also relies on casa delivering the link

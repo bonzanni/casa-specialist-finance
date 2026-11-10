@@ -174,20 +174,21 @@ class TestSkill(unittest.TestCase):
         return " ".join(m.group(1).split())
 
     def test_job_mode_is_keyed_on_this_jobs_own_name(self):
-        # The specialist hosts other plugins' jobs, and their batches can run
-        # `sync`, whose trailer loads this skill. Job mode must key on THIS
-        # job's name, as casa's launch and batch turns spell it, or a
-        # quarterly batch reports into, and completes, the wrong job.
+        # The specialist hosts other plugins' jobs, and they can run `sync`,
+        # whose trailer loads this skill. Job mode must key on THIS job's
+        # name, as the first line of casa's brief spells it (and its
+        # post-compaction header repeats it), or another job's session
+        # reports into, and completes, the wrong job.
         job = json.loads(MANIFEST.read_text(encoding="utf-8"))["casa"]["jobs"][0]
         section = self._job_section()
-        self.assertIn('You are starting the background job "%s" (skill %s)'
+        self.assertIn('You are running the background job "%s" (skill %s).'
                       % (job["title"], job["skill"]), section)
-        self.assertIn('Batch N of "%s": continue the job.' % job["title"],
-                      section)
+        self.assertIn("`Job id:`", section)
+        self.assertNotIn("Batch N of", section)
         self.assertNotIn("in a job when the turn casa sent you says so",
                          section)
 
-    def test_another_jobs_batch_neither_reports_nor_completes(self):
+    def test_another_job_neither_reports_nor_completes(self):
         section = self._job_section()
         other = re.search(r"\*\*Another job is not this job\.\*\*(.*?)"
                           r"In this job, and only there:", section)
@@ -196,21 +197,59 @@ class TestSkill(unittest.TestCase):
                       other.group(1))
         outside = re.search(r"Outside this job (.*)$", section)
         self.assertIsNotNone(outside)
-        self.assertIn("a batch of another job", outside.group(1))
+        self.assertIn("or another job", outside.group(1))
         self.assertIn("call neither `report_job_progress` nor "
                       "`emit_completion`", outside.group(1))
 
-    def test_batch_report_carries_progressed(self):
-        # casa (#1031, v0.323.0) requires `progressed` and refuses a report
-        # without it; its stuck guard reads that flag, not `remaining`.
+    def test_the_job_paces_itself_in_chunks_with_a_counted_progress_line(self):
+        # casa v0.355.0 runs the job as one long session: the skill sets its
+        # own pace. A chunk of 25 rows, then a progress line whose counts the
+        # operator sees. The batch report and its `progressed` flag are gone
+        # from casa, so the skill must not ask for them.
         section = self._job_section()
-        report = re.search(r"\*\*end the batch with the report\*\*(.*?)"
-                           r"\*\*when the workable queue is empty\*\*", section)
-        self.assertIsNotNone(report)
-        self.assertIn("`report_job_progress` with a one-line `summary` and "
-                      "`progressed`", report.group(1))
-        self.assertIn("`progressed: false` end the job", report.group(1))
-        self.assertNotIn("without `remaining` falling", section)
+        chunk = re.search(r"\*\*work the queue in chunks of 25, without "
+                          r"ending your turn\.\*\*(.*?)"
+                          r"\*\*when the workable queue is empty\*\*", section)
+        self.assertIsNotNone(chunk)
+        self.assertIn("at most 25 workable rows", chunk.group(1))
+        self.assertIn("`report_job_progress` with a one-line `summary`, "
+                      "`done`", chunk.group(1))
+        self.assertIn("`remaining`", chunk.group(1))
+        for gone in ("progressed", "one batch per turn",
+                     "end the batch with the report", "between batches"):
+            self.assertNotIn(gone, section)
+        self.assertIn("read the message that arrives, then complete",
+                      section)
+
+    def test_step_0_stops_only_outside_the_job(self):
+        # casa v0.355.0 nudges a job whose turn ends unfinished once, then
+        # parks it. Step 0's "report its count and stop" is right for a
+        # sync trailer or a reminder pass, but in the job it would end the
+        # turn after every 25 rows and park the job with rows left. The stop
+        # must be scoped to outside the job, and the job must keep going.
+        _, body = self._parts()
+        m = re.search(r"## Step 0 — scope the batch\n(.*?)\n## ", body,
+                      re.DOTALL)
+        self.assertIsNotNone(m)
+        step0 = " ".join(m.group(1).split())
+        stop = re.search(r"Outside the job, the remainder is \*deferred, not "
+                         r"drained\*: report its count and stop;(.*?)"
+                         r"until the workable queue is empty\.", step0)
+        self.assertIsNotNone(stop)
+        self.assertIn("In the job, the remainder is the next chunk",
+                      stop.group(1))
+        self.assertIn("without ending your turn", stop.group(1))
+        self.assertEqual(step0.count("report its count and stop"), 1)
+        section = self._job_section()
+        self.assertIn("keep going chunk after chunk until the workable queue "
+                      "is empty", section)
+        self.assertIn("End your turn only when the job is finished", section)
+
+    def test_the_job_declares_no_batch_fields(self):
+        job = json.loads(MANIFEST.read_text(encoding="utf-8"))["casa"]["jobs"][0]
+        for gone in ("batches", "turnsPerBatch", "session"):
+            self.assertNotIn(gone, job)
+        self.assertNotIn("batches", job["summary"])
 
 
 if __name__ == "__main__":

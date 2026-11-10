@@ -77,55 +77,50 @@ actions.
 ## Running as a Casa background job
 
 casa can run this workflow as a background job ("Classify transactions"):
-the operator asks the assistant, casa opens your topic and drives one
-batch per turn until you finish. You are in THIS job only when the turn
-casa sent you names it, by its title "Classify transactions" or by this
-skill, classify-transactions: the launch turn reads `You are starting
-the background job "Classify transactions" (skill
-classify-transactions)`, and each batch after it reads `Batch N of
-"Classify transactions": continue the job.`
+the operator asks the assistant, casa opens your topic and writes you the
+job's brief, and the job is one long session that runs until you finish
+it. You are in THIS job only when the job's brief names it, by its title
+"Classify transactions" or by this skill, classify-transactions: its first
+line reads `You are running the background job "Classify transactions"
+(skill classify-transactions).` and the next line is its `Job id:`. When
+casa summarises a long session it re-states that same header, so it holds
+for the whole job.
 
 **Another job is not this job.** The specialist hosts other plugins'
-jobs too, and one of their batches may run `sync`, whose trailer brings
-you here inside a turn that says it is a job batch, just not this one.
-There you are outside a job (below): classify inline, and never call
-`report_job_progress` or `emit_completion`. Both act on the job that is
-running, so a report would land in its topic and a completion would end
-it.
+jobs too, and one of them may run `sync`, whose trailer brings you here
+inside a session whose brief names a different job. There you are outside
+a job (below): classify inline, and never call `report_job_progress` or
+`emit_completion`. Both act on the job that is running, so a report would
+land in its topic and a completion would end it.
 
 In this job, and only there:
 
-- **one batch per turn.** Do Step 0 through Step 1.5 over that batch —
-  at most 25 workable rows, queue order — then report and end the turn.
-  Do not drain the whole queue in one turn; casa starts the next batch
-  itself.
-- **end the batch with the report**, as your last action:
-  `report_job_progress` with a one-line `summary` and `progressed`:
-  true when this batch took at least one row out of the workable queue
-  (tagged it, or parked it — a parked row is not workable), false when it
-  took none. `progressed` is what casa's stuck guard reads: three batches
-  in a row with `progressed: false` end the job. Also pass `done`, the
-  rows you have handled in this job so far, and `remaining`, the workable
-  rows still queued; they are shown to the operator, so count them from
-  the queue rather than estimating.
+- **work the queue in chunks of 25, without ending your turn.** Do Step 0
+  through Step 1.5 over at most 25 workable rows, queue order, then post
+  a progress line: `report_job_progress` with a one-line `summary`,
+  `done`, the rows you have handled in this job so far, and `remaining`,
+  the workable rows still queued. They are shown to the operator, so
+  count them from the queue rather than estimating. Then take the next
+  chunk in the same turn, and keep going chunk after chunk until the
+  workable queue is empty. End your turn only when the job is finished
+  (after `emit_completion`) or when nothing is left to do but wait for
+  the operator.
 - **when the workable queue is empty**, run Step 3's `apply_rules` sweep
   and then `emit_completion` with the batch-close report: rows tagged,
   rows parked for the operator, rules minted or fixed. That ends the job
   and closes the topic. If the completion is refused because a message
-  is unread, end the turn, read it, then complete.
-- **the operator may write in the topic between batches.** Their message
-  arrives as its own turn: answer it (their answer to a parked row is
-  Step 2 material), end the turn, and casa continues the job.
-- running out of turns inside a batch is not a failure — casa starts the
-  next one.
-- **a batch turn is not an operator message**, so `ask_user` is
-  unavailable on it: park freely and let the questions wait for a turn
-  the operator started (Step 2).
+  has not reached you yet, read the message that arrives, then complete.
+- **the operator may write in the topic while you work.** Their message
+  reaches you between your steps: answer it (their answer to a parked row
+  is Step 2 material), then carry on with the queue.
+- **the job's brief is not an operator message**, so `ask_user` is
+  unavailable in the job: park freely and let the questions wait for a
+  turn the operator started (Step 2).
 
 Outside this job — a sync trailer, a reminder pass, a conversational
-request, or a batch of another job — nothing changes: keep today's
-behaviour over the rows you were asked about, and call neither
-`report_job_progress` nor `emit_completion`.
+request, or another job — nothing changes: keep today's behaviour over
+the rows you were asked about, and call neither `report_job_progress`
+nor `emit_completion`.
 
 ## Step 0 — scope the batch
 
@@ -134,9 +129,11 @@ queue: `list_transactions(untagged_only=true)`, then follow the returned
 `cursor` (pass it back with `untagged_only: true`) until exhausted.
 
 - Judge at most **25 rows per pass**, newest first (the queue's own
-  order) — fetch only the pages you need. The remainder is *deferred,
-  not drained*: report its count and stop; durable state carries it to
-  the next pass. Nothing is lost by stopping.
+  order) — fetch only the pages you need. Outside the job, the remainder
+  is *deferred, not drained*: report its count and stop; durable state
+  carries it to the next pass. Nothing is lost by stopping. In the job,
+  the remainder is the next chunk: work it in the same session without
+  ending your turn, until the workable queue is empty.
 - Parked rows (`awaiting-operator`) are in scope ONLY when this turn
   carries the operator's answer for them (Step 2). Otherwise they are
   the operator's, not yours.
@@ -160,7 +157,7 @@ you are confident:
    minted rule's historical rows draws from this same series budget.
 2. **Casa memory**: the operator may already have told casa what a
    counterparty is. Use the memory casa placed at the top of this turn,
-   when there is one (a job batch has none), plus at most ONE deliberate
+   when there is one (a background job has none), plus at most ONE deliberate
    memory call per row or series:
    - `search_memory` with `query` set to the counterparty's distinctive
      words — the name, not boilerplate such as `SEPA`, `GmbH` or
