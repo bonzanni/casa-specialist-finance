@@ -12,7 +12,7 @@
 # Files the scan cannot read as UTF-8 text, recorded as `unscannable:<path>`
 # with the reason each carries no identifier. An undecodable file is otherwise
 # reported: a file nobody could read is an unanswered question, not a pass.
-# (None at present.)
+unscannable:persona/pack/avatar.jpg  # The persona's avatar: a head-and-shoulders portrait in JPEG, no text, no metadata segment, no account data. casa requires it under this name.
 
 # Tracked subtrees the scan does not cover, as `exclude-tree:<prefix>`. There
 # is no exclusion anywhere else: this file is the only place one can be

@@ -188,6 +188,13 @@ class ForbiddenPaths(unittest.TestCase):
         for name in ("screenshot.png", "scan.PDF", "shot.jpeg"):
             self.assertIsNotNone(si.forbidden_path(name), name)
 
+    def test_the_persona_avatar_is_the_one_image_published(self):
+        self.assertIsNone(si.forbidden_path("persona/pack/avatar.jpg"))
+        for name in ("persona/pack/avatar.jpeg", "persona/pack/other.jpg",
+                     "avatar.jpg", "persona/avatar.jpg",
+                     "persona/pack/avatar.jpg.png"):
+            self.assertIsNotNone(si.forbidden_path(name), name)
+
     def test_a_credential_file_is_refused(self):
         for name in (".env", "config/.env.local", ".op-token"):
             self.assertIsNotNone(si.forbidden_path(name), name)

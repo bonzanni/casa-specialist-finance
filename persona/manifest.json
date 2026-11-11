@@ -2,6 +2,12 @@
   "api_version": "casa.persona.manifest/v1",
   "files": [
     {
+      "path": "avatar.jpg",
+      "type": "file",
+      "executable": false,
+      "checksum": "sha256:a1b2053a6b69b0d6adb9ea006c94508df7e370967a71df60b5eca0f003a20a9b"
+    },
+    {
       "path": "persona.md",
       "type": "file",
       "executable": false,
@@ -14,5 +20,5 @@
       "checksum": "sha256:f226c048f69441b18b12d745693cf6c3c4aa59fc32ac7d7fa5e87d7c36f8938e"
     }
   ],
-  "checksum": "sha256:5567536c118d74e0d1bfe45aaa19dd6398ad7977eb2831ec73d55ddddbc43bce"
+  "checksum": "sha256:56b7c6137504db2b665d4aa7deaebc8f70f0025338f2f1c649f2f228129d4875"
 }

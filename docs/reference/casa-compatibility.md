@@ -19,8 +19,9 @@ real casa through `$CASA_ROOT` at runtime; the suite has no such root.
 ## Version range
 
 The values below were taken from **casa v0.148.0**, **casa v0.155.0**,
-**casa v0.318.0**, **casa v0.347.0** and **casa v0.355.0** — the version each row names
-is the version its value was read from.
+**casa v0.318.0**, **casa v0.347.0**, **casa v0.349.0**, **casa v0.355.0**,
+**casa v0.356.0** and **casa v0.360.0** — the version
+each row names is the version its value was read from.
 
 **This table is a copy, and a copy is a claim about another codebase.** Nothing
 in this commit can show that a row matches what casa actually defines — no casa
@@ -34,7 +35,16 @@ compared against the real symbol. Without a checkout, the suite checks only that
 the copies and this table agree with each other — which catches drift between
 them, and nothing about casa.
 
-The component **requires casa >= v0.355.0**. From 0.28.0 both plugins' background
+The component **requires casa >= v0.360.0**. From 0.29.0 the specialist talks to you
+from a Telegram chat of its own: the role declares `own_chat`, the short description
+and description casa gives that chat's bot, and the persona carries an avatar,
+`persona/pack/avatar.jpg`, which casa admits from v0.360.0 (`PERSONA_AVATAR_FILE` and
+the two values after it in the table below). An older casa refuses both: its role
+schema has no `own_chat`, and its persona loader admits no file of that name, so it
+will not install finance 0.29.0. This release is not backward compatible with a casa
+older than v0.360.0: upgrade casa first, then finance.
+
+From 0.28.0 both plugins' background
 jobs declare only the fields casa v0.355.0 accepts in a `casa.jobs` entry (`JOB_FIELDS`
 in the table below). casa v0.355.0 runs a background job as one long session and
 refuses a job declaration that still carries `batches`, `turnsPerBatch` or `session`
@@ -74,8 +84,8 @@ without Gmail.
 
 **Nothing declares that requirement as a version.** There is no version field in
 the plugin manifest and no handshake: this page, `README.md` and the plugins' READMEs
-are the only places it is written down. Under a casa older than v0.355.0 the refusal
-names a job field or the memory grants, not a version. Stated plainly rather
+are the only places it is written down. Under a casa older than v0.360.0 the refusal
+names `own_chat`, the avatar, a job field or the memory grants, not a version. Stated plainly rather
 than left to be discovered.
 
 ## The copied values
@@ -91,9 +101,12 @@ than left to be discovered.
 | `PLUGIN_ENV_DECLARATION_PREFIX` | `plugin_store.PLUGIN_ENV_DECLARATION_PREFIX` | v0.155.0 | The prefix every name in `casa.setupProvides` must carry. A declared name is bound for the whole session — casa pins it to the empty string while unresolved — so the declaration namespace is fenced, and a name outside the prefix is a refused install, not a warning. |
 | `ENV_DECLARATION_RE` | `plugin_store._DECLARABLE_ENV_NAME_RE` | v0.155.0 | The full grammar a declarable name must satisfy, not merely the prefix. This row cites a symbol NAME rather than a line on purpose: the symbol was renamed in v0.155.0 when it was split from the `${VAR}` reference scanner it had been shadowing, and citing the name meant the rename surfaced as a failing cross-check instead of a silent comparison against the wrong pattern. |
 | `MAX_ENV_DECLARATIONS` | `plugin_store._MAX_ENV_DECLARATIONS` | v0.155.0 | How many environment names one plugin may declare. Exceeding it is a refused install. |
-| `CASA_OWNED_ENV_OPTIONS` | `plugin_store.CASA_OWNED_ENV_OPTIONS` | v0.155.0 | Environment variables a plugin may REFERENCE but never supply and never declare, mapped to the app option casa exports each from. The mapping is also the remediation: the fix for a missing one is its option, never a plugin env file. |
-| `SPECIALIST_CASA_TOOLS` | `specialist_component.SPECIALIST_CASA_TOOL_ALLOWLIST` | v0.347.0 | The casa-framework tools a specialist role may grant. A role naming any other one, or the bare `mcp__casa-framework` server, is refused when casa inspects the component, before consent; v0.347.0 replaced `recall_memory` with `search_memory`, `browse_memory_day` and `open_memory`, so the role's memory grants hold only from that version. |
+| `CASA_OWNED_ENV_OPTIONS` | `plugin_store.CASA_OWNED_ENV_OPTIONS` | v0.349.0 | Environment variables a plugin may REFERENCE but never supply and never declare, mapped to the app option casa exports each from. The mapping is also the remediation: the fix for a missing one is its option, never a plugin env file. v0.349.0 removed `CONTEXT7_API_KEY` with the option it came from. |
+| `SPECIALIST_CASA_TOOLS` | `specialist_component.SPECIALIST_CASA_TOOL_ALLOWLIST` | v0.356.0 | The casa-framework tools a specialist role may grant. A role naming any other one, or the bare `mcp__casa-framework` server, is refused when casa inspects the component, before consent; v0.347.0 replaced `recall_memory` with `search_memory`, `browse_memory_day` and `open_memory`, so the role's memory grants hold only from that version. v0.356.0 removed `react`, which this role never granted. |
 | `JOB_FIELDS` | `plugin_store._JOB_FIELDS` | v0.355.0 | The only fields a `casa.jobs` entry may carry. A plugin whose job declares any other field, including the `batches`, `turnsPerBatch` and `session` fields that v0.355.0 removed, is refused at install, or excluded when already installed, with `jobs_invalid`. |
+| `PERSONA_AVATAR_FILE` | `persona_pack.AVATAR_FILE` | v0.360.0 | The one binary file a persona pack may carry: the avatar, under exactly this name. Any other file outside the pack's fixed set refuses the pack, and a component whose persona is refused does not install. |
+| `PERSONA_AVATAR_MAX_BYTES` | `persona_pack.MAX_AVATAR_BYTES` | v0.360.0 | The largest avatar casa admits, in bytes. A larger one refuses the pack. |
+| `PERSONA_AVATAR_MAGIC` | `persona_pack._JPEG_MAGIC` | v0.360.0 | The bytes the avatar must start with: a JPEG. casa checksums the avatar's raw bytes, never decoded as text, so the persona manifest's row for it is the SHA-256 of the file as it is. |
 | `MCP_JSON_VAR_RE` | `specialist_install._MCP_JSON_VAR_RE` | v0.155.0 | The `${VAR}` and `${VAR:-default}` interpolation syntax casa carves out of each `.mcp.json` string leaf before the marker scan. Without the carve-out a defaulted reference keeps its `${` and trips the forbidden markers, refusing a bundled plugin for syntax a standalone plugin may use freely. The named `default` group is load-bearing for expansion. |
 | `REQUIRED_REF_RE` | `plugin_env_extractor._VAR_PATTERN` | v0.155.0 | Which references count as REQUIREMENTS for the withhold gate: bare `${VAR}` only. A `${VAR:-default}` is satisfied by its own default, so withholding an install for it would be wrong. |
 | `ANY_REF_RE` | `plugin_env_extractor._ANY_VAR_PATTERN` | v0.155.0 | Both documented reference forms. Consent enumeration and the name-collision preflight use this one, so a default cannot hide a name claim. |

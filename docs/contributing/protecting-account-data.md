@@ -23,7 +23,9 @@ or, equivalently, the one line it exists to run:
   base64-encoded once, or escaped the way a source file escapes things;
 * a ledger or an export — `*.sqlite`, `*.csv`, `*.ofx`, `*.qif`, `*.mt940`,
   `*.camt`, `*.xls[x]`;
-* an image or PDF, because a screenshot of a bank page is not text-scannable;
+* an image or PDF, because a screenshot of a bank page is not text-scannable — the
+  one exception is the persona's avatar, `persona/pack/avatar.jpg`, named by exact path
+  in `PUBLISHED_IMAGES`;
 * a `.env` or token file;
 * any file that is not text, unless it is recorded in
   `scripts/identifier-exceptions.txt` with the reason it carries no identifier.

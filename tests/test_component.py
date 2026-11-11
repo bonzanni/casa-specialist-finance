@@ -170,7 +170,6 @@ MAX_ENV_DECLARATIONS = 32
 CASA_OWNED_ENV_OPTIONS = {
     "OP_SERVICE_ACCOUNT_TOKEN": "onepassword_service_account_token",
     "ONEPASSWORD_DEFAULT_VAULT": "onepassword_default_vault",
-    "CONTEXT7_API_KEY": "context7_api_key",
 }
 #: casa contract: specialist_install — the interpolation syntax carved out before the marker scan
 # `${VAR}` interpolation is the universal, legitimate `.mcp.json` syntax, so
@@ -201,7 +200,7 @@ ANY_REF_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-[^{}]*)?\}")
 # role written for either side of that release is refused by the other. A
 # frozenset in casa: membership is the contract, so the copy is kept sorted.
 SPECIALIST_CASA_TOOLS = sorted({
-    "query_engager", "emit_completion", "react", "ask_user",
+    "query_engager", "emit_completion", "ask_user",
     "search_memory", "browse_memory_day", "open_memory", "ack_event",
     "get_schedule", "send_media",
 })
@@ -214,6 +213,17 @@ SPECIALIST_CASA_TOOLS = sorted({
 JOB_FIELDS = sorted({
     "name", "skill", "title", "summary", "host", "quietWhenScheduled",
 })
+# casa v0.360.0 admits one binary file in a persona pack: a JPEG avatar under
+# one exact name, at most a fixed number of bytes, starting with the JPEG magic.
+# casa reads it as raw bytes, never decodes it, and checksums the bytes as they
+# are. A pack whose avatar fails any of the three is refused, and the component
+# with it.
+#: casa contract: persona_pack — the name of the avatar a persona pack may carry
+PERSONA_AVATAR_FILE = "avatar.jpg"
+#: casa contract: persona_pack — the largest avatar casa admits, in bytes
+PERSONA_AVATAR_MAX_BYTES = 1048576
+#: casa contract: persona_pack — the bytes the avatar must start with
+PERSONA_AVATAR_MAGIC = b"\xff\xd8\xff"
 
 
 # The result_broker values `plugins/bank-feed/server/casa_broker.py` copies to
@@ -241,6 +251,9 @@ CASA_COPIES = {
     ("specialist_install.py", "_MCP_JSON_VAR_RE"): MCP_JSON_VAR_RE.pattern,
     ("specialist_component.py", "SPECIALIST_CASA_TOOL_ALLOWLIST"): SPECIALIST_CASA_TOOLS,
     ("plugin_store.py", "_JOB_FIELDS"): JOB_FIELDS,
+    ("persona_pack.py", "AVATAR_FILE"): PERSONA_AVATAR_FILE,
+    ("persona_pack.py", "MAX_AVATAR_BYTES"): PERSONA_AVATAR_MAX_BYTES,
+    ("persona_pack.py", "_JPEG_MAGIC"): PERSONA_AVATAR_MAGIC,
     ("result_broker.py", "ENV_CLIENT"): casa_broker.ENV_CLIENT,
     ("result_broker.py", "ENV_SOCKET"): casa_broker.ENV_SOCKET,
     ("result_broker.py", "_REF_RE"): casa_broker.REFERENCE_RE.pattern,
@@ -686,7 +699,28 @@ class TestBundledPersona(unittest.TestCase):
     but a marker scan, `persona/pack/` lets a one-character typo fix in
     `persona.md` shipped a component casa will not load with the whole suite
     green.
+
+    The avatar is the exception to the text rule: casa checksums its raw
+    bytes, where every other pack file is decoded and canonicalized first.
     """
+
+    @staticmethod
+    def _pack_file_bytes(name: str) -> bytes:
+        path = PERSONA_PACK / name
+        if name == PERSONA_AVATAR_FILE:
+            return path.read_bytes()
+        return canonical_text(path.read_text("utf-8")).encode("utf-8")
+
+    def test_the_avatar_is_an_image_casa_admits(self):
+        path = PERSONA_PACK / PERSONA_AVATAR_FILE
+        self.assertTrue(path.is_file(), "the persona ships an avatar")
+        data = path.read_bytes()
+        self.assertTrue(data.startswith(PERSONA_AVATAR_MAGIC),
+                        "casa refuses a persona avatar that is not a JPEG")
+        self.assertLessEqual(len(data), PERSONA_AVATAR_MAX_BYTES,
+                             "casa refuses a persona avatar over its size cap")
+        self.assertFalse(path.stat().st_mode & 0o111,
+                         "casa refuses an executable persona file")
 
     def test_the_bundled_persona_matches_its_manifest_and_the_pinned_digest(self):
         names = sorted(p.name for p in PERSONA_PACK.iterdir())
@@ -694,8 +728,7 @@ class TestBundledPersona(unittest.TestCase):
         # rows are built in and therefore what the checksum covers.
         rows = [{"path": name, "type": "file", "executable": False,
                  "checksum": "sha256:" + hashlib.sha256(
-                     canonical_text((PERSONA_PACK / name).read_text("utf-8"))
-                     .encode("utf-8")).hexdigest()}
+                     self._pack_file_bytes(name)).hexdigest()}
                 for name in names]
         payload = {"api_version": "casa.persona.manifest/v1", "files": rows}
         canon = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

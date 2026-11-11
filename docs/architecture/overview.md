@@ -8,9 +8,9 @@ bundled plugins, published as a single versioned bundle with pinned digests.
 ```
 manifest.json          the component: version, persona, plugin dependencies, digests
 config-schema.json     what the installer must supply, and which of it is secret
-role/role.yaml         the specialist: model, tool allow-list, limits, launch gate
+role/role.yaml         the specialist: model, tool allow-list, limits, launch gate, own chat
 role/doctrine.md       the standing instructions the specialist runs under
-persona/               the persona pack, checksummed independently
+persona/               the persona pack and its avatar, checksummed independently
 plugins/bank-feed/     an MCP server (Python 3.11 standard library only) + a skill
 plugins/tx-classifier/ a skill, and nothing else
 tests/                 the suite; unittest, not pytest

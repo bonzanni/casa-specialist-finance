@@ -434,8 +434,18 @@ FORBIDDEN_PATHS = (
 )
 
 
+#: The images this repository does publish, each by its exact path: the
+#: persona's avatar, which casa reads under exactly this name. An exact path
+#: and not a pattern, so the image rule above still refuses every other image,
+#: including one beside it. The file is binary, so it must also be recorded in
+#: `.githooks/binary-allowlist.txt` and as `unscannable:` in the exception file.
+PUBLISHED_IMAGES = frozenset({"persona/pack/avatar.jpg"})
+
+
 def forbidden_path(rel: str):
     """The reason `rel` may never be committed, or None."""
+    if rel in PUBLISHED_IMAGES:
+        return None
     for pattern, reason in FORBIDDEN_PATHS:
         if pattern.search(rel):
             return reason
