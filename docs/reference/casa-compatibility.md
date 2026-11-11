@@ -225,6 +225,14 @@ wherever `$CASA_ROOT` points at a casa checkout — a developer machine, which i
 the only place a casa version bump can be made — and is a no-op, never a skip,
 where it does not.
 
+The persona pack is checked by casa's own code, not a copy.
+`test_casas_own_persona_loader_admits_the_pack` imports casa's persona loader from
+`$CASA_ROOT` and runs it on `persona/pack`, so a rule nothing here copies — the
+length of the `# Core` body, the `## Negative space` section, the persona schema —
+still fails the suite before an install does. Finance 0.29.1 shipped a Core body
+casa refused; that is the case this arm exists for. Like the arm above it needs a
+casa checkout, and an environment with casa's own dependencies installed.
+
 **When casa changes one of these values**, the copy, the version in this table,
 and the sentence describing it move together in one change. The `$CASA_ROOT`
 arm is how the mismatch is found before it ships; a reader without a casa
