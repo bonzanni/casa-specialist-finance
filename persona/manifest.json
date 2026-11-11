@@ -11,7 +11,7 @@
       "path": "persona.md",
       "type": "file",
       "executable": false,
-      "checksum": "sha256:900c7950aacba1352dfd50beb95cb788aedb3428e2acf748f66936aea7940e22"
+      "checksum": "sha256:53254d12fc414d6c410f52d9a32f36b33a06818f5646030257464fbbecc49653"
     },
     {
       "path": "persona.yaml",
@@ -20,5 +20,5 @@
       "checksum": "sha256:081c3679f7b9cf77075553dfdfb29f742ad324857dbdeebaffdc3dfacd104e2e"
     }
   ],
-  "checksum": "sha256:678ed8c7d1f4976bfcd70ecb1542b8495fe67b7f5dab29a677b9ffc0e58f9539"
+  "checksum": "sha256:5a2ea3451564e4cf67afcf59b6730b2c579e2690f3fee54eb2cee21f00632eb4"
 }

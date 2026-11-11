@@ -749,6 +749,41 @@ class TestBundledPersona(unittest.TestCase):
         self.assertEqual(dep["digest"], checksum)
         self.assertEqual(man["default_persona"]["checksum"], checksum)
 
+    def test_casas_own_persona_loader_admits_the_pack(self):
+        """Run casa's `load_persona_pack` itself on `persona/pack`.
+
+        The tests above re-check the manifest and the avatar. casa's loader
+        also holds the prose to rules nothing here copies — the `# Core` body
+        length, the `## Negative space` section, the persona schema — and 0.29.1
+        shipped a Core body casa refused while this suite stayed green. Calling
+        the real loader is what catches every one of those, including rules
+        casa adds later.
+
+        Like the `$CASA_ROOT` arm above, it runs wherever `$CASA_ROOT` points
+        at a casa checkout and is a no-op, never a skip, where it does not.
+        With a checkout present, casa's modules must import: they need
+        `jsonschema`, `yaml`, `markdown_it` and `rfc8785`, so run the suite
+        from an environment that has them (casa's own test venv does). An
+        import failure there fails this test rather than passing a hole.
+        """
+        casa = _casa_root()
+        if casa is None:
+            return
+        sys.path.insert(0, str(casa))
+        try:
+            import persona_pack                      # noqa: E402
+        except ImportError as exc:
+            self.fail("casa's persona_pack at %s does not import here (%s); "
+                      "run with casa's dependencies installed" % (casa, exc))
+        finally:
+            sys.path.remove(str(casa))
+        try:
+            persona_pack.load_persona_pack(PERSONA_PACK,
+                                           ROOT / "persona/manifest.json")
+        except persona_pack.PersonaPackError as exc:
+            self.fail("casa at %s refuses persona/pack: %s. A refused persona "
+                      "makes the component uninstallable." % (casa, exc))
+
 
 def _mcp_env(plugin_dir=None) -> dict:
     """The server's `env` block: {PROCESS KEY: "${REFERENCE}"}.
