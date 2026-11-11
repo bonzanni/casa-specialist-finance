@@ -168,7 +168,10 @@ and carries no DELETE at all — see learning 4.
 ### Phase 4 — ready
 
 5. Report state, point the operator at `list_banks` then `link_bank`, **one bank
-   at a time**, starting with a single bank.
+   at a time**, starting with a single bank. Setup runs again after every
+   upgrade, so when accounts are already linked this step says how many first
+   (`tools_read.linked_count`, the rule `list_accounts` renders): without it, "next:
+   link a bank" reads as "nothing is linked yet".
 
 ## The one cross-phase invariant
 

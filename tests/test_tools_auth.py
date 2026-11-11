@@ -3636,6 +3636,38 @@ class TestTheSetupToolIsArgumentFree(Base):
                          {"email", "signin_link", "resend"})
 
 
+class TestSetupNextStepCountsLinkedAccounts(Base):
+    """Setup runs again after every upgrade, on installs that already have
+    banks linked. A step 7 that only says "run list_banks, then link_bank"
+    reads as "nothing is linked yet", so it states how many accounts are
+    linked — by the same rule `list_accounts` renders: an account is linked
+    while it holds a session, and an empty session id is unbound."""
+
+    def step7(self):
+        out = call("setup_bank_feed")
+        return out[out.index("7. Next"):]
+
+    def test_states_how_many_accounts_are_already_linked(self):
+        self.account("acc1")
+        self.account("acc2")
+        self.account("acc3", included=0)     # excluded from totals, still linked
+        self.account("acc4", session_id=None)
+        self.account("acc5", session_id="")
+        step7 = self.step7()
+        self.assertIn("3 accounts already linked", step7)
+        self.assertIn("list_banks, then link_bank", step7)
+
+    def test_one_linked_account_reads_singular(self):
+        self.account("acc1")
+        self.assertIn("1 account already linked", self.step7())
+
+    def test_says_nothing_about_linked_accounts_when_none_are(self):
+        self.account("acc1", session_id=None)    # cached, but needs a re-link
+        step7 = self.step7()
+        self.assertNotIn("already linked", step7)
+        self.assertIn("7. Next: run list_banks, then link_bank", step7)
+
+
 class TestWiringSentencesName(Base):
     """Issue #4: every sentence the ladder prints about `plugin-env.conf` must
     name the REFERENCE the configurator writes, never the process env KEY the

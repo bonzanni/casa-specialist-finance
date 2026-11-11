@@ -689,6 +689,14 @@ def _balance_usable(sel) -> bool:
 _SCOPE = {"type": "string", "enum": ["all", "personal", "company"]}
 
 
+def linked_count(c) -> int:
+    """How many cached accounts are linked, by the rule `list_accounts`
+    renders: an account is linked while it holds a session id, and an empty
+    one is unbound."""
+    return sum(1 for (sid,) in c.execute("SELECT session_id FROM accounts")
+               if sid)
+
+
 @register("list_accounts",
           "List cached bank accounts with their label, category and include "
           "flag. Read-only; never returns a session identifier.",
