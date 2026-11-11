@@ -2578,10 +2578,17 @@ def _reconcile(args: dict) -> str:
                      "already whitelisted, then the bank's own SCA)")
         cost = "up to two operator approvals and its own SCA taps"
     # Setup re-runs after every upgrade; without the count, "Next: link_bank"
-    # reads as "nothing is linked yet" on an install that has banks.
+    # reads as "nothing is linked yet" on an install that has banks. An ended
+    # consent keeps its accounts bound, so how many need re-linking is said
+    # too. tools_refresh imports this module, hence the import here.
+    import tools_refresh
     linked = tools_read.linked_count(c)
-    already = ("%d account%s already linked (list_accounts shows them); to "
-               "add a bank, " % (linked, "" if linked == 1 else "s")
+    relink = tools_refresh.relink_count(c) if linked else 0
+    already = ("%d account%s already linked (list_accounts shows them)%s; to "
+               "add a bank, "
+               % (linked, "" if linked == 1 else "s",
+                  ", %d of them need%s re-linking (consent_status shows which)"
+                  % (relink, "s" if relink == 1 else "") if relink else "")
                if linked else "")
     lines.append(
         "7. Next: %srun list_banks, then link_bank — one bank at a time. "
