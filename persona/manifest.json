@@ -11,14 +11,14 @@
       "path": "persona.md",
       "type": "file",
       "executable": false,
-      "checksum": "sha256:545b4b8dc0d23116023cb9f498001973b9655c31ce0bb0be87d467c3d8916f02"
+      "checksum": "sha256:900c7950aacba1352dfd50beb95cb788aedb3428e2acf748f66936aea7940e22"
     },
     {
       "path": "persona.yaml",
       "type": "file",
       "executable": false,
-      "checksum": "sha256:f226c048f69441b18b12d745693cf6c3c4aa59fc32ac7d7fa5e87d7c36f8938e"
+      "checksum": "sha256:081c3679f7b9cf77075553dfdfb29f742ad324857dbdeebaffdc3dfacd104e2e"
     }
   ],
-  "checksum": "sha256:56b7c6137504db2b665d4aa7deaebc8f70f0025338f2f1c649f2f228129d4875"
+  "checksum": "sha256:678ed8c7d1f4976bfcd70ecb1542b8495fe67b7f5dab29a677b9ffc0e58f9539"
 }
