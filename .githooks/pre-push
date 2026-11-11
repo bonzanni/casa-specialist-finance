@@ -130,9 +130,8 @@ is_zero() {                              # a deletion; also correct for a sha256
 # published a committed private key while the hook reported success. The hooks are listed for the same reason.
 # scripts/identifier-exceptions.txt was missing from this list, and an uncommitted line
 # there cleared a checksum-valid account number out of a committed ref -- the asset this
-# whole phase exists for. .githooks/binary-allowlist.txt is listed although this tree has
-# none: if one is ever added it is a policy input from that moment, and a list that only
-# covers what exists today is a list that goes stale silently.
+# whole phase exists for. .githooks/binary-allowlist.txt is listed because it decides
+# which binaries may be published at all, which makes it a policy input like the rest.
 POLICY_FILES=".githooks/deny-patterns.txt .githooks/root-allowlist.txt
               .githooks/gitleaks-allow-sites.txt .githooks/binary-allowlist.txt
               .gitleaks.toml scripts/identifier-exceptions.txt

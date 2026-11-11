@@ -441,9 +441,9 @@ if [ "$mode" != "messages" ] && [ "$mode" != "text" ]; then
     if [ -s "$work/new-binaries" ]; then
       echo "✋ binary blob(s) no content rule can inspect:" >&2
       sed 's/^/   /' "$work/new-binaries" >&2
-      echo "   A binary cannot be swept or read in review. This tree has none, so there" >&2
-      echo "   is no .githooks/binary-allowlist.txt; adding one is a decision to publish" >&2
-      echo "   something nobody can read in a diff." >&2
+      echo "   A binary cannot be swept or read in review. Naming one in" >&2
+      echo "   .githooks/binary-allowlist.txt is a decision to publish something nobody" >&2
+      echo "   can read in a diff." >&2
       fail=1
     fi
   fi
