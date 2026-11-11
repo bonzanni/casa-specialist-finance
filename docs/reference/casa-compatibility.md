@@ -221,9 +221,12 @@ Neither the code nor this document can drift alone.
 The values themselves are cross-checked against a real casa by
 `test_the_local_copy_of_casas_rule_still_matches_casas_own`, which re-derives
 every registered constant from casa's own source by parsing it. That arm runs
-wherever `$CASA_ROOT` points at a casa checkout — a developer machine, which is
-the only place a casa version bump can be made — and is a no-op, never a skip,
-where it does not.
+wherever `$CASA_ROOT` points at casa's code root (`casa/rootfs/opt/casa` in a
+checkout), and is a no-op, never a skip, where `$CASA_ROOT` is unset. Set to
+anything else, it fails: a no-op there would report a hole as a pass. CI's `casa`
+job in `.github/workflows/ci.yml` checks out casa at the oldest version this
+component supports and runs both arms against it, so they run on every push, not
+only on a developer machine; when that version moves, the job's `ref` moves with it.
 
 The persona pack is checked by casa's own code, not a copy.
 `test_casas_own_persona_loader_admits_the_pack` imports casa's persona loader from
