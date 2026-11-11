@@ -2577,11 +2577,25 @@ def _reconcile(args: dict) -> str:
         approvals = ("up to two approvals per bank (a whitelist tap unless "
                      "already whitelisted, then the bank's own SCA)")
         cost = "up to two operator approvals and its own SCA taps"
+    # Setup re-runs after every upgrade; without the count, "Next: link_bank"
+    # reads as "nothing is linked yet" on an install that has banks. An ended
+    # consent keeps its accounts bound, so how many need re-linking is said
+    # too. tools_refresh imports this module, hence the import here.
+    import tools_refresh
+    linked = tools_read.linked_count(c)
+    relink = tools_refresh.relink_count(c) if linked else 0
+    already = ("%d account%s already linked (list_accounts shows them)%s; to "
+               "add a bank, "
+               % (linked, "" if linked == 1 else "s",
+                  ", %d of them need%s re-linking (consent_status shows which)"
+                  % (relink, "s" if relink == 1 else "") if relink else "")
+               if linked else "")
     lines.append(
-        "7. Next: run list_banks, then link_bank — one bank at a time. "
+        "7. Next: %srun list_banks, then link_bank — one bank at a time. "
         "What stays human, by design: %s, labelling each discovered account "
         "once, and a bank re-approval every 179 days. Note that HA "
-        "backups contain this plugin's transaction history." % approvals)
+        "backups contain this plugin's transaction history."
+        % (already, approvals))
     lines.append(_ONE_BANK_AT_A_TIME % cost)
     return "\n".join(lines)
 

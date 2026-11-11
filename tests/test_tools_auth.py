@@ -32,6 +32,7 @@ from _toolbase import (ARMOR_ONLY_PEM, Base, DISCOVERED_REDIRECT,  # noqa: E402
                        TEST_KEY_PEM, FakeAdmin, FakeAIS, FakeVault, acct,
                        call, declared_protected, iso_at, mcp_declared_env,
                        rate_limited, wl)
+from test_consent_refused import RefusedBase  # noqa: E402
 
 OTHER_FINGERPRINT = hashlib.sha256(b"another-machine").hexdigest()
 
@@ -3634,6 +3635,80 @@ class TestTheSetupToolIsArgumentFree(Base):
         schema = bank_feed_server.TOOLS["bank_feed_signin"]["schema"]
         self.assertEqual(set(schema["properties"]),
                          {"email", "signin_link", "resend"})
+
+
+class TestSetupNextStepCountsLinkedAccounts(Base):
+    """Setup runs again after every upgrade, on installs that already have
+    banks linked. A step 7 that only says "run list_banks, then link_bank"
+    reads as "nothing is linked yet", so it states how many accounts are
+    linked — by the same rule `list_accounts` renders: an account is linked
+    while it holds a session, and an empty session id is unbound."""
+
+    def step7(self):
+        out = call("setup_bank_feed")
+        return out[out.index("7. Next"):]
+
+    def test_states_how_many_accounts_are_already_linked(self):
+        self.account("acc1")
+        self.account("acc2")
+        self.account("acc3", included=0)     # excluded from totals, still linked
+        self.account("acc4", session_id=None)
+        self.account("acc5", session_id="")
+        step7 = self.step7()
+        self.assertIn("3 accounts already linked", step7)
+        self.assertIn("list_banks, then link_bank", step7)
+
+    def test_one_linked_account_reads_singular(self):
+        self.account("acc1")
+        self.assertIn("1 account already linked", self.step7())
+
+    def test_says_nothing_about_linked_accounts_when_none_are(self):
+        self.account("acc1", session_id=None)    # cached, but needs a re-link
+        step7 = self.step7()
+        self.assertNotIn("already linked", step7)
+        self.assertIn("7. Next: run list_banks, then link_bank", step7)
+
+
+class TestSetupNamesLinksThatNeedRelinking(RefusedBase):
+    """A link whose consent has ended keeps its binding — that is what lets
+    a re-link carry the history forward — so "already linked" alone would
+    describe it as usable. Setup says how many of the linked accounts need
+    re-linking, by the rule the daily sync's re-link notice uses. Both kinds
+    of ending are driven through the real code: a link collected through the
+    real exchange, then either the provider reporting the consent EXPIRED
+    after repeated refused syncs, or its recorded validity passing."""
+
+    def step7(self):
+        out = call("setup_bank_feed")
+        return out[out.index("7. Next"):]
+
+    def link(self):
+        self.collect()
+        (aid, uid), = self.raw.execute(
+            "SELECT account_id, uid FROM accounts WHERE session_id IS NOT NULL"
+        ).fetchall()
+        return aid, uid
+
+    def test_a_consent_the_provider_reports_expired_needs_relinking(self):
+        _aid, uid = self.link()
+        self.assertNotIn("needs re-linking", self.step7())
+        self.ais.failing[uid] = eb_ais.ApiError(401, "transactions",
+                                                code=None)
+        call("sync", resource="transactions")
+        call("sync", resource="transactions")
+        self.assertIn("NEEDS RE-LINKING", call("consent_status"))
+        step7 = self.step7()
+        self.assertIn("1 account already linked", step7)
+        self.assertIn("1 of them needs re-linking", step7)
+        self.assertIn("consent_status", step7)
+
+    def test_a_consent_whose_validity_passed_needs_relinking(self):
+        self.link()
+        self.raw.execute("UPDATE sessions SET valid_until=?",
+                         ((datetime.date.today() - datetime.timedelta(days=2))
+                          .isoformat() + "T00:00:00Z",))
+        self.assertIn("EXPIRED — RE-LINK IT", call("consent_status"))
+        self.assertIn("1 of them needs re-linking", self.step7())
 
 
 class TestWiringSentencesName(Base):

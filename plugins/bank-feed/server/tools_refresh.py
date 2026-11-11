@@ -1321,6 +1321,17 @@ def _daily_findings(c, deferred=frozenset()) -> dict:
     return found
 
 
+def relink_count(c) -> int:
+    """How many linked accounts are bound to a consent that needs re-linking,
+    by `_daily_findings`' own rule: the same consents its `relink:` findings
+    name. A consent that has ended keeps its accounts bound, so a linked count
+    alone would describe them as usable."""
+    refs = {key.split(":", 1)[1] for key in _daily_findings(c)
+            if key.startswith("relink:")}
+    return sum(1 for (sid,) in c.execute("SELECT session_id FROM accounts")
+               if sid and tools_auth._consent_ref(sid) in refs)
+
+
 @register("daily_sync",
           "The daily background sync, for the scheduled job 'Bank sync' "
           "(bank-feed:daily-sync): refreshes every linked bank and, only when "

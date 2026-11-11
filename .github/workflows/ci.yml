@@ -81,3 +81,45 @@ jobs:
         env:
           FINANCE_REAL_SCANNER: "1"
         run: python3 -m unittest tests.test_run_gitleaks
+
+  # The arms of tests/test_component.py that read casa's own code: the copied
+  # constants re-derived from casa's source, and casa's persona loader run on
+  # persona/pack. Without a casa checkout they are no-ops, so the job above
+  # cannot run them. A job of its own, so the casa checkout never reaches the
+  # tree-wide scans above.
+  casa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: bonzanni/ha-casa-app
+          # The oldest casa this component supports, as
+          # docs/reference/casa-compatibility.md states it. Move the two
+          # together.
+          ref: v0.360.0
+          path: casa-src
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # casa's persona loader imports these four. They are installed at the
+      # versions casa itself pins at that ref; one that goes missing fails the
+      # loader arm on import rather than passing it.
+      - name: Install the persona loader's dependencies at casa's pins
+        run: |
+          set -euo pipefail
+          grep -iE '^(pyyaml|jsonschema|rfc8785|markdown-it-py)==' \
+            casa-src/casa/requirements.txt > casa-deps.txt
+          cat casa-deps.txt
+          python3 -m pip install --disable-pip-version-check -r casa-deps.txt
+
+      # A CASA_ROOT that is set but is not casa's code root fails these tests
+      # rather than turning them into no-ops.
+      - name: The component against casa's own code
+        env:
+          CASA_ROOT: ${{ github.workspace }}/casa-src/casa/rootfs/opt/casa
+        run: python3 -m unittest -v tests.test_component

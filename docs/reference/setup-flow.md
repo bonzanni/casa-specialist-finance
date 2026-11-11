@@ -168,7 +168,13 @@ and carries no DELETE at all — see learning 4.
 ### Phase 4 — ready
 
 5. Report state, point the operator at `list_banks` then `link_bank`, **one bank
-   at a time**, starting with a single bank.
+   at a time**, starting with a single bank. Setup runs again after every
+   upgrade, so when accounts are already linked this step says how many first
+   (`tools_read.linked_count`, the rule `list_accounts` renders): without it, "next:
+   link a bank" reads as "nothing is linked yet". An ended consent keeps its
+   accounts bound, so the step also says how many of them need re-linking
+   (`tools_refresh.relink_count`, the rule behind the daily sync's re-link notice)
+   and points at `consent_status` for which.
 
 ## The one cross-phase invariant
 

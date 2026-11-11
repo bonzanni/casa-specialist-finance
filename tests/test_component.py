@@ -41,8 +41,9 @@ narrow without failing:
   registered, so the coverage below cannot silently narrow;
 * `test_the_local_copy_of_casas_rule_still_matches_casas_own` re-derives each
   registered value from casa's own source with `ast` (no import) whenever
-  `$CASA_ROOT` points at a casa checkout, and is a no-op — never a skip, the
-  suite's 0-skip property is load-bearing — where it does not.
+  `$CASA_ROOT` points at casa's code root, and is a no-op — never a skip, the
+  suite's 0-skip property is load-bearing — where it is unset. Set to anything
+  else, it fails. CI's `casa` job runs it against a real casa.
 
 `content_checksum` below is a seventh re-spelling, of an algorithm rather
 than a value; it is not AST-resolvable and is checked differently, by
@@ -419,12 +420,20 @@ def _yaml_list(text: str, key: str) -> list:
 # --------------------------------------------------------------------------
 
 def _casa_root():
-    """`$CASA_ROOT` if it points at something that looks like casa, else None."""
+    """`$CASA_ROOT` as a path, or None when it is unset.
+
+    Set but not casa's code root (the directory holding `authored_markers.py`,
+    `casa/rootfs/opt/casa` in a checkout) is a failure, not None: the arms
+    that call this would otherwise pass without checking anything."""
     root = os.environ.get("CASA_ROOT")
     if not root:
         return None
     path = pathlib.Path(root)
-    return path if (path / "authored_markers.py").is_file() else None
+    if not (path / "authored_markers.py").is_file():
+        raise AssertionError(
+            "CASA_ROOT=%s is not casa's code root: point it at "
+            "<casa checkout>/casa/rootfs/opt/casa" % root)
+    return path
 
 
 def _resolve(node, env):
@@ -494,6 +503,22 @@ class TestCasaConstantCopies(unittest.TestCase):
     independently.
     """
 
+    def test_a_casa_root_that_is_not_casas_code_fails_rather_than_passing(self):
+        """An unset `$CASA_ROOT` turns the casa arms into no-ops. A SET one
+        that misses casa's code root — the repository root instead of
+        `casa/rootfs/opt/casa` is the easy slip — must not do the same: CI
+        sets it precisely so those arms run, and a no-op there is a hole
+        reported as a pass."""
+        saved = os.environ.get("CASA_ROOT")
+        self.addCleanup(lambda: os.environ.__setitem__("CASA_ROOT", saved)
+                        if saved is not None
+                        else os.environ.pop("CASA_ROOT", None))
+        os.environ.pop("CASA_ROOT", None)
+        self.assertIsNone(_casa_root())
+        os.environ["CASA_ROOT"] = str(ROOT)          # a directory, not casa
+        with self.assertRaises(AssertionError):
+            _casa_root()
+
     def test_every_constant_copied_from_casa_is_registered(self):
         """The arm that runs everywhere, casa present or not.
 
@@ -518,9 +543,10 @@ class TestCasaConstantCopies(unittest.TestCase):
     def test_the_local_copy_of_casas_rule_still_matches_casas_own(self):
         """Re-derive every registered constant from casa's own source.
 
-        Runs wherever `$CASA_ROOT` points at a casa checkout — the developer
-        machine, which is the only place a casa version bump can be made — and
-        is a no-op, never a skip, where it does not. The 0-skip property is
+        Runs wherever `$CASA_ROOT` points at casa's code root — CI's `casa`
+        job, and the developer machine where a casa version bump is made — and
+        is a no-op, never a skip, where it is unset (`_casa_root` fails a value
+        that is set but wrong). The 0-skip property is
         load-bearing here, and a skip would report a hole as a pass anyway;
         `test_every_constant_copied_from_casa_is_registered` is the arm with
         teeth in the environment casa is absent from.
@@ -760,7 +786,7 @@ class TestBundledPersona(unittest.TestCase):
         casa adds later.
 
         Like the `$CASA_ROOT` arm above, it runs wherever `$CASA_ROOT` points
-        at a casa checkout and is a no-op, never a skip, where it does not.
+        at casa's code root and is a no-op, never a skip, where it is unset.
         With a checkout present, casa's modules must import: they need
         `jsonschema`, `yaml`, `markdown_it` and `rfc8785`, so run the suite
         from an environment that has them (casa's own test venv does). An
