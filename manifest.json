@@ -1,7 +1,7 @@
 {
   "api_version": "casa.specialist-component/v1",
   "component_id": "casa/finance",
-  "version": "0.29.3",
+  "version": "0.30.0",
   "default_persona": {
     "ref": "casa/alex@0.1.0",
     "checksum": "sha256:5a2ea3451564e4cf67afcf59b6730b2c579e2690f3fee54eb2cee21f00632eb4"
@@ -31,5 +31,5 @@
       }
     }
   ],
-  "checksum": "sha256:51574561e60a7db2b58ae91dd1f0fa9758e7bd461dec1e1b473dc7461fd69a2e"
+  "checksum": "sha256:719f892a015a14894911efcb1e55a8e47f83b44f470aafc40241bc9c6b1a9b35"
 }
