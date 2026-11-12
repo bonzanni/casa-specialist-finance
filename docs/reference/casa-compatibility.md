@@ -51,6 +51,12 @@ turn. It is guidance, not a declaration, so the install floor stays v0.360.0: un
 an older casa the turn never comes and the job's result reaches the requester as
 before.
 
+From 0.31.0 the same guidance has Alex file what the browser specialist fetched as
+`portal` and record the vendor as a website-only vendor with its link. Filing as
+`portal` needs the quarterly accounting plugin 0.13.0; an older one refuses the value
+and names the ones it takes. Asking a colleague from his own chat needs casa v0.367.0.
+The install floor stays v0.360.0.
+
 From 0.28.0 both plugins' background
 jobs declare only the fields casa v0.355.0 accepts in a `casa.jobs` entry (`JOB_FIELDS`
 in the table below). casa v0.355.0 runs a background job as one long session and
