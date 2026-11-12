@@ -44,6 +44,13 @@ schema has no `own_chat`, and its persona loader admits no file of that name, so
 will not install finance 0.29.0. This release is not backward compatible with a casa
 older than v0.360.0: upgrade casa first, then finance.
 
+From 0.30.0 the doctrine tells Alex what to do when a job he started for someone
+else ends: check what is still open, ask a colleague once for the whole batch, file
+what comes back, then answer. casa v0.366.0 is the first casa that gives him that
+turn. It is guidance, not a declaration, so the install floor stays v0.360.0: under
+an older casa the turn never comes and the job's result reaches the requester as
+before.
+
 From 0.28.0 both plugins' background
 jobs declare only the fields casa v0.355.0 accepts in a `casa.jobs` entry (`JOB_FIELDS`
 in the table below). casa v0.355.0 runs a background job as one long session and
