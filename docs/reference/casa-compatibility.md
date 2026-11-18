@@ -57,6 +57,12 @@ From 0.31.0 the same guidance has Alex file what the browser specialist fetched 
 and names the ones it takes. Asking a colleague from his own chat needs casa v0.367.0.
 The install floor stays v0.360.0.
 
+From 0.31.1 the classifier skill has Alex show parked rows as a narrow table with
+right-aligned amounts. casa v0.376.0 is the first casa that sends a chat reply as a
+Telegram rich message, where a table renders as a table; under an older casa the same
+text arrives as Markdown pipes. It is formatting, not a declaration, so the install
+floor stays v0.360.0.
+
 From 0.28.0 both plugins' background
 jobs declare only the fields casa v0.355.0 accepts in a `casa.jobs` entry (`JOB_FIELDS`
 in the table below). casa v0.355.0 runs a background job as one long session and

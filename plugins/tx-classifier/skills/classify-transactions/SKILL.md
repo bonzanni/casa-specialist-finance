@@ -267,8 +267,9 @@ never "established one-off". There is no `one-off` tag.
 
 ## Step 2 — ask the operator (conversational turns only)
 
-Present parked rows compactly — date, amount, counterparty, what you
-already tried. Batch them; don't drip one question per message.
+Present parked rows compactly, as a narrow table with the amounts
+right-aligned: date | counterparty | amount | what you already tried. Batch
+them; don't drip one question per message.
 
 The operator answers with a **description, not a tag** ("that's the
 window cleaner, comes monthly"). You derive the chain:
