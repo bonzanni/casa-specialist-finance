@@ -63,6 +63,12 @@ Telegram rich message, where a table renders as a table; under an older casa the
 text arrives as Markdown pipes. It is formatting, not a declaration, so the install
 floor stays v0.360.0.
 
+From 0.31.2 each bank-feed deposit names the tool call it belongs to: the dispatcher
+keeps the id Claude Code sends in the request's `_meta` as `casa_broker.CALL_ID` for
+the duration of the call, and the deposit carries it as `tool_use_id`, so casa can
+tell two open calls apart. A call with no id deposits exactly as before, and a casa
+that does not read the member ignores it, so the install floor stays v0.360.0.
+
 From 0.28.0 both plugins' background
 jobs declare only the fields casa v0.355.0 accepts in a `casa.jobs` entry (`JOB_FIELDS`
 in the table below). casa v0.355.0 runs a background job as one long session and

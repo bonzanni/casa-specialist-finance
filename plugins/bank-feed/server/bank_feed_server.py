@@ -12,12 +12,19 @@ from __future__ import annotations
 import fcntl, importlib.util, json, os, sys, time
 
 import backups
+import casa_broker
 import ebmode
 import opvault
 import store
 
 TOOLS: dict = {}          # name -> {"description": str, "schema": {...}, "fn": callable}
 PROTOCOL_VERSION = "2024-11-05"
+
+#: Where the request's `_meta` carries the id of the tool call, and the longest
+#: id kept. Anything else (no `_meta`, a non-string, an empty or longer string)
+#: leaves the call without one, and its deposits are sent without it.
+CALL_ID_KEY = "claudecode/toolUseId"
+MAX_CALL_ID_CHARS = 128
 
 #: Static literal on purpose: the banner interpolates nothing, so there is
 #: nothing to neutralise.
@@ -126,6 +133,14 @@ def _fenced(name):
     return store.uninstall_fence_at(data) if data else None
 
 
+def _call_id(params):
+    meta = params.get("_meta")
+    call_id = meta.get(CALL_ID_KEY) if isinstance(meta, dict) else None
+    if isinstance(call_id, str) and 0 < len(call_id) <= MAX_CALL_ID_CHARS:
+        return call_id
+    return None
+
+
 def _result(id_, payload):
     return {"jsonrpc": "2.0", "id": id_, "result": payload}
 
@@ -186,6 +201,8 @@ def handle(req: dict) -> dict | None:
         token = backups.open_log()
         lock_fd, busy = _lifecycle_lock(params.get("name"))
         try:
+            # (6) The call's id, kept while it runs so its deposits name it.
+            casa_broker.CALL_ID = _call_id(params)
             try:
                 if busy:
                     out = busy
@@ -210,6 +227,7 @@ def handle(req: dict) -> dict | None:
                 else:
                     out = f"error: {type(exc).__name__}: {exc}"
         finally:
+            casa_broker.CALL_ID = None
             opvault.INHERIT_FDS = ()
             if lock_fd is not None:
                 os.close(lock_fd)
