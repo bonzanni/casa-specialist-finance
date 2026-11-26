@@ -25,6 +25,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]
                        / "plugins/bank-feed/server"))
 
+import bank_feed_server  # noqa: E402
 import casa_broker  # noqa: E402
 
 URL = "https://tpp.enablebanking.com/auth?state=" + "c" * 64
@@ -135,6 +136,38 @@ class DepositTests(unittest.TestCase):
             "client": CLIENT, "slot": "notice", "value": "Rabobank needs you.",
             "key": "daily-sync:0123456789abcdef"})
 
+    def test_a_deposit_carries_the_id(self):
+        # The id of the tool call the deposit belongs to, so casa can tell
+        # two open calls apart. Both helpers send it.
+        broker = self.serve(lambda body: _json({"reference": REFERENCE}))
+        self.addCleanup(setattr, casa_broker, "CALL_ID", None)
+        casa_broker.CALL_ID = "toolu_x"
+        self.deposit()
+        casa_broker.deposit_message("notice", "Rabobank needs you.",
+                                    key="daily-sync:0123456789abcdef")
+        self.assertEqual(len(broker.requests), 2)
+        self.assertEqual(broker.requests[0][2], {
+            "client": CLIENT, "slot": "approval_link", "value": URL,
+            "label": "Approve at Rabobank",
+            "caption": "Rabobank, NL, personal — one-time link",
+            "tool_use_id": "toolu_x"})
+        self.assertEqual(broker.requests[1][2], {
+            "client": CLIENT, "slot": "notice", "value": "Rabobank needs you.",
+            "key": "daily-sync:0123456789abcdef", "tool_use_id": "toolu_x"})
+
+    def test_a_deposit_without_an_id_is_todays_request(self):
+        broker = self.serve(lambda body: _json({"reference": REFERENCE}))
+        self.assertIsNone(casa_broker.CALL_ID)
+        self.deposit()
+        casa_broker.deposit_message("notice", "Rabobank needs you.",
+                                    key="daily-sync:0123456789abcdef")
+        self.assertEqual([body for _m, _p, body in broker.requests], [
+            {"client": CLIENT, "slot": "approval_link", "value": URL,
+             "label": "Approve at Rabobank",
+             "caption": "Rabobank, NL, personal — one-time link"},
+            {"client": CLIENT, "slot": "notice", "value": "Rabobank needs you.",
+             "key": "daily-sync:0123456789abcdef"}])
+
     def test_casas_error_code_is_the_failure_code(self):
         for code in ("bad_link", "bad_caption", "bad_label",
                      "no_call_in_flight", "no_identity", "ambiguous_call",
@@ -219,6 +252,63 @@ class DepositTests(unittest.TestCase):
                 self.sock = os.environ[casa_broker.ENV_SOCKET] = os.path.join(d.name, "s")
                 self.serve(answer)
                 self.assertEqual(self.refused(), "unrecognized_error")
+
+
+class CallIdTests(unittest.TestCase):
+    """The dispatcher keeps the tool call's id, from the request's `_meta`,
+    for the duration of that call only. Through `handle()`, with a stub tool
+    that records what `casa_broker.CALL_ID` is while it runs."""
+
+    def setUp(self):
+        saved = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        os.environ.pop("CLAUDE_PLUGIN_DATA", None)    # no ledger, no lock
+        self.seen = []
+        bank_feed_server.TOOLS["__stub__"] = {
+            "description": "stub", "schema": {"type": "object"},
+            "fn": self.stub}
+        self.addCleanup(bank_feed_server.TOOLS.pop, "__stub__", None)
+        self.addCleanup(setattr, casa_broker, "CALL_ID", None)
+        self.raises = False
+
+    def stub(self, args):
+        self.seen.append(casa_broker.CALL_ID)
+        if self.raises:
+            raise RuntimeError("boom")
+        return "stub-ok"
+
+    def dispatch(self, **extra):
+        params = dict({"name": "__stub__", "arguments": {}}, **extra)
+        return bank_feed_server.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": params})["result"]["content"][0]["text"]
+
+    def test_the_server_keeps_the_calls_id_for_the_call_only(self):
+        meta = {"claudecode/toolUseId": "toolu_x", "progressToken": 3}
+        self.assertEqual(self.dispatch(_meta=meta), "stub-ok")
+        self.assertIsNone(casa_broker.CALL_ID)
+        self.raises = True
+        self.assertEqual(self.dispatch(_meta=meta),
+                         "error: RuntimeError: boom")
+        self.assertIsNone(casa_broker.CALL_ID)
+        self.raises = False
+        self.dispatch()                               # the next call has none
+        self.assertEqual(self.seen, ["toolu_x", "toolu_x", None])
+
+    def test_a_bad_id_is_ignored(self):
+        for extra in ({"_meta": {"claudecode/toolUseId": 7}},
+                      {"_meta": {"claudecode/toolUseId": ""}},
+                      {"_meta": {"claudecode/toolUseId": "t" * 200}},
+                      {"_meta": {"claudecode/toolUseId": None}},
+                      {"_meta": {}}, {"_meta": None}, {"_meta": ["x"]}, {}):
+            with self.subTest(extra=repr(extra)[:60]):
+                self.seen.clear()
+                self.assertEqual(self.dispatch(**extra), "stub-ok")
+                self.assertEqual(self.seen, [None])
+        # The bound itself: 128 characters is kept.
+        self.seen.clear()
+        self.dispatch(_meta={"claudecode/toolUseId": "t" * 128})
+        self.assertEqual(self.seen, ["t" * 128])
 
 
 # casa's acceptance rules for a delivered link's label and caption

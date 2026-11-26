@@ -15,8 +15,12 @@ context, and never the chat or topic the model happens to be in.
 Protocol (casa `result_broker.py`, v0.318.0):
 
     POST /internal/broker/deposit
-         {"client", "slot", "value", "caption"?, "label"?}
+         {"client", "slot", "value", "caption"?, "label"?, "tool_use_id"?}
       -> {"reference": "casa-cap-<32 hex>"} | {"error": "<code>"}
+
+`tool_use_id` names the tool call the deposit belongs to (`CALL_ID`), so casa
+can tell two calls of the same client apart. It is sent only when the call
+carried one; a casa that does not read it ignores it.
 
 casa refuses a label longer than `MAX_LABEL_CHARS`, a caption longer than
 `MAX_CAPTION_CHARS`, and either one if it is not a single printable line or
@@ -56,6 +60,11 @@ MAX_RESPONSE_BYTES = 64 * 1024
 _CODE_RE = re.compile(r"^[a-z][a-z_]{0,39}$")
 _WWW_DOT_RE = re.compile(r"(?i)(www)\.")
 _ELLIPSIS = "…"
+
+#: The id of the tool call now running, as the request's `_meta` gave it, or
+#: None. `bank_feed_server` sets it for the duration of each call (the server
+#: handles one call at a time) and every deposit sends it as `tool_use_id`.
+CALL_ID: str | None = None
 
 
 class DepositFailed(Exception):
@@ -114,6 +123,8 @@ def _deposit(fields: dict) -> str:
     if not path or not client:
         raise DepositFailed("broker_env_missing")
     body = dict(fields, client=client)
+    if CALL_ID:
+        body["tool_use_id"] = CALL_ID
     conn = _UnixHTTP(path)
     try:
         conn.request("POST", DEPOSIT_ROUTE,
